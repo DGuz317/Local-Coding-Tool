@@ -3,7 +3,7 @@
 ## Skills
 - Shared Agent Skills live in `.agents/skills`; do not copy their full content here.
 - OpenCode: load the relevant skill. Codex or other agents: read `.agents/skills/<skill>/SKILL.md` and referenced files.
-- Use `tdd` for red-green-refactor, `diagnose` for bugs/failing tests/perf regressions, `zoom-out` for unfamiliar code, `improve-codebase-architecture` for deeper refactors, `prototype` for throwaway UI/state exploration, and `to-prd`/`to-issues`/`triage` for product or issue workflows.
+- Use `grill-me` when requirements are unclear, `to-prd` to turn agreed requirements into a PRD, `to-issues` to break plans into vertical slices, `tdd` for red-green-refactor implementation, `diagnose` for bugs/failing tests/perf regressions, `zoom-out` for unfamiliar code, `improve-codebase-architecture` for deeper refactors, `prototype` for throwaway UI/state exploration, and `triage` for issue workflows.
 
 ## Repo Shape
 - This is currently a single-file Python project: `main.py` is the runtime entrypoint.
