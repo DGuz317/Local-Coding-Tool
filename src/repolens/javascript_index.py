@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -10,11 +11,22 @@ from pathlib import Path, PurePosixPath
 
 from repolens.scanner import ScannedFile
 
-JAVASCRIPT_EXTRACTOR_VERSION = "issue-7b-javascript-symbols-exports-v1"
+JAVASCRIPT_EXTRACTOR_VERSION = "issue-7c-typescript-alias-resolution-v1"
 
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
 )
+JAVASCRIPT_RESOLUTION_SUFFIXES = (
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mts",
+    ".cts",
+    ".mjs",
+    ".cjs",
+)
+TYPESCRIPT_CONFIG_NAMES = frozenset({"jsconfig.json", "tsconfig.json"})
 
 NODE_BUILTIN_MODULES = frozenset(
     {
@@ -142,6 +154,8 @@ class JavaScriptImportFact:
     specifier: str
     root_name: str | None
     classification: str
+    resolved_path: str | None
+    resolution_status: str
     line: int
 
 
@@ -216,6 +230,8 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
     javascript_files = tuple(
         file for file in sorted(files, key=lambda item: item.path) if _is_javascript(file)
     )
+    javascript_paths = frozenset(file.path for file in javascript_files)
+    alias_rules = _load_typescript_alias_rules(root, files)
     modules: list[JavaScriptModuleFact] = []
     imports: list[JavaScriptImportFact] = []
     symbols: list[JavaScriptSymbolFact] = []
@@ -247,7 +263,13 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
             )
             continue
 
-        file_facts = _extract_file_facts(path, module_node_id, source)
+        file_facts = _extract_file_facts(
+            path,
+            module_node_id,
+            source,
+            alias_rules,
+            javascript_paths,
+        )
         imports.extend(file_facts.imports)
         symbols.extend(file_facts.symbols)
         exports.extend(file_facts.exports)
@@ -304,6 +326,21 @@ def _module_name(path: str) -> str:
 
 
 @dataclass(frozen=True)
+class _TypeScriptAliasRule:
+    alias_prefix: str
+    target_prefixes: tuple[str, ...]
+    status: str
+
+
+@dataclass(frozen=True)
+class _ImportResolution:
+    root_name: str | None
+    classification: str
+    resolved_path: str | None
+    resolution_status: str
+
+
+@dataclass(frozen=True)
 class _JavaScriptFileFacts:
     imports: tuple[JavaScriptImportFact, ...]
     symbols: tuple[JavaScriptSymbolFact, ...]
@@ -311,7 +348,13 @@ class _JavaScriptFileFacts:
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
 
 
-def _extract_file_facts(path: str, module_node_id: str, source: str) -> _JavaScriptFileFacts:
+def _extract_file_facts(
+    path: str,
+    module_node_id: str,
+    source: str,
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> _JavaScriptFileFacts:
     imports: list[JavaScriptImportFact] = []
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
@@ -324,7 +367,13 @@ def _extract_file_facts(path: str, module_node_id: str, source: str) -> _JavaScr
 
     for line_number, line in enumerate(_strip_comments_preserving_strings(source), start=1):
         static_import = _static_import_fact(
-            path, module_node_id, line, line_number, import_id_counts
+            path,
+            module_node_id,
+            line,
+            line_number,
+            import_id_counts,
+            alias_rules,
+            javascript_paths,
         )
         if static_import is not None:
             imports.append(static_import)
@@ -338,6 +387,8 @@ def _extract_file_facts(path: str, module_node_id: str, source: str) -> _JavaScr
                     specifier,
                     line_number,
                     import_id_counts,
+                    alias_rules,
+                    javascript_paths,
                 )
             )
         for specifier in _literal_call_specifiers(line, "import"):
@@ -349,6 +400,8 @@ def _extract_file_facts(path: str, module_node_id: str, source: str) -> _JavaScr
                     specifier,
                     line_number,
                     import_id_counts,
+                    alias_rules,
+                    javascript_paths,
                 )
             )
 
@@ -397,6 +450,8 @@ def _static_import_fact(
     line: str,
     line_number: int,
     id_counts: Counter[str],
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
 ) -> JavaScriptImportFact | None:
     match = STATIC_IMPORT_FROM_PATTERN.match(line)
     if match is not None:
@@ -407,6 +462,8 @@ def _static_import_fact(
             match.group("specifier"),
             line_number,
             id_counts,
+            alias_rules,
+            javascript_paths,
         )
 
     match = SIDE_EFFECT_IMPORT_PATTERN.match(line)
@@ -418,6 +475,8 @@ def _static_import_fact(
             match.group("specifier"),
             line_number,
             id_counts,
+            alias_rules,
+            javascript_paths,
         )
     return None
 
@@ -681,8 +740,10 @@ def _import_fact(
     specifier: str,
     line: int,
     id_counts: Counter[str],
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
 ) -> JavaScriptImportFact:
-    root_name, classification = _classify_specifier(specifier)
+    resolution = _resolve_import_specifier(specifier, alias_rules, javascript_paths)
     key = "|".join((path, kind, specifier, str(line)))
     id_counts[key] += 1
     suffix = "" if id_counts[key] == 1 else f"#{id_counts[key]}"
@@ -692,21 +753,276 @@ def _import_fact(
         module_node_id=module_node_id,
         kind=kind,
         specifier=specifier,
-        root_name=root_name,
-        classification=classification,
+        root_name=resolution.root_name,
+        classification=resolution.classification,
+        resolved_path=resolution.resolved_path,
+        resolution_status=resolution.resolution_status,
         line=line,
     )
 
 
-def _classify_specifier(specifier: str) -> tuple[str | None, str]:
+def _resolve_import_specifier(
+    specifier: str,
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> _ImportResolution:
     if specifier.startswith((".", "/")):
-        return None, "local_unresolved"
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_local")
+
+    alias_resolution = _resolve_alias_specifier(specifier, alias_rules, javascript_paths)
+    if alias_resolution is not None:
+        return alias_resolution
 
     node_builtin = _node_builtin_name(specifier)
     if node_builtin is not None:
-        return node_builtin, "node_builtin"
+        return _ImportResolution(node_builtin, "node_builtin", None, "external")
 
-    return _package_root(specifier), "third_party"
+    return _ImportResolution(_package_root(specifier), "third_party", None, "external")
+
+
+def _resolve_alias_specifier(
+    specifier: str,
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> _ImportResolution | None:
+    matches = tuple(rule for rule in alias_rules if specifier.startswith(rule.alias_prefix))
+    if not matches:
+        return None
+
+    if any(rule.status == "complex" for rule in matches):
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_complex_alias")
+
+    candidate_paths: set[str] = set()
+    for rule in matches:
+        suffix = specifier.removeprefix(rule.alias_prefix)
+        for target_prefix in rule.target_prefixes:
+            candidate_paths.update(
+                _module_path_candidates(_join_repo_path(target_prefix, suffix), javascript_paths)
+            )
+
+    if len(candidate_paths) == 1:
+        return _ImportResolution(
+            None,
+            "local_resolved",
+            next(iter(candidate_paths)),
+            "resolved_alias",
+        )
+    if len(candidate_paths) > 1:
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_alias")
+    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_alias")
+
+
+def _load_typescript_alias_rules(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+) -> tuple[_TypeScriptAliasRule, ...]:
+    rules: list[_TypeScriptAliasRule] = []
+    config_files = tuple(
+        file
+        for file in sorted(files, key=lambda item: item.path)
+        if PurePosixPath(file.path).name in TYPESCRIPT_CONFIG_NAMES
+    )
+    for config_file in config_files:
+        config = _read_json_config(root, config_file.path)
+        if not isinstance(config, dict):
+            continue
+        compiler_options = config.get("compilerOptions")
+        if not isinstance(compiler_options, dict):
+            continue
+        paths = compiler_options.get("paths")
+        if not isinstance(paths, dict):
+            continue
+
+        config_dir = PurePosixPath(config_file.path).parent.as_posix()
+        if config_dir == ".":
+            config_dir = ""
+        base_url = compiler_options.get("baseUrl", ".")
+        if not isinstance(base_url, str):
+            base_url = "."
+
+        for alias_pattern, target_patterns in sorted(paths.items()):
+            if not isinstance(alias_pattern, str):
+                continue
+            alias_prefix = _simple_alias_prefix(alias_pattern)
+            if alias_prefix is None:
+                continue
+
+            target_prefixes = _target_prefixes(config_dir, base_url, target_patterns)
+            rules.append(
+                _TypeScriptAliasRule(
+                    alias_prefix=alias_prefix,
+                    target_prefixes=target_prefixes,
+                    status="deterministic" if len(target_prefixes) == 1 else "complex",
+                )
+            )
+    return tuple(sorted(rules, key=lambda rule: (rule.alias_prefix, rule.target_prefixes)))
+
+
+def _read_json_config(root: Path, path: str) -> object | None:
+    try:
+        text = _read_scanner_approved_text(root, path)
+    except OSError:
+        return None
+    try:
+        return json.loads(_strip_json_trailing_commas(_strip_json_comments(text)))
+    except json.JSONDecodeError:
+        return None
+
+
+def _strip_json_comments(source: str) -> str:
+    characters: list[str] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(source):
+        character = source[index]
+        next_character = source[index + 1] if index + 1 < len(source) else ""
+        if quote is not None:
+            characters.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            index += 1
+            continue
+
+        if character in {'"', "'"}:
+            quote = character
+            characters.append(character)
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            while index < len(source) and source[index] not in {"\n", "\r"}:
+                characters.append(" ")
+                index += 1
+            continue
+        if character == "/" and next_character == "*":
+            characters.extend("  ")
+            index += 2
+            while index < len(source):
+                if source[index] == "*" and index + 1 < len(source) and source[index + 1] == "/":
+                    characters.extend("  ")
+                    index += 2
+                    break
+                characters.append("\n" if source[index] in {"\n", "\r"} else " ")
+                index += 1
+            continue
+
+        characters.append(character)
+        index += 1
+    return "".join(characters)
+
+
+def _strip_json_trailing_commas(source: str) -> str:
+    characters: list[str] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if quote is not None:
+            characters.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            index += 1
+            continue
+
+        if character in {'"', "'"}:
+            quote = character
+            characters.append(character)
+            index += 1
+            continue
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(source) and source[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(source) and source[lookahead] in {"}", "]"}:
+                characters.append(" ")
+                index += 1
+                continue
+
+        characters.append(character)
+        index += 1
+    return "".join(characters)
+
+
+def _simple_alias_prefix(pattern: str) -> str | None:
+    normalized = pattern.replace("\\", "/")
+    if normalized.count("*") != 1 or not normalized.endswith("*"):
+        return None
+    prefix = normalized[:-1]
+    return prefix or None
+
+
+def _target_prefixes(config_dir: str, base_url: str, target_patterns: object) -> tuple[str, ...]:
+    if not isinstance(target_patterns, list) or len(target_patterns) != 1:
+        return ()
+    target_pattern = target_patterns[0]
+    if not isinstance(target_pattern, str):
+        return ()
+    target_prefix = _simple_target_prefix(config_dir, base_url, target_pattern)
+    return () if target_prefix is None else (target_prefix,)
+
+
+def _simple_target_prefix(config_dir: str, base_url: str, pattern: str) -> str | None:
+    normalized = pattern.replace("\\", "/")
+    if normalized.count("*") != 1 or not normalized.endswith("*"):
+        return None
+    return _normalize_repo_path(config_dir, base_url, normalized[:-1])
+
+
+def _normalize_repo_path(*parts: str) -> str | None:
+    normalized_parts: list[str] = []
+    for raw_part in parts:
+        if not raw_part or raw_part == ".":
+            continue
+        posix_part = raw_part.replace("\\", "/")
+        path = PurePosixPath(posix_part)
+        if path.is_absolute():
+            return None
+        for part in path.parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                if not normalized_parts:
+                    return None
+                normalized_parts.pop()
+                continue
+            normalized_parts.append(part)
+    return "/".join(normalized_parts)
+
+
+def _join_repo_path(prefix: str, suffix: str) -> str:
+    normalized_suffix = suffix.strip("/")
+    if not prefix:
+        return normalized_suffix
+    if not normalized_suffix:
+        return prefix
+    return f"{prefix}/{normalized_suffix}"
+
+
+def _module_path_candidates(base_path: str, javascript_paths: frozenset[str]) -> set[str]:
+    candidates: set[str] = set()
+    suffix = PurePosixPath(base_path).suffix.lower()
+    if suffix in JAVASCRIPT_SOURCE_SUFFIXES:
+        if base_path in javascript_paths:
+            candidates.add(base_path)
+        return candidates
+
+    for extension in JAVASCRIPT_RESOLUTION_SUFFIXES:
+        file_candidate = f"{base_path}{extension}"
+        if file_candidate in javascript_paths:
+            candidates.add(file_candidate)
+        index_candidate = f"{base_path}/index{extension}"
+        if index_candidate in javascript_paths:
+            candidates.add(index_candidate)
+    return candidates
 
 
 def _node_builtin_name(specifier: str) -> str | None:

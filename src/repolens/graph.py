@@ -16,6 +16,7 @@ from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     JavaScriptIndex,
     extract_javascript_index,
+    javascript_module_node_id,
     javascript_package_node_id,
 )
 from repolens.python_index import (
@@ -27,7 +28,7 @@ from repolens.python_index import (
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 4
+GRAPH_SCHEMA_VERSION = 5
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}"
 
@@ -328,6 +329,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             specifier TEXT NOT NULL,
             root_name TEXT,
             classification TEXT NOT NULL,
+            resolved_path TEXT,
+            resolution_status TEXT NOT NULL,
             line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
@@ -944,9 +947,11 @@ def _insert_javascript_tables(
             specifier,
             root_name,
             classification,
+            resolved_path,
+            resolution_status,
             line
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -957,6 +962,8 @@ def _insert_javascript_tables(
                 import_fact.specifier,
                 import_fact.root_name,
                 import_fact.classification,
+                import_fact.resolved_path,
+                import_fact.resolution_status,
                 import_fact.line,
             )
             for import_fact in javascript_index.imports
@@ -1114,6 +1121,18 @@ def _insert_edges(
     javascript_import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
     for javascript_import in javascript_index.imports:
+        if javascript_import.resolved_path is not None:
+            target_id = javascript_module_node_id(javascript_import.resolved_path)
+            key = (
+                javascript_import.module_node_id,
+                target_id,
+                javascript_import.resolved_path,
+                javascript_import.classification,
+            )
+            javascript_import_edges.setdefault(key, []).append(javascript_import.line)
+            javascript_import_edge_ids.setdefault(key, []).append(javascript_import.id)
+            javascript_import_specifiers.setdefault(key, set()).add(javascript_import.specifier)
+            continue
         if javascript_import.root_name is None:
             continue
         package_id = javascript_package_node_id(
@@ -1129,24 +1148,28 @@ def _insert_edges(
         javascript_import_edge_ids.setdefault(key, []).append(javascript_import.id)
         javascript_import_specifiers.setdefault(key, set()).add(javascript_import.specifier)
 
-    for (source_id, target_id, root_name, classification), lines in sorted(
+    for (source_id, target_id, target_name, classification), lines in sorted(
         javascript_import_edges.items()
     ):
+        metadata = {
+            "classification": classification,
+            "import_ids": sorted(
+                javascript_import_edge_ids[(source_id, target_id, target_name, classification)]
+            ),
+            "lines": sorted(set(lines)),
+            "specifiers": sorted(
+                javascript_import_specifiers[(source_id, target_id, target_name, classification)]
+            ),
+        }
+        if classification == "local_resolved":
+            metadata["resolved_path"] = target_name
+        else:
+            metadata["root_name"] = target_name
         add_edge(
             source_id,
             target_id,
             "IMPORTS",
-            {
-                "classification": classification,
-                "import_ids": sorted(
-                    javascript_import_edge_ids[(source_id, target_id, root_name, classification)]
-                ),
-                "lines": sorted(set(lines)),
-                "root_name": root_name,
-                "specifiers": sorted(
-                    javascript_import_specifiers[(source_id, target_id, root_name, classification)]
-                ),
-            },
+            metadata,
         )
 
     call_edges: dict[tuple[str, str, str], list[int]] = {}
@@ -1356,6 +1379,8 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                     specifier,
                     root_name,
                     classification,
+                    resolved_path,
+                    resolution_status,
                     line
                 FROM javascript_imports
                 ORDER BY path, line, id
@@ -1617,6 +1642,8 @@ def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "kind": import_fact["kind"],
                 "line": import_fact["line"],
                 "path": import_fact["path"],
+                "resolved_path": import_fact["resolved_path"],
+                "resolution_status": import_fact["resolution_status"],
                 "root_name": import_fact["root_name"],
                 "specifier": import_fact["specifier"],
             }
@@ -1840,8 +1867,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "",
             "## JavaScript Imports",
             "",
-            "| Path | Import | Root | Classification | Line |",
-            "| --- | --- | --- | --- | ---: |",
+            "| Path | Import | Root | Classification | Resolved path | Resolution | Line |",
+            "| --- | --- | --- | --- | --- | --- | ---: |",
         ]
     )
     if javascript["imports"]:
@@ -1851,11 +1878,13 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             f"`{_javascript_import_display(import_fact)}` | "
             f"`{import_fact['root_name'] or ''}` | "
             f"{import_fact['classification']} | "
+            f"`{import_fact['resolved_path'] or ''}` | "
+            f"{import_fact['resolution_status']} | "
             f"{import_fact['line']} |"
             for import_fact in javascript["imports"]
         )
     else:
-        lines.append("| Not detected |  |  |  | 0 |")
+        lines.append("| Not detected |  |  |  |  |  | 0 |")
 
     lines.extend(
         [
@@ -2174,8 +2203,8 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
             "",
             "## JavaScript Imports",
             "",
-            "| Fact ID | Path | Kind | Specifier | Root | Classification | Line |",
-            "| --- | --- | --- | --- | --- | --- | ---: |",
+            "| Fact ID | Path | Kind | Specifier | Root | Classification | Resolved path | Resolution | Line |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | ---: |",
         ]
     )
     if javascript["imports"]:
@@ -2187,11 +2216,13 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
             f"`{import_fact['specifier']}` | "
             f"`{import_fact['root_name'] or ''}` | "
             f"{import_fact['classification']} | "
+            f"`{import_fact['resolved_path'] or ''}` | "
+            f"{import_fact['resolution_status']} | "
             f"{import_fact['line']} |"
             for import_fact in javascript["imports"]
         )
     else:
-        lines.append("| Not detected |  |  |  |  |  | 0 |")
+        lines.append("| Not detected |  |  |  |  |  |  |  | 0 |")
 
     lines.extend(
         [
