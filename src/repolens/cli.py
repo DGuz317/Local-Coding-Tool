@@ -9,18 +9,10 @@ from typing import Annotated
 
 import typer
 
+from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository
 
 app = typer.Typer(help="RepoLens MCP repository intelligence CLI.")
-
-REQUIRED_ARTIFACTS = (
-    ".repolens/graph.sqlite",
-    ".repolens/graph.json",
-    ".repolens/graph-lite.json",
-    ".repolens/graph-report.md",
-    ".repolens/graph-index.md",
-    ".repolens/graph-status.json",
-)
 
 
 @app.callback()
@@ -93,6 +85,13 @@ def index(
     typer.echo(f"Skipped paths: {counts['skipped_paths']}")
     typer.echo(f"Artifact directory: {data['artifact_dir']}")
     typer.echo(f"Scan summary: {data['scan_artifact']}")
+    typer.echo(f"Graph store: {data['graph_store']}")
+    typer.echo("Graph exports:")
+    graph_exports = data["graph_exports"]
+    if not isinstance(graph_exports, list):
+        raise typer.Exit(1)
+    for graph_export in graph_exports:
+        typer.echo(f"- {graph_export}")
 
 
 @app.command()
@@ -114,13 +113,28 @@ def status(
     ] = False,
 ) -> None:
     """Report whether RepoLens graph artifacts are available."""
-    missing_artifacts = [
-        artifact for artifact in REQUIRED_ARTIFACTS if not (repo_path / artifact).exists()
-    ]
+    graph_status = inspect_graph_artifacts(repo_path)
+    missing_artifacts = list(graph_status.missing_artifacts)
     recommended_action = f"repolens index {shlex.quote(str(repo_path))}"
 
-    if missing_artifacts:
-        data: dict[str, object] = {
+    data: dict[str, object] = {
+        "artifact_dir": ".repolens",
+        "detected_schema_version": graph_status.detected_schema_version,
+        "fresh": graph_status.fresh,
+        "missing_artifacts": missing_artifacts,
+        "reason": graph_status.reason,
+        "recommended_action": recommended_action
+        if graph_status.status in {"stale", "rebuild_required"}
+        else None,
+        "repo_path": str(repo_path),
+        "status": graph_status.status,
+        "supported_schema_version": graph_status.supported_schema_version,
+    }
+    warnings = list(graph_status.warnings)
+
+    # Keep the missing-artifacts response compact and compatible with Issue #3 output.
+    if graph_status.reason == "missing_graph_artifacts":
+        data = {
             "artifact_dir": ".repolens",
             "fresh": False,
             "missing_artifacts": missing_artifacts,
@@ -129,18 +143,6 @@ def status(
             "repo_path": str(repo_path),
             "status": "stale",
         }
-        warnings = ["Graph artifacts are missing."]
-    else:
-        data = {
-            "artifact_dir": ".repolens",
-            "fresh": None,
-            "missing_artifacts": [],
-            "reason": "graph_artifacts_present",
-            "recommended_action": None,
-            "repo_path": str(repo_path),
-            "status": "unknown",
-        }
-        warnings = ["Graph artifacts exist, but freshness checks are not implemented yet."]
 
     if json_output:
         typer.echo(
@@ -164,5 +166,12 @@ def status(
         for artifact in missing_artifacts:
             typer.echo(f"- {artifact}")
         typer.echo(f"Recommended action: {recommended_action}")
+    elif graph_status.status == "rebuild_required":
+        if graph_status.detected_schema_version is not None:
+            typer.echo(f"Detected schema version: {graph_status.detected_schema_version}")
+        typer.echo(f"Supported schema version: {graph_status.supported_schema_version}")
+        typer.echo(f"Recommended action: {recommended_action}")
     else:
-        typer.echo("Graph artifacts are present, but freshness checks are not implemented yet.")
+        typer.echo(
+            "Graph artifacts are present, but live freshness checks are not implemented yet."
+        )
