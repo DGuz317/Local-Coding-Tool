@@ -12,6 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.javascript_index import (
+    JAVASCRIPT_EXTRACTOR_VERSION,
+    JavaScriptIndex,
+    extract_javascript_index,
+    javascript_package_node_id,
+)
 from repolens.python_index import (
     PYTHON_EXTRACTOR_VERSION,
     PythonIndex,
@@ -21,9 +27,9 @@ from repolens.python_index import (
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 2
+GRAPH_SCHEMA_VERSION = 3
 GRAPH_ARTIFACT_VERSION = 1
-GRAPH_EXPORTER_VERSION = PYTHON_EXTRACTOR_VERSION
+GRAPH_EXPORTER_VERSION = f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}"
 
 GRAPH_STORE_FILENAME = "graph.sqlite"
 GRAPH_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{GRAPH_STORE_FILENAME}"
@@ -294,6 +300,31 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             confidence TEXT NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE javascript_modules (
+            path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+            node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+            module_name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            parser_status TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_imports (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            specifier TEXT NOT NULL,
+            root_name TEXT,
+            classification TEXT NOT NULL,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_packages (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            classification TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE runs (
             id INTEGER PRIMARY KEY,
             indexed_at_utc TEXT NOT NULL,
@@ -322,7 +353,11 @@ def _populate_store(
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
     python_index = extract_python_index(root, files)
-    python_parser_status = python_index.parser_status_by_path
+    javascript_index = extract_javascript_index(root, files)
+    parser_status_by_path = {
+        **python_index.parser_status_by_path,
+        **javascript_index.parser_status_by_path,
+    }
 
     connection.executemany(
         "INSERT INTO metadata(key, value) VALUES (?, ?)",
@@ -353,7 +388,7 @@ def _populate_store(
                 _file_node_id(scanned_file.path),
                 _file_directory(scanned_file.path),
                 scanned_file.size_bytes,
-                python_parser_status.get(scanned_file.path, "not_parsed"),
+                parser_status_by_path.get(scanned_file.path, "not_parsed"),
             )
             for scanned_file in files
         ),
@@ -363,9 +398,10 @@ def _populate_store(
         ((skipped.path, skipped.reason) for skipped in skipped_paths),
     )
 
-    _insert_nodes(connection, root, directories, files, python_index)
+    _insert_nodes(connection, root, directories, files, python_index, javascript_index)
     _insert_python_tables(connection, python_index)
-    _insert_edges(connection, directories, files, python_index)
+    _insert_javascript_tables(connection, javascript_index)
+    _insert_edges(connection, directories, files, python_index, javascript_index)
     connection.execute(
         """
         INSERT INTO runs(
@@ -438,8 +474,12 @@ def _insert_nodes(
     directories: tuple[_DirectoryFact, ...],
     files: tuple[Any, ...],
     python_index: PythonIndex,
+    javascript_index: JavaScriptIndex,
 ) -> None:
-    python_parser_status = python_index.parser_status_by_path
+    parser_status_by_path = {
+        **python_index.parser_status_by_path,
+        **javascript_index.parser_status_by_path,
+    }
     connection.execute(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (REPOSITORY_ID, "Repository", ".", root.name, _metadata_json({"analysis_root": "."})),
@@ -468,7 +508,7 @@ def _insert_nodes(
                 _metadata_json(
                     {
                         "directory_path": _file_directory(scanned_file.path),
-                        "parser_status": python_parser_status.get(scanned_file.path, "not_parsed"),
+                        "parser_status": parser_status_by_path.get(scanned_file.path, "not_parsed"),
                         "size_bytes": scanned_file.size_bytes,
                     }
                 ),
@@ -500,6 +540,25 @@ def _insert_nodes(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (
             (
+                module.node_id,
+                "JavaScriptModule",
+                module.path,
+                module.module_name,
+                _metadata_json(
+                    {
+                        "extension": module.extension,
+                        "module_name": module.module_name,
+                        "parser_status": module.parser_status,
+                    }
+                ),
+            )
+            for module in javascript_index.modules
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
                 package.id,
                 "PythonPackage",
                 None,
@@ -512,6 +571,19 @@ def _insert_nodes(
                 ),
             )
             for package in python_index.packages
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                package.id,
+                "JavaScriptPackage",
+                None,
+                package.name,
+                _metadata_json({"classification": package.classification}),
+            )
+            for package in javascript_index.packages
         ),
     )
     connection.executemany(
@@ -757,11 +829,72 @@ def _insert_python_tables(connection: sqlite3.Connection, python_index: PythonIn
     )
 
 
+def _insert_javascript_tables(
+    connection: sqlite3.Connection,
+    javascript_index: JavaScriptIndex,
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO javascript_modules(path, node_id, module_name, extension, parser_status)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                module.path,
+                module.node_id,
+                module.module_name,
+                module.extension,
+                module.parser_status,
+            )
+            for module in javascript_index.modules
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_imports(
+            id,
+            path,
+            module_node_id,
+            kind,
+            specifier,
+            root_name,
+            classification,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                import_fact.id,
+                import_fact.path,
+                import_fact.module_node_id,
+                import_fact.kind,
+                import_fact.specifier,
+                import_fact.root_name,
+                import_fact.classification,
+                import_fact.line,
+            )
+            for import_fact in javascript_index.imports
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_packages(id, name, classification)
+        VALUES (?, ?, ?)
+        """,
+        (
+            (package.id, package.name, package.classification)
+            for package in javascript_index.packages
+        ),
+    )
+
+
 def _insert_edges(
     connection: sqlite3.Connection,
     directories: tuple[_DirectoryFact, ...],
     files: tuple[Any, ...],
     python_index: PythonIndex,
+    javascript_index: JavaScriptIndex,
 ) -> None:
     edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
 
@@ -783,8 +916,10 @@ def _insert_edges(
             _file_node_id(scanned_file.path),
             "CONTAINS",
         )
-    for module in python_index.modules:
-        add_edge(_file_node_id(module.path), module.node_id, "CONTAINS")
+    for python_module in python_index.modules:
+        add_edge(_file_node_id(python_module.path), python_module.node_id, "CONTAINS")
+    for javascript_module in javascript_index.modules:
+        add_edge(_file_node_id(javascript_module.path), javascript_module.node_id, "CONTAINS")
     for symbol in python_index.symbols:
         add_edge(symbol.parent_id or symbol.module_node_id, symbol.id, "CONTAINS")
     for comment in python_index.tagged_comments:
@@ -804,18 +939,18 @@ def _insert_edges(
 
     import_edges: dict[tuple[str, str, str, str], list[int]] = {}
     import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
-    for import_fact in python_index.imports:
-        if not import_fact.root_name:
+    for python_import in python_index.imports:
+        if not python_import.root_name:
             continue
-        package_id = python_package_node_id(import_fact.root_name, import_fact.classification)
+        package_id = python_package_node_id(python_import.root_name, python_import.classification)
         key = (
-            import_fact.module_node_id,
+            python_import.module_node_id,
             package_id,
-            import_fact.root_name,
-            import_fact.classification,
+            python_import.root_name,
+            python_import.classification,
         )
-        import_edges.setdefault(key, []).append(import_fact.line)
-        import_edge_ids.setdefault(key, []).append(import_fact.id)
+        import_edges.setdefault(key, []).append(python_import.line)
+        import_edge_ids.setdefault(key, []).append(python_import.id)
 
     for (source_id, target_id, root_name, classification), lines in sorted(import_edges.items()):
         add_edge(
@@ -829,6 +964,45 @@ def _insert_edges(
                 ),
                 "lines": sorted(set(lines)),
                 "root_name": root_name,
+            },
+        )
+
+    javascript_import_edges: dict[tuple[str, str, str, str], list[int]] = {}
+    javascript_import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
+    javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
+    for javascript_import in javascript_index.imports:
+        if javascript_import.root_name is None:
+            continue
+        package_id = javascript_package_node_id(
+            javascript_import.root_name, javascript_import.classification
+        )
+        key = (
+            javascript_import.module_node_id,
+            package_id,
+            javascript_import.root_name,
+            javascript_import.classification,
+        )
+        javascript_import_edges.setdefault(key, []).append(javascript_import.line)
+        javascript_import_edge_ids.setdefault(key, []).append(javascript_import.id)
+        javascript_import_specifiers.setdefault(key, set()).add(javascript_import.specifier)
+
+    for (source_id, target_id, root_name, classification), lines in sorted(
+        javascript_import_edges.items()
+    ):
+        add_edge(
+            source_id,
+            target_id,
+            "IMPORTS",
+            {
+                "classification": classification,
+                "import_ids": sorted(
+                    javascript_import_edge_ids[(source_id, target_id, root_name, classification)]
+                ),
+                "lines": sorted(set(lines)),
+                "root_name": root_name,
+                "specifiers": sorted(
+                    javascript_import_specifiers[(source_id, target_id, root_name, classification)]
+                ),
             },
         )
 
@@ -1001,6 +1175,41 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        javascript_modules = _rows(
+            connection.execute(
+                """
+                SELECT path, node_id, module_name, extension, parser_status
+                FROM javascript_modules
+                ORDER BY path
+                """
+            )
+        )
+        javascript_imports = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    path,
+                    module_node_id,
+                    kind,
+                    specifier,
+                    root_name,
+                    classification,
+                    line
+                FROM javascript_imports
+                ORDER BY path, line, id
+                """
+            )
+        )
+        javascript_packages = _rows(
+            connection.execute(
+                """
+                SELECT id, name, classification
+                FROM javascript_packages
+                ORDER BY classification, name
+                """
+            )
+        )
         run = _single_row(
             connection.execute(
                 """
@@ -1026,6 +1235,9 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
+        "javascript_imports": len(javascript_imports),
+        "javascript_modules": len(javascript_modules),
+        "javascript_packages": len(javascript_packages),
         "nodes": len(nodes),
         "python_calls": len(python_calls),
         "python_imports": len(python_imports),
@@ -1044,6 +1256,11 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "directories": directories,
         "edges": _decode_metadata_rows(edges),
         "files": files,
+        "javascript": {
+            "imports": javascript_imports,
+            "modules": javascript_modules,
+            "packages": javascript_packages,
+        },
         "limits": {"max_file_size_bytes": run["max_file_size_bytes"]},
         "metadata": metadata,
         "nodes": _decode_metadata_rows(nodes),
@@ -1072,6 +1289,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "directories": snapshot["directories"],
         "edges": snapshot["edges"],
         "files": snapshot["files"],
+        "javascript": snapshot["javascript"],
         "limits": snapshot["limits"],
         "python": snapshot["python"],
         "repository": snapshot["repository"],
@@ -1096,6 +1314,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             for file in snapshot["files"]
         ],
         "freshness": _freshness_payload(),
+        "javascript": _javascript_lite_payload(snapshot),
         "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
         "run": _run_payload(snapshot),
@@ -1184,6 +1403,33 @@ def _python_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    javascript = snapshot["javascript"]
+    return {
+        "imports": [
+            {
+                "classification": import_fact["classification"],
+                "kind": import_fact["kind"],
+                "line": import_fact["line"],
+                "path": import_fact["path"],
+                "root_name": import_fact["root_name"],
+                "specifier": import_fact["specifier"],
+            }
+            for import_fact in javascript["imports"]
+        ],
+        "modules": [
+            {
+                "extension": module["extension"],
+                "module_name": module["module_name"],
+                "parser_status": module["parser_status"],
+                "path": module["path"],
+            }
+            for module in javascript["modules"]
+        ],
+        "packages": javascript["packages"],
+    }
+
+
 def _run_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     run = snapshot["run"]
     return {
@@ -1207,6 +1453,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     run = snapshot["run"]
     repository = snapshot["repository"]
     python = snapshot["python"]
+    javascript = snapshot["javascript"]
     symbol_labels = _symbol_labels(python)
     lines = [
         "# RepoLens Graph Report",
@@ -1226,6 +1473,9 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- Python imports: {counts['python_imports']}",
         f"- Python tagged comments: {counts['python_tagged_comments']}",
         f"- Python parse errors: {counts['python_parse_errors']}",
+        f"- JavaScript modules: {counts['javascript_modules']}",
+        f"- JavaScript imports: {counts['javascript_imports']}",
+        f"- JavaScript packages: {counts['javascript_packages']}",
         "- Live freshness checks: not implemented yet.",
         "",
         "## Files",
@@ -1328,6 +1578,66 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## JavaScript Modules",
+            "",
+            "| Path | Module | Extension | Parser status |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["modules"]:
+        lines.extend(
+            "| "
+            f"`{module['path']}` | "
+            f"`{module['module_name']}` | "
+            f"`{module['extension']}` | "
+            f"{module['parser_status']} |"
+            for module in javascript["modules"]
+        )
+    else:
+        lines.append("| Not detected |  |  | not_parsed |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Imports",
+            "",
+            "| Path | Import | Root | Classification | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["imports"]:
+        lines.extend(
+            "| "
+            f"`{import_fact['path']}` | "
+            f"`{_javascript_import_display(import_fact)}` | "
+            f"`{import_fact['root_name'] or ''}` | "
+            f"{import_fact['classification']} | "
+            f"{import_fact['line']} |"
+            for import_fact in javascript["imports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Packages",
+            "",
+            "| Name | Classification |",
+            "| --- | --- |",
+        ]
+    )
+    if javascript["packages"]:
+        lines.extend(
+            f"| `{package['name']}` | {package['classification']} |"
+            for package in javascript["packages"]
+        )
+    else:
+        lines.append("| Not detected |  |")
+
+    lines.extend(
+        [
+            "",
             "## Python Tagged Comments",
             "",
             "| Path | Tag | Text | Line |",
@@ -1411,6 +1721,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "## Assistant Notes",
             "",
             "Python source facts are extracted with the standard library AST when files parse successfully.",
+            "JavaScript and TypeScript import facts are extracted with a bounded pure-Python scanner.",
             "Deep semantic call graphs, runtime imports, commands, config parsing, and impact analysis are not detected yet.",
             "",
         ]
@@ -1420,6 +1731,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
 
 def _graph_index_text(snapshot: dict[str, Any]) -> str:
     python = snapshot["python"]
+    javascript = snapshot["javascript"]
     lines = [
         "# RepoLens Graph Index",
         "",
@@ -1529,6 +1841,69 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected |  |  | false |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Modules",
+            "",
+            "| Path | Node ID | Module | Extension | Parser status |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["modules"]:
+        lines.extend(
+            "| "
+            f"`{module['path']}` | "
+            f"`{module['node_id']}` | "
+            f"`{module['module_name']}` | "
+            f"`{module['extension']}` | "
+            f"{module['parser_status']} |"
+            for module in javascript["modules"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | not_parsed |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Imports",
+            "",
+            "| Fact ID | Path | Kind | Specifier | Root | Classification | Line |",
+            "| --- | --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["imports"]:
+        lines.extend(
+            "| "
+            f"`{import_fact['id']}` | "
+            f"`{import_fact['path']}` | "
+            f"{import_fact['kind']} | "
+            f"`{import_fact['specifier']}` | "
+            f"`{import_fact['root_name'] or ''}` | "
+            f"{import_fact['classification']} | "
+            f"{import_fact['line']} |"
+            for import_fact in javascript["imports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Packages",
+            "",
+            "| Node ID | Name | Classification |",
+            "| --- | --- | --- |",
+        ]
+    )
+    if javascript["packages"]:
+        lines.extend(
+            f"| `{package['id']}` | `{package['name']}` | {package['classification']} |"
+            for package in javascript["packages"]
+        )
+    else:
+        lines.append("| Not detected |  |  |")
 
     lines.extend(
         [
@@ -1721,6 +2096,18 @@ def _python_import_display(import_fact: dict[str, Any]) -> str:
     relative_prefix = "." * import_fact["level"]
     imported_name = import_fact["imported_name"] or ""
     return f"from {relative_prefix}{import_fact['module']} import {imported_name}{alias}"
+
+
+def _javascript_import_display(import_fact: dict[str, Any]) -> str:
+    specifier = import_fact["specifier"]
+    kind = import_fact["kind"]
+    if kind == "require":
+        return f'require("{specifier}")'
+    if kind == "dynamic_import":
+        return f'import("{specifier}")'
+    if kind == "side_effect_import":
+        return f'import "{specifier}"'
+    return f'{kind} from "{specifier}"'
 
 
 def _join_list(values: list[str]) -> str:
