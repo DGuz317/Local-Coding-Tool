@@ -8,6 +8,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from repolens.graph import (
+    GRAPH_EXPORT_PATHS,
+    GRAPH_STORE_PATH,
+    GraphExportError,
+    GraphStoreError,
+    rebuild_graph_artifacts,
+)
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanError, ScanResult, scan_repository
 
 SCAN_ARTIFACT_PATH = f"{ARTIFACT_DIR_NAME}/scan.json"
@@ -26,6 +33,8 @@ class IndexResult:
     scan: ScanResult
     artifact_dir: str = ARTIFACT_DIR_NAME
     scan_artifact: str = SCAN_ARTIFACT_PATH
+    graph_store: str = GRAPH_STORE_PATH
+    graph_exports: tuple[str, ...] = GRAPH_EXPORT_PATHS
 
     def to_cli_data(self) -> dict[str, object]:
         scan_data = self.scan.to_artifact_dict()
@@ -33,6 +42,8 @@ class IndexResult:
             "artifact_dir": self.artifact_dir,
             "counts": scan_data["counts"],
             "eligible_files": scan_data["files"],
+            "graph_exports": list(self.graph_exports),
+            "graph_store": self.graph_store,
             "repo_path": str(self.root),
             "scan_artifact": self.scan_artifact,
             "skipped_paths": scan_data["skipped_paths"],
@@ -57,6 +68,10 @@ def index_repository(repo_path: Path | str) -> IndexResult:
     except ScanError as exc:
         raise RepoLensIndexError(str(exc)) from exc
     _write_scan_artifact(root, scan)
+    try:
+        rebuild_graph_artifacts(root, scan)
+    except (GraphStoreError, GraphExportError) as exc:
+        raise RepoLensIndexError(str(exc)) from exc
     return IndexResult(root=root, scan=scan)
 
 
