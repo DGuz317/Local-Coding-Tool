@@ -12,6 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.config_index import (
+    CONFIG_EXTRACTOR_VERSION,
+    ConfigIndex,
+    config_file_node_id,
+    extract_config_index,
+)
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     JavaScriptIndex,
@@ -28,9 +34,11 @@ from repolens.python_index import (
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 5
+GRAPH_SCHEMA_VERSION = 6
 GRAPH_ARTIFACT_VERSION = 1
-GRAPH_EXPORTER_VERSION = f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}"
+GRAPH_EXPORTER_VERSION = (
+    f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+{CONFIG_EXTRACTOR_VERSION}"
+)
 
 GRAPH_STORE_FILENAME = "graph.sqlite"
 GRAPH_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{GRAPH_STORE_FILENAME}"
@@ -360,6 +368,77 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE config_files (
+            path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+            node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+            config_kind TEXT NOT NULL,
+            format TEXT NOT NULL,
+            parser_status TEXT NOT NULL,
+            top_level_keys_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_package_managers (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            ecosystem TEXT NOT NULL,
+            source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            evidence_kind TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_packages (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            ecosystem TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            dependency_type TEXT NOT NULL,
+            version_constraint TEXT
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_package_roots (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            ecosystem TEXT NOT NULL,
+            path TEXT NOT NULL REFERENCES directories(path) ON DELETE CASCADE,
+            source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_lockfiles (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL UNIQUE REFERENCES files(path) ON DELETE CASCADE,
+            manager TEXT NOT NULL,
+            format TEXT NOT NULL,
+            ecosystem TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_commands (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            name TEXT NOT NULL,
+            command TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            not_run INTEGER NOT NULL,
+            auto_run_recommended INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_entrypoints (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            target TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            line INTEGER
+        ) WITHOUT ROWID;
+
+        CREATE TABLE config_parse_errors (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            message TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE runs (
             id INTEGER PRIMARY KEY,
             indexed_at_utc TEXT NOT NULL,
@@ -389,9 +468,11 @@ def _populate_store(
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
     python_index = extract_python_index(root, files)
     javascript_index = extract_javascript_index(root, files)
+    config_index = extract_config_index(root, files)
     parser_status_by_path = {
         **python_index.parser_status_by_path,
         **javascript_index.parser_status_by_path,
+        **config_index.parser_status_by_path,
     }
 
     connection.executemany(
@@ -433,10 +514,13 @@ def _populate_store(
         ((skipped.path, skipped.reason) for skipped in skipped_paths),
     )
 
-    _insert_nodes(connection, root, directories, files, python_index, javascript_index)
+    _insert_nodes(
+        connection, root, directories, files, python_index, javascript_index, config_index
+    )
     _insert_python_tables(connection, python_index)
     _insert_javascript_tables(connection, javascript_index)
-    _insert_edges(connection, directories, files, python_index, javascript_index)
+    _insert_config_tables(connection, config_index)
+    _insert_edges(connection, directories, files, python_index, javascript_index, config_index)
     connection.execute(
         """
         INSERT INTO runs(
@@ -510,10 +594,12 @@ def _insert_nodes(
     files: tuple[Any, ...],
     python_index: PythonIndex,
     javascript_index: JavaScriptIndex,
+    config_index: ConfigIndex,
 ) -> None:
     parser_status_by_path = {
         **python_index.parser_status_by_path,
         **javascript_index.parser_status_by_path,
+        **config_index.parser_status_by_path,
     }
     connection.execute(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
@@ -549,6 +635,159 @@ def _insert_nodes(
                 ),
             )
             for scanned_file in files
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                config.node_id,
+                "ConfigFile",
+                config.path,
+                config.path.rsplit("/", 1)[-1],
+                _metadata_json(
+                    {
+                        "config_kind": config.config_kind,
+                        "format": config.format,
+                        "metadata": config.metadata,
+                        "parser_status": config.parser_status,
+                        "top_level_keys": list(config.top_level_keys),
+                    }
+                ),
+            )
+            for config in config_index.config_files
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                manager.id,
+                "PackageManager",
+                manager.source_path,
+                manager.name,
+                _metadata_json(
+                    {
+                        "ecosystem": manager.ecosystem,
+                        "evidence_kind": manager.evidence_kind,
+                        "source_path": manager.source_path,
+                    }
+                ),
+            )
+            for manager in config_index.package_managers
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                package.id,
+                "ConfigPackage",
+                package.source_path,
+                package.name,
+                _metadata_json(
+                    {
+                        "classification": package.classification,
+                        "dependency_type": package.dependency_type,
+                        "ecosystem": package.ecosystem,
+                        "source_path": package.source_path,
+                        "version_constraint": package.version_constraint,
+                    }
+                ),
+            )
+            for package in config_index.packages
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                package_root.id,
+                "PackageRoot",
+                package_root.path,
+                package_root.name,
+                _metadata_json(
+                    {
+                        "ecosystem": package_root.ecosystem,
+                        "path": package_root.path,
+                        "source_path": package_root.source_path,
+                    }
+                ),
+            )
+            for package_root in config_index.package_roots
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                lockfile.id,
+                "Lockfile",
+                lockfile.path,
+                lockfile.manager,
+                _metadata_json(
+                    {
+                        "ecosystem": lockfile.ecosystem,
+                        "format": lockfile.format,
+                        "manager": lockfile.manager,
+                    }
+                ),
+            )
+            for lockfile in config_index.lockfiles
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                command.id,
+                "CandidateCommand",
+                command.path,
+                command.name,
+                _metadata_json(
+                    {
+                        "auto_run_recommended": command.auto_run_recommended,
+                        "command": command.command,
+                        "not_run": command.not_run,
+                        "purpose": command.purpose,
+                        "source": command.source,
+                    }
+                ),
+            )
+            for command in config_index.commands
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                entrypoint.id,
+                "Entrypoint",
+                entrypoint.path,
+                entrypoint.name,
+                _metadata_json(
+                    {
+                        "evidence": entrypoint.evidence,
+                        "kind": entrypoint.kind,
+                        "line": entrypoint.line,
+                        "target": entrypoint.target,
+                    }
+                ),
+            )
+            for entrypoint in config_index.entrypoints
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                error.id,
+                "ConfigParseError",
+                error.path,
+                "parse error",
+                _metadata_json({"message": error.message}),
+            )
+            for error in config_index.parse_errors
         ),
     )
     connection.executemany(
@@ -1033,12 +1272,169 @@ def _insert_javascript_tables(
     )
 
 
+def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIndex) -> None:
+    connection.executemany(
+        """
+        INSERT INTO config_files(
+            path,
+            node_id,
+            config_kind,
+            format,
+            parser_status,
+            top_level_keys_json,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                config.path,
+                config.node_id,
+                config.config_kind,
+                config.format,
+                config.parser_status,
+                _json_value(config.top_level_keys),
+                _json_value(config.metadata),
+            )
+            for config in config_index.config_files
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_package_managers(id, name, ecosystem, source_path, evidence_kind)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                manager.id,
+                manager.name,
+                manager.ecosystem,
+                manager.source_path,
+                manager.evidence_kind,
+            )
+            for manager in config_index.package_managers
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_packages(
+            id,
+            name,
+            ecosystem,
+            classification,
+            source_path,
+            dependency_type,
+            version_constraint
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                package.id,
+                package.name,
+                package.ecosystem,
+                package.classification,
+                package.source_path,
+                package.dependency_type,
+                package.version_constraint,
+            )
+            for package in config_index.packages
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_package_roots(id, name, ecosystem, path, source_path)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                package_root.id,
+                package_root.name,
+                package_root.ecosystem,
+                package_root.path,
+                package_root.source_path,
+            )
+            for package_root in config_index.package_roots
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_lockfiles(id, path, manager, format, ecosystem)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                lockfile.id,
+                lockfile.path,
+                lockfile.manager,
+                lockfile.format,
+                lockfile.ecosystem,
+            )
+            for lockfile in config_index.lockfiles
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_commands(
+            id,
+            path,
+            source,
+            name,
+            command,
+            purpose,
+            not_run,
+            auto_run_recommended
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                command.id,
+                command.path,
+                command.source,
+                command.name,
+                command.command,
+                command.purpose,
+                int(command.not_run),
+                int(command.auto_run_recommended),
+            )
+            for command in config_index.commands
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_entrypoints(id, path, kind, name, target, evidence, line)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                entrypoint.id,
+                entrypoint.path,
+                entrypoint.kind,
+                entrypoint.name,
+                entrypoint.target,
+                entrypoint.evidence,
+                entrypoint.line,
+            )
+            for entrypoint in config_index.entrypoints
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO config_parse_errors(id, path, message)
+        VALUES (?, ?, ?)
+        """,
+        ((error.id, error.path, error.message) for error in config_index.parse_errors),
+    )
+
+
 def _insert_edges(
     connection: sqlite3.Connection,
     directories: tuple[_DirectoryFact, ...],
     files: tuple[Any, ...],
     python_index: PythonIndex,
     javascript_index: JavaScriptIndex,
+    config_index: ConfigIndex,
 ) -> None:
     edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
 
@@ -1085,6 +1481,79 @@ def _insert_edges(
             error.id,
             "HAS_PARSE_ERROR",
             {"line": error.line, "message": error.message},
+        )
+
+    config_file_paths = {config.path for config in config_index.config_files}
+    for config in config_index.config_files:
+        add_edge(
+            _file_node_id(config.path),
+            config.node_id,
+            "CONTAINS",
+            {"config_kind": config.config_kind, "parser_status": config.parser_status},
+        )
+
+    def config_source_node_id(source_path: str) -> str:
+        if source_path in config_file_paths:
+            return config_file_node_id(source_path)
+        return _file_node_id(source_path)
+
+    for manager in config_index.package_managers:
+        add_edge(
+            config_source_node_id(manager.source_path),
+            manager.id,
+            "DECLARES_PACKAGE_MANAGER",
+            {"ecosystem": manager.ecosystem, "evidence_kind": manager.evidence_kind},
+        )
+    for package in config_index.packages:
+        add_edge(
+            config_source_node_id(package.source_path),
+            package.id,
+            "DECLARES_PACKAGE",
+            {
+                "classification": package.classification,
+                "dependency_type": package.dependency_type,
+                "ecosystem": package.ecosystem,
+            },
+        )
+    for package_root in config_index.package_roots:
+        add_edge(
+            config_source_node_id(package_root.source_path),
+            package_root.id,
+            "DECLARES_PACKAGE_ROOT",
+            {"ecosystem": package_root.ecosystem, "path": package_root.path},
+        )
+    for lockfile in config_index.lockfiles:
+        add_edge(
+            config_source_node_id(lockfile.path),
+            lockfile.id,
+            "DETECTS_LOCKFILE",
+            {"ecosystem": lockfile.ecosystem, "manager": lockfile.manager},
+        )
+    for command in config_index.commands:
+        add_edge(
+            config_source_node_id(command.path),
+            command.id,
+            "DECLARES_COMMAND",
+            {
+                "auto_run_recommended": command.auto_run_recommended,
+                "not_run": command.not_run,
+                "purpose": command.purpose,
+                "source": command.source,
+            },
+        )
+    for entrypoint in config_index.entrypoints:
+        add_edge(
+            config_source_node_id(entrypoint.path),
+            entrypoint.id,
+            "DECLARES_ENTRYPOINT",
+            {"kind": entrypoint.kind, "line": entrypoint.line},
+        )
+    for config_error in config_index.parse_errors:
+        add_edge(
+            config_file_node_id(config_error.path),
+            config_error.id,
+            "HAS_PARSE_ERROR",
+            {"message": config_error.message},
         )
 
     import_edges: dict[tuple[str, str, str, str], list[int]] = {}
@@ -1414,6 +1883,104 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        config_files = _decode_config_file_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        path,
+                        node_id,
+                        config_kind,
+                        format,
+                        parser_status,
+                        top_level_keys_json,
+                        metadata_json
+                    FROM config_files
+                    ORDER BY path
+                    """
+                )
+            )
+        )
+        config_package_managers = _rows(
+            connection.execute(
+                """
+                SELECT id, name, ecosystem, source_path, evidence_kind
+                FROM config_package_managers
+                ORDER BY ecosystem, name, source_path, evidence_kind
+                """
+            )
+        )
+        config_packages = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    name,
+                    ecosystem,
+                    classification,
+                    source_path,
+                    dependency_type,
+                    version_constraint
+                FROM config_packages
+                ORDER BY ecosystem, classification, name, source_path, dependency_type
+                """
+            )
+        )
+        config_package_roots = _rows(
+            connection.execute(
+                """
+                SELECT id, name, ecosystem, path, source_path
+                FROM config_package_roots
+                ORDER BY ecosystem, path, name
+                """
+            )
+        )
+        config_lockfiles = _rows(
+            connection.execute(
+                """
+                SELECT id, path, manager, format, ecosystem
+                FROM config_lockfiles
+                ORDER BY path
+                """
+            )
+        )
+        config_commands = _decode_config_command_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        source,
+                        name,
+                        command,
+                        purpose,
+                        not_run,
+                        auto_run_recommended
+                    FROM config_commands
+                    ORDER BY path, source, name
+                    """
+                )
+            )
+        )
+        config_entrypoints = _rows(
+            connection.execute(
+                """
+                SELECT id, path, kind, name, target, evidence, line
+                FROM config_entrypoints
+                ORDER BY path, kind, name, target
+                """
+            )
+        )
+        config_parse_errors = _rows(
+            connection.execute(
+                """
+                SELECT id, path, message
+                FROM config_parse_errors
+                ORDER BY path
+                """
+            )
+        )
         run = _single_row(
             connection.execute(
                 """
@@ -1436,6 +2003,14 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         )
 
     counts = {
+        "config_commands": len(config_commands),
+        "config_entrypoints": len(config_entrypoints),
+        "config_files": len(config_files),
+        "config_lockfiles": len(config_lockfiles),
+        "config_package_managers": len(config_package_managers),
+        "config_package_roots": len(config_package_roots),
+        "config_packages": len(config_packages),
+        "config_parse_errors": len(config_parse_errors),
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
@@ -1459,6 +2034,16 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
     schema = {"name": metadata["schema_name"], "version": int(metadata["schema_version"])}
     return {
         "artifact_version": GRAPH_ARTIFACT_VERSION,
+        "config": {
+            "commands": config_commands,
+            "config_files": config_files,
+            "entrypoints": config_entrypoints,
+            "lockfiles": config_lockfiles,
+            "package_managers": config_package_managers,
+            "package_roots": config_package_roots,
+            "packages": config_packages,
+            "parse_errors": config_parse_errors,
+        },
         "counts": counts,
         "directories": directories,
         "edges": _decode_metadata_rows(edges),
@@ -1495,6 +2080,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph",
         "artifact_version": snapshot["artifact_version"],
+        "config": snapshot["config"],
         "counts": snapshot["counts"],
         "directories": snapshot["directories"],
         "edges": snapshot["edges"],
@@ -1523,6 +2109,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             }
             for file in snapshot["files"]
         ],
+        "config": _config_lite_payload(snapshot),
         "freshness": _freshness_payload(),
         "javascript": _javascript_lite_payload(snapshot),
         "python": _python_lite_payload(snapshot),
@@ -1548,6 +2135,60 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         },
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
+    }
+
+
+def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    config = snapshot["config"]
+    return {
+        "commands": [
+            {
+                "auto_run_recommended": command["auto_run_recommended"],
+                "command": command["command"],
+                "name": command["name"],
+                "not_run": command["not_run"],
+                "path": command["path"],
+                "purpose": command["purpose"],
+                "source": command["source"],
+            }
+            for command in config["commands"]
+        ],
+        "config_files": [
+            {
+                "config_kind": config_file["config_kind"],
+                "format": config_file["format"],
+                "parser_status": config_file["parser_status"],
+                "path": config_file["path"],
+                "top_level_keys": config_file["top_level_keys"],
+            }
+            for config_file in config["config_files"]
+        ],
+        "entrypoints": [
+            {
+                "evidence": entrypoint["evidence"],
+                "kind": entrypoint["kind"],
+                "line": entrypoint["line"],
+                "name": entrypoint["name"],
+                "path": entrypoint["path"],
+                "target": entrypoint["target"],
+            }
+            for entrypoint in config["entrypoints"]
+        ],
+        "lockfiles": config["lockfiles"],
+        "package_managers": config["package_managers"],
+        "package_roots": config["package_roots"],
+        "packages": [
+            {
+                "classification": package["classification"],
+                "dependency_type": package["dependency_type"],
+                "ecosystem": package["ecosystem"],
+                "name": package["name"],
+                "source_path": package["source_path"],
+                "version_constraint": package["version_constraint"],
+            }
+            for package in config["packages"]
+        ],
+        "parse_errors": config["parse_errors"],
     }
 
 
@@ -1696,6 +2337,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     repository = snapshot["repository"]
     python = snapshot["python"]
     javascript = snapshot["javascript"]
+    config = snapshot["config"]
     symbol_labels = _symbol_labels(python)
     lines = [
         "# RepoLens Graph Report",
@@ -1721,6 +2363,10 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- JavaScript packages: {counts['javascript_packages']}",
         f"- JavaScript exports: {counts['javascript_exports']}",
         f"- JavaScript CommonJS assignments: {counts['javascript_commonjs_assignments']}",
+        f"- Config files: {counts['config_files']}",
+        f"- Config packages: {counts['config_packages']}",
+        f"- Config commands: {counts['config_commands']}",
+        f"- Config entrypoints: {counts['config_entrypoints']}",
         "- Live freshness checks: not implemented yet.",
         "",
         "## Files",
@@ -1950,6 +2596,177 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Config Files",
+            "",
+            "| Path | Kind | Format | Parser status | Top-level keys |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["config_files"]:
+        lines.extend(
+            "| "
+            f"`{config_file['path']}` | "
+            f"{config_file['config_kind']} | "
+            f"{config_file['format']} | "
+            f"{config_file['parser_status']} | "
+            f"{_md_cell(_join_list(config_file['top_level_keys']))} |"
+            for config_file in config["config_files"]
+        )
+    else:
+        lines.append("| Not detected |  |  | not_parsed |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Package Managers",
+            "",
+            "| Source | Ecosystem | Manager | Evidence |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if config["package_managers"]:
+        lines.extend(
+            "| "
+            f"`{manager['source_path']}` | "
+            f"{manager['ecosystem']} | "
+            f"`{manager['name']}` | "
+            f"{manager['evidence_kind']} |"
+            for manager in config["package_managers"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Packages",
+            "",
+            "| Source | Ecosystem | Classification | Name | Dependency type | Version |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["packages"]:
+        lines.extend(
+            "| "
+            f"`{package['source_path']}` | "
+            f"{package['ecosystem']} | "
+            f"{package['classification']} | "
+            f"`{package['name']}` | "
+            f"{package['dependency_type']} | "
+            f"{_md_cell(package['version_constraint'] or '')} |"
+            for package in config["packages"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Package Roots",
+            "",
+            "| Source | Ecosystem | Name | Root |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if config["package_roots"]:
+        lines.extend(
+            "| "
+            f"`{package_root['source_path']}` | "
+            f"{package_root['ecosystem']} | "
+            f"`{package_root['name']}` | "
+            f"`{package_root['path']}` |"
+            for package_root in config["package_roots"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Lockfiles",
+            "",
+            "| Path | Ecosystem | Manager | Format |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if config["lockfiles"]:
+        lines.extend(
+            "| "
+            f"`{lockfile['path']}` | "
+            f"{lockfile['ecosystem']} | "
+            f"{lockfile['manager']} | "
+            f"{lockfile['format']} |"
+            for lockfile in config["lockfiles"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Commands",
+            "",
+            "| Path | Source | Name | Purpose | Command | Not run | Auto-run recommended |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["commands"]:
+        lines.extend(
+            "| "
+            f"`{command['path']}` | "
+            f"{command['source']} | "
+            f"`{command['name']}` | "
+            f"{command['purpose']} | "
+            f"`{_md_cell(command['command'])}` | "
+            f"{command['not_run']} | "
+            f"{command['auto_run_recommended']} |"
+            for command in config["commands"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | true | false |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Entrypoints",
+            "",
+            "| Path | Kind | Name | Target | Evidence | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if config["entrypoints"]:
+        lines.extend(
+            "| "
+            f"`{entrypoint['path']}` | "
+            f"{entrypoint['kind']} | "
+            f"`{entrypoint['name']}` | "
+            f"`{_md_cell(entrypoint['target'])}` | "
+            f"{_md_cell(entrypoint['evidence'])} | "
+            f"{entrypoint['line'] or ''} |"
+            for entrypoint in config["entrypoints"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Parse Errors",
+            "",
+            "| Path | Message |",
+            "| --- | --- |",
+        ]
+    )
+    if config["parse_errors"]:
+        lines.extend(
+            f"| `{error['path']}` | {error['message']} |" for error in config["parse_errors"]
+        )
+    else:
+        lines.append("| Not detected |  |")
+
+    lines.extend(
+        [
+            "",
             "## Python Tagged Comments",
             "",
             "| Path | Tag | Text | Line |",
@@ -2034,7 +2851,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "",
             "Python source facts are extracted with the standard library AST when files parse successfully.",
             "JavaScript and TypeScript facts are extracted with a bounded pure-Python scanner.",
-            "Deep semantic call graphs, runtime imports, commands, config parsing, and impact analysis are not detected yet.",
+            "Config facts are shallow, evidence-backed, and candidate commands are not executed.",
+            "Deep semantic call graphs, runtime imports, deep lockfile parsing, and impact analysis are not detected yet.",
             "",
         ]
     )
@@ -2044,6 +2862,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
 def _graph_index_text(snapshot: dict[str, Any]) -> str:
     python = snapshot["python"]
     javascript = snapshot["javascript"]
+    config = snapshot["config"]
     lines = [
         "# RepoLens Graph Index",
         "",
@@ -2290,6 +3109,185 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Config Files",
+            "",
+            "| Path | Node ID | Kind | Format | Parser status | Top-level keys |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["config_files"]:
+        lines.extend(
+            "| "
+            f"`{config_file['path']}` | "
+            f"`{config_file['node_id']}` | "
+            f"{config_file['config_kind']} | "
+            f"{config_file['format']} | "
+            f"{config_file['parser_status']} | "
+            f"{_md_cell(_join_list(config_file['top_level_keys']))} |"
+            for config_file in config["config_files"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | not_parsed |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Package Managers",
+            "",
+            "| Node ID | Source | Ecosystem | Manager | Evidence |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["package_managers"]:
+        lines.extend(
+            "| "
+            f"`{manager['id']}` | "
+            f"`{manager['source_path']}` | "
+            f"{manager['ecosystem']} | "
+            f"`{manager['name']}` | "
+            f"{manager['evidence_kind']} |"
+            for manager in config["package_managers"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Packages",
+            "",
+            "| Node ID | Source | Ecosystem | Classification | Name | Dependency type | Version |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["packages"]:
+        lines.extend(
+            "| "
+            f"`{package['id']}` | "
+            f"`{package['source_path']}` | "
+            f"{package['ecosystem']} | "
+            f"{package['classification']} | "
+            f"`{package['name']}` | "
+            f"{package['dependency_type']} | "
+            f"{_md_cell(package['version_constraint'] or '')} |"
+            for package in config["packages"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Package Roots",
+            "",
+            "| Node ID | Source | Ecosystem | Name | Root |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["package_roots"]:
+        lines.extend(
+            "| "
+            f"`{package_root['id']}` | "
+            f"`{package_root['source_path']}` | "
+            f"{package_root['ecosystem']} | "
+            f"`{package_root['name']}` | "
+            f"`{package_root['path']}` |"
+            for package_root in config["package_roots"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Lockfiles",
+            "",
+            "| Node ID | Path | Ecosystem | Manager | Format |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["lockfiles"]:
+        lines.extend(
+            "| "
+            f"`{lockfile['id']}` | "
+            f"`{lockfile['path']}` | "
+            f"{lockfile['ecosystem']} | "
+            f"{lockfile['manager']} | "
+            f"{lockfile['format']} |"
+            for lockfile in config["lockfiles"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Commands",
+            "",
+            "| Node ID | Path | Source | Name | Purpose | Command | Not run | Auto-run recommended |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if config["commands"]:
+        lines.extend(
+            "| "
+            f"`{command['id']}` | "
+            f"`{command['path']}` | "
+            f"{command['source']} | "
+            f"`{command['name']}` | "
+            f"{command['purpose']} | "
+            f"`{_md_cell(command['command'])}` | "
+            f"{command['not_run']} | "
+            f"{command['auto_run_recommended']} |"
+            for command in config["commands"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  | true | false |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Entrypoints",
+            "",
+            "| Node ID | Path | Kind | Name | Target | Evidence | Line |",
+            "| --- | --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if config["entrypoints"]:
+        lines.extend(
+            "| "
+            f"`{entrypoint['id']}` | "
+            f"`{entrypoint['path']}` | "
+            f"{entrypoint['kind']} | "
+            f"`{entrypoint['name']}` | "
+            f"`{_md_cell(entrypoint['target'])}` | "
+            f"{_md_cell(entrypoint['evidence'])} | "
+            f"{entrypoint['line'] or ''} |"
+            for entrypoint in config["entrypoints"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Config Parse Errors",
+            "",
+            "| Node ID | Path | Message |",
+            "| --- | --- | --- |",
+        ]
+    )
+    if config["parse_errors"]:
+        lines.extend(
+            f"| `{error['id']}` | `{error['path']}` | {error['message']} |"
+            for error in config["parse_errors"]
+        )
+    else:
+        lines.append("| Not detected |  |  |")
+
+    lines.extend(
+        [
+            "",
             "## Python Tagged Comments",
             "",
             "| Node ID | Path | Tag | Text | Line |",
@@ -2453,6 +3451,26 @@ def _decode_python_package_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     for row in rows:
         decoded = dict(row)
         decoded["inferred"] = bool(decoded["inferred"])
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_config_file_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["top_level_keys"] = json.loads(decoded.pop("top_level_keys_json"))
+        decoded["metadata"] = json.loads(decoded.pop("metadata_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_config_command_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["not_run"] = bool(decoded["not_run"])
+        decoded["auto_run_recommended"] = bool(decoded["auto_run_recommended"])
         decoded_rows.append(decoded)
     return decoded_rows
 
