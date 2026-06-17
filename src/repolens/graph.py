@@ -27,7 +27,7 @@ from repolens.python_index import (
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 3
+GRAPH_SCHEMA_VERSION = 4
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}"
 
@@ -308,6 +308,18 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             parser_status TEXT NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE javascript_symbols (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            qualified_name TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE javascript_imports (
             id TEXT PRIMARY KEY,
             path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
@@ -323,6 +335,26 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             classification TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_exports (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            exported_name TEXT NOT NULL,
+            local_name TEXT,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_commonjs_assignments (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            exported_name TEXT NOT NULL,
+            assigned_name TEXT,
+            line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
         CREATE TABLE runs (
@@ -553,6 +585,29 @@ def _insert_nodes(
                 ),
             )
             for module in javascript_index.modules
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                symbol.id,
+                _javascript_symbol_node_kind(symbol.kind),
+                symbol.path,
+                symbol.qualified_name,
+                _metadata_json(
+                    {
+                        "end_line": symbol.end_line,
+                        "kind": symbol.kind,
+                        "line": symbol.line,
+                        "module_node_id": symbol.module_node_id,
+                        "name": symbol.name,
+                        "qualified_name": symbol.qualified_name,
+                        "start_line": symbol.start_line,
+                    }
+                ),
+            )
+            for symbol in javascript_index.symbols
         ),
     )
     connection.executemany(
@@ -851,6 +906,36 @@ def _insert_javascript_tables(
     )
     connection.executemany(
         """
+        INSERT INTO javascript_symbols(
+            id,
+            path,
+            module_node_id,
+            kind,
+            name,
+            qualified_name,
+            line,
+            start_line,
+            end_line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                symbol.id,
+                symbol.path,
+                symbol.module_node_id,
+                symbol.kind,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.line,
+                symbol.start_line,
+                symbol.end_line,
+            )
+            for symbol in javascript_index.symbols
+        ),
+    )
+    connection.executemany(
+        """
         INSERT INTO javascript_imports(
             id,
             path,
@@ -887,6 +972,58 @@ def _insert_javascript_tables(
             for package in javascript_index.packages
         ),
     )
+    connection.executemany(
+        """
+        INSERT INTO javascript_exports(
+            id,
+            path,
+            module_node_id,
+            kind,
+            exported_name,
+            local_name,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                export.id,
+                export.path,
+                export.module_node_id,
+                export.kind,
+                export.exported_name,
+                export.local_name,
+                export.line,
+            )
+            for export in javascript_index.exports
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_commonjs_assignments(
+            id,
+            path,
+            module_node_id,
+            kind,
+            exported_name,
+            assigned_name,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                assignment.id,
+                assignment.path,
+                assignment.module_node_id,
+                assignment.kind,
+                assignment.exported_name,
+                assignment.assigned_name,
+                assignment.line,
+            )
+            for assignment in javascript_index.commonjs_assignments
+        ),
+    )
 
 
 def _insert_edges(
@@ -920,8 +1057,14 @@ def _insert_edges(
         add_edge(_file_node_id(python_module.path), python_module.node_id, "CONTAINS")
     for javascript_module in javascript_index.modules:
         add_edge(_file_node_id(javascript_module.path), javascript_module.node_id, "CONTAINS")
-    for symbol in python_index.symbols:
-        add_edge(symbol.parent_id or symbol.module_node_id, symbol.id, "CONTAINS")
+    for javascript_symbol in javascript_index.symbols:
+        add_edge(javascript_symbol.module_node_id, javascript_symbol.id, "CONTAINS")
+    for python_symbol in python_index.symbols:
+        add_edge(
+            python_symbol.parent_id or python_symbol.module_node_id,
+            python_symbol.id,
+            "CONTAINS",
+        )
     for comment in python_index.tagged_comments:
         add_edge(
             comment.attached_node_id,
@@ -1184,6 +1327,24 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        javascript_symbols = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    path,
+                    module_node_id,
+                    kind,
+                    name,
+                    qualified_name,
+                    line,
+                    start_line,
+                    end_line
+                FROM javascript_symbols
+                ORDER BY path, qualified_name, id
+                """
+            )
+        )
         javascript_imports = _rows(
             connection.execute(
                 """
@@ -1207,6 +1368,24 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 SELECT id, name, classification
                 FROM javascript_packages
                 ORDER BY classification, name
+                """
+            )
+        )
+        javascript_exports = _rows(
+            connection.execute(
+                """
+                SELECT id, path, module_node_id, kind, exported_name, local_name, line
+                FROM javascript_exports
+                ORDER BY path, line, id
+                """
+            )
+        )
+        javascript_commonjs_assignments = _rows(
+            connection.execute(
+                """
+                SELECT id, path, module_node_id, kind, exported_name, assigned_name, line
+                FROM javascript_commonjs_assignments
+                ORDER BY path, line, id
                 """
             )
         )
@@ -1235,9 +1414,12 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
+        "javascript_commonjs_assignments": len(javascript_commonjs_assignments),
+        "javascript_exports": len(javascript_exports),
         "javascript_imports": len(javascript_imports),
         "javascript_modules": len(javascript_modules),
         "javascript_packages": len(javascript_packages),
+        "javascript_symbols": len(javascript_symbols),
         "nodes": len(nodes),
         "python_calls": len(python_calls),
         "python_imports": len(python_imports),
@@ -1257,9 +1439,12 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "edges": _decode_metadata_rows(edges),
         "files": files,
         "javascript": {
+            "commonjs_assignments": javascript_commonjs_assignments,
+            "exports": javascript_exports,
             "imports": javascript_imports,
             "modules": javascript_modules,
             "packages": javascript_packages,
+            "symbols": javascript_symbols,
         },
         "limits": {"max_file_size_bytes": run["max_file_size_bytes"]},
         "metadata": metadata,
@@ -1406,6 +1591,26 @@ def _python_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
 def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     javascript = snapshot["javascript"]
     return {
+        "commonjs_assignments": [
+            {
+                "assigned_name": assignment["assigned_name"],
+                "exported_name": assignment["exported_name"],
+                "kind": assignment["kind"],
+                "line": assignment["line"],
+                "path": assignment["path"],
+            }
+            for assignment in javascript["commonjs_assignments"]
+        ],
+        "exports": [
+            {
+                "exported_name": export["exported_name"],
+                "kind": export["kind"],
+                "line": export["line"],
+                "local_name": export["local_name"],
+                "path": export["path"],
+            }
+            for export in javascript["exports"]
+        ],
         "imports": [
             {
                 "classification": import_fact["classification"],
@@ -1427,6 +1632,16 @@ def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             for module in javascript["modules"]
         ],
         "packages": javascript["packages"],
+        "symbols": [
+            {
+                "end_line": symbol["end_line"],
+                "kind": symbol["kind"],
+                "path": symbol["path"],
+                "qualified_name": symbol["qualified_name"],
+                "start_line": symbol["start_line"],
+            }
+            for symbol in javascript["symbols"]
+        ],
     }
 
 
@@ -1474,8 +1689,11 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- Python tagged comments: {counts['python_tagged_comments']}",
         f"- Python parse errors: {counts['python_parse_errors']}",
         f"- JavaScript modules: {counts['javascript_modules']}",
+        f"- JavaScript symbols: {counts['javascript_symbols']}",
         f"- JavaScript imports: {counts['javascript_imports']}",
         f"- JavaScript packages: {counts['javascript_packages']}",
+        f"- JavaScript exports: {counts['javascript_exports']}",
+        f"- JavaScript CommonJS assignments: {counts['javascript_commonjs_assignments']}",
         "- Live freshness checks: not implemented yet.",
         "",
         "## Files",
@@ -1599,6 +1817,27 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## JavaScript Symbols",
+            "",
+            "| Path | Kind | Qualified name | Lines |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["symbols"]:
+        lines.extend(
+            "| "
+            f"`{symbol['path']}` | "
+            f"{symbol['kind']} | "
+            f"`{symbol['qualified_name']}` | "
+            f"{symbol['start_line']}-{symbol['end_line']} |"
+            for symbol in javascript["symbols"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+
+    lines.extend(
+        [
+            "",
             "## JavaScript Imports",
             "",
             "| Path | Import | Root | Classification | Line |",
@@ -1634,6 +1873,50 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected |  |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Exports",
+            "",
+            "| Path | Kind | Exported name | Local name | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["exports"]:
+        lines.extend(
+            "| "
+            f"`{export['path']}` | "
+            f"{export['kind']} | "
+            f"`{export['exported_name']}` | "
+            f"`{export['local_name'] or ''}` | "
+            f"{export['line']} |"
+            for export in javascript["exports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript CommonJS Assignments",
+            "",
+            "| Path | Kind | Exported name | Assigned name | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["commonjs_assignments"]:
+        lines.extend(
+            "| "
+            f"`{assignment['path']}` | "
+            f"{assignment['kind']} | "
+            f"`{assignment['exported_name']}` | "
+            f"`{assignment['assigned_name'] or ''}` | "
+            f"{assignment['line']} |"
+            for assignment in javascript["commonjs_assignments"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
 
     lines.extend(
         [
@@ -1721,7 +2004,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "## Assistant Notes",
             "",
             "Python source facts are extracted with the standard library AST when files parse successfully.",
-            "JavaScript and TypeScript import facts are extracted with a bounded pure-Python scanner.",
+            "JavaScript and TypeScript facts are extracted with a bounded pure-Python scanner.",
             "Deep semantic call graphs, runtime imports, commands, config parsing, and impact analysis are not detected yet.",
             "",
         ]
@@ -1867,6 +2150,28 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## JavaScript Symbols",
+            "",
+            "| Node ID | Path | Kind | Qualified name | Lines |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["symbols"]:
+        lines.extend(
+            "| "
+            f"`{symbol['id']}` | "
+            f"`{symbol['path']}` | "
+            f"{symbol['kind']} | "
+            f"`{symbol['qualified_name']}` | "
+            f"{symbol['start_line']}-{symbol['end_line']} |"
+            for symbol in javascript["symbols"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
             "## JavaScript Imports",
             "",
             "| Fact ID | Path | Kind | Specifier | Root | Classification | Line |",
@@ -1904,6 +2209,52 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Exports",
+            "",
+            "| Fact ID | Path | Kind | Exported name | Local name | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["exports"]:
+        lines.extend(
+            "| "
+            f"`{export['id']}` | "
+            f"`{export['path']}` | "
+            f"{export['kind']} | "
+            f"`{export['exported_name']}` | "
+            f"`{export['local_name'] or ''}` | "
+            f"{export['line']} |"
+            for export in javascript["exports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript CommonJS Assignments",
+            "",
+            "| Fact ID | Path | Kind | Exported name | Assigned name | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if javascript["commonjs_assignments"]:
+        lines.extend(
+            "| "
+            f"`{assignment['id']}` | "
+            f"`{assignment['path']}` | "
+            f"{assignment['kind']} | "
+            f"`{assignment['exported_name']}` | "
+            f"`{assignment['assigned_name'] or ''}` | "
+            f"{assignment['line']} |"
+            for assignment in javascript["commonjs_assignments"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
 
     lines.extend(
         [
@@ -2082,6 +2433,16 @@ def _python_symbol_node_kind(kind: str) -> str:
         "class": "PythonClass",
         "function": "PythonFunction",
         "method": "PythonMethod",
+    }[kind]
+
+
+def _javascript_symbol_node_kind(kind: str) -> str:
+    return {
+        "arrow_function": "JavaScriptArrowFunction",
+        "class": "JavaScriptClass",
+        "function": "JavaScriptFunction",
+        "interface": "TypeScriptInterface",
+        "type_alias": "TypeScriptTypeAlias",
     }[kind]
 
 

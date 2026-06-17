@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "3"
+    assert metadata["schema_version"] == "4"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -381,6 +381,108 @@ def test_index_writes_javascript_import_facts_to_sqlite_and_exports(tmp_path):
     assert "@scope/pkg" in graph_index
 
 
+def test_index_writes_javascript_symbol_export_and_commonjs_facts_to_artifacts(tmp_path):
+    _write_text(
+        tmp_path / "src" / "component.tsx",
+        dedent(
+            """
+            export function handler() {
+              return "handler result";
+            }
+
+            export const view = () => "view result";
+            export const version = "1.0.0";
+            const internal = async () => "internal result";
+
+            export class Service {}
+            export interface ServiceProps { name: string }
+            export type ServiceMode = "fast" | "safe";
+
+            export default handler;
+            export { Service as PublicService };
+
+            module.exports = handler;
+            exports.view = view;
+            """
+        ).lstrip(),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        symbols = list(
+            connection.execute(
+                """
+                SELECT kind, qualified_name, start_line, end_line
+                FROM javascript_symbols
+                ORDER BY kind, qualified_name
+                """
+            )
+        )
+        exports = list(
+            connection.execute(
+                """
+                SELECT kind, exported_name, local_name
+                FROM javascript_exports
+                ORDER BY kind, exported_name
+                """
+            )
+        )
+        commonjs_assignments = list(
+            connection.execute(
+                """
+                SELECT kind, exported_name, assigned_name
+                FROM javascript_commonjs_assignments
+                ORDER BY kind, exported_name
+                """
+            )
+        )
+
+    assert ("function", "handler", 1, 1) in symbols
+    assert ("arrow_function", "view", 5, 5) in symbols
+    assert ("arrow_function", "internal", 7, 7) in symbols
+    assert ("class", "Service", 9, 9) in symbols
+    assert ("interface", "ServiceProps", 10, 10) in symbols
+    assert ("type_alias", "ServiceMode", 11, 11) in symbols
+    assert exports == [
+        ("class_export", "Service", "Service"),
+        ("const_export", "version", "version"),
+        ("const_export", "view", "view"),
+        ("default_export", "default", "handler"),
+        ("function_export", "handler", "handler"),
+        ("named_export", "PublicService", "Service"),
+    ]
+    assert commonjs_assignments == [
+        ("exports_property", "view", "view"),
+        ("module_exports", "module.exports", "handler"),
+    ]
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(
+        symbol["kind"] == "interface" and symbol["qualified_name"] == "ServiceProps"
+        for symbol in graph_json["javascript"]["symbols"]
+    )
+    assert any(
+        export["kind"] == "default_export" and export["local_name"] == "handler"
+        for export in graph_lite["javascript"]["exports"]
+    )
+    assert any(
+        assignment["kind"] == "exports_property" and assignment["exported_name"] == "view"
+        for assignment in graph_json["javascript"]["commonjs_assignments"]
+    )
+    assert "## JavaScript Symbols" in report
+    assert "ServiceProps" in report
+    assert "## JavaScript Exports" in report
+    assert "default_export" in report
+    assert "## JavaScript CommonJS Assignments" in graph_index
+    assert "module.exports" in graph_index
+
+
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
@@ -397,10 +499,15 @@ def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
 
 
 def test_graph_exports_do_not_mirror_source_code(tmp_path):
-    source_body = "THIS_SOURCE_BODY_MUST_NOT_BE_MIRRORED"
+    source_body = "THIS_PYTHON_SOURCE_BODY_MUST_NOT_BE_MIRRORED"
+    javascript_source_body = "THIS_JS_SOURCE_BODY_MUST_NOT_BE_MIRRORED"
     (tmp_path / "app.py").write_text(
         f"def app():\n    return {source_body!r}\n",
         encoding="utf-8",
+    )
+    _write_text(
+        tmp_path / "src" / "app.ts",
+        f"export const app = () => {javascript_source_body!r};\n",
     )
 
     result = runner.invoke(app, ["index", str(tmp_path)])
@@ -411,6 +518,7 @@ def test_graph_exports_do_not_mirror_source_code(tmp_path):
             encoding="utf-8", errors="ignore"
         )
         assert source_body not in artifact_text, artifact
+        assert javascript_source_body not in artifact_text, artifact
 
 
 def test_index_honors_gitignore_and_only_creates_repolens_for_git_root(tmp_path):
