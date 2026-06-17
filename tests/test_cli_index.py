@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from textwrap import dedent
 
 from typer.testing import CliRunner
 
@@ -88,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "1"
+    assert metadata["schema_version"] == "2"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -102,6 +103,191 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
     assert skipped_paths[".env"] == "secret_path"
     assert skipped_paths[".repolens"] == "repolens_artifact_dir"
     assert run == (2, 3, 2, 1)
+
+
+def test_index_writes_python_facts_to_sqlite_and_exports(tmp_path):
+    _write_text(tmp_path / "pyproject.toml", '[project]\nname = "acme"\n')
+    _write_text(tmp_path / "src" / "acme" / "__init__.py", "")
+    _write_text(
+        tmp_path / "src" / "acme" / "service.py",
+        dedent(
+            '''
+            """Service module. Extra details are not exported as a full docstring."""
+
+            import os
+            import requests
+            from acme import models
+            from .helpers import helper as imported_helper
+
+            # TODO: replace fixture service
+            @registry.register
+            class Child(Base):
+                """Child handles work. Extra class details."""
+
+                @classmethod
+                def build(cls):
+                    return helper()
+
+            @decorated
+            def helper():
+                return Child()
+
+            async def async_worker():
+                helper()
+
+            def caller():
+                # SECURITY: keep permission checks
+                helper()
+                Child()
+                os.getcwd()
+            '''
+        ).lstrip(),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        modules = list(
+            connection.execute(
+                """
+                SELECT path, module_name, parser_status, docstring_summary
+                FROM python_modules
+                ORDER BY path
+                """
+            )
+        )
+        symbols = list(
+            connection.execute(
+                """
+                SELECT kind, qualified_name, decorators_json, bases_json, docstring_summary
+                FROM python_symbols
+                WHERE path = 'src/acme/service.py'
+                ORDER BY qualified_name
+                """
+            )
+        )
+        imports = list(
+            connection.execute(
+                """
+                SELECT module, imported_name, root_name, classification
+                FROM python_imports
+                WHERE path = 'src/acme/service.py'
+                ORDER BY module, imported_name
+                """
+            )
+        )
+        packages = list(
+            connection.execute(
+                """
+                SELECT name, classification
+                FROM python_packages
+                ORDER BY classification, name
+                """
+            )
+        )
+        comments = list(
+            connection.execute(
+                """
+                SELECT tag, text
+                FROM python_tagged_comments
+                ORDER BY tag, text
+                """
+            )
+        )
+        calls = list(
+            connection.execute(
+                """
+                SELECT callee_name, confidence
+                FROM python_calls
+                ORDER BY callee_name, line
+                """
+            )
+        )
+
+    assert modules == [
+        ("src/acme/__init__.py", "acme", "parsed", None),
+        ("src/acme/service.py", "acme.service", "parsed", "Service module."),
+    ]
+    assert ("class", "Child", '["registry.register"]', '["Base"]', "Child handles work.") in symbols
+    assert ("function", "helper", '["decorated"]', "[]", None) in symbols
+    assert ("async_function", "async_worker", "[]", "[]", None) in symbols
+    assert ("method", "Child.build", '["classmethod"]', "[]", None) in symbols
+    assert ("os", None, "os", "stdlib") in imports
+    assert ("requests", None, "requests", "third_party") in imports
+    assert ("acme", "models", "acme", "local") in imports
+    assert ("helpers", "helper", "helpers", "local") in imports
+    assert ("acme", "local") in packages
+    assert ("os", "stdlib") in packages
+    assert ("requests", "third_party") in packages
+    assert ("TODO", "replace fixture service") in comments
+    assert ("SECURITY", "keep permission checks") in comments
+    assert ("Child", "high") in calls
+    assert ("helper", "high") in calls
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(
+        symbol["qualified_name"] == "Child" and symbol["bases"] == ["Base"]
+        for symbol in graph_json["python"]["symbols"]
+    )
+    assert any(
+        import_fact["root_name"] == "requests" and import_fact["classification"] == "third_party"
+        for import_fact in graph_json["python"]["imports"]
+    )
+    assert any(
+        comment["tag"] == "SECURITY" and comment["text"] == "keep permission checks"
+        for comment in graph_lite["python"]["tagged_comments"]
+    )
+    assert "## Python Symbols" in report
+    assert "`Child`" in report
+    assert "third_party" in report
+    assert "SECURITY" in report
+    assert "## Python Imports" in graph_index
+    assert "requests" in graph_index
+
+
+def test_index_records_python_syntax_errors_nonfatally_and_removes_stale_facts(tmp_path):
+    target = tmp_path / "broken.py"
+    _write_text(target, "def valid():\n    return 1\n")
+    first_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert first_result.exit_code == 0
+
+    _write_text(target, "# FIXME: repair parser fixture\ndef broken(:\n    pass\n")
+    second_result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert second_result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        file_status = connection.execute(
+            "SELECT parser_status FROM files WHERE path = 'broken.py'"
+        ).fetchone()
+        parse_errors = list(
+            connection.execute("SELECT path, message FROM python_parse_errors ORDER BY path")
+        )
+        symbols = list(
+            connection.execute("SELECT qualified_name FROM python_symbols WHERE path = 'broken.py'")
+        )
+        comments = list(
+            connection.execute("SELECT tag, text FROM python_tagged_comments ORDER BY tag")
+        )
+
+    assert file_status == ("parse_error",)
+    assert parse_errors == [("broken.py", "invalid syntax")]
+    assert symbols == []
+    assert comments == [("FIXME", "repair parser fixture")]
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert graph_json["python"]["parse_errors"][0]["path"] == "broken.py"
+    assert graph_lite["python"]["parse_errors"][0]["message"] == "invalid syntax"
+    assert "parse_error" in report
+    assert "broken.py" in graph_index
 
 
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
@@ -210,3 +396,8 @@ def _without_volatile_markdown_fields(path):
         "Indexed at UTC: <volatile>" if line.startswith("Indexed at UTC:") else line
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def _write_text(path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")

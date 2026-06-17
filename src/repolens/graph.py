@@ -12,12 +12,18 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.python_index import (
+    PYTHON_EXTRACTOR_VERSION,
+    PythonIndex,
+    extract_python_index,
+    python_package_node_id,
+)
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 1
+GRAPH_SCHEMA_VERSION = 2
 GRAPH_ARTIFACT_VERSION = 1
-GRAPH_EXPORTER_VERSION = "issue-5-minimal-v1"
+GRAPH_EXPORTER_VERSION = PYTHON_EXTRACTOR_VERSION
 
 GRAPH_STORE_FILENAME = "graph.sqlite"
 GRAPH_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{GRAPH_STORE_FILENAME}"
@@ -214,6 +220,80 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             metadata_json TEXT NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE python_modules (
+            path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+            node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+            module_name TEXT NOT NULL,
+            package_root TEXT,
+            parser_status TEXT NOT NULL,
+            docstring_summary TEXT
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_symbols (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            parent_id TEXT REFERENCES python_symbols(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            qualified_name TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            docstring_summary TEXT,
+            decorators_json TEXT NOT NULL,
+            bases_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_imports (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            module TEXT NOT NULL,
+            imported_name TEXT,
+            alias TEXT,
+            root_name TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            level INTEGER NOT NULL,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_packages (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            classification TEXT NOT NULL,
+            inferred INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_tagged_comments (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            attached_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            tag TEXT NOT NULL,
+            text TEXT NOT NULL,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_parse_errors (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL UNIQUE REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            line INTEGER,
+            column INTEGER
+        ) WITHOUT ROWID;
+
+        CREATE TABLE python_calls (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            caller_id TEXT NOT NULL REFERENCES python_symbols(id) ON DELETE CASCADE,
+            callee_id TEXT NOT NULL REFERENCES python_symbols(id) ON DELETE CASCADE,
+            callee_name TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            confidence TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE runs (
             id INTEGER PRIMARY KEY,
             indexed_at_utc TEXT NOT NULL,
@@ -241,6 +321,8 @@ def _populate_store(
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
+    python_index = extract_python_index(root, files)
+    python_parser_status = python_index.parser_status_by_path
 
     connection.executemany(
         "INSERT INTO metadata(key, value) VALUES (?, ?)",
@@ -271,7 +353,7 @@ def _populate_store(
                 _file_node_id(scanned_file.path),
                 _file_directory(scanned_file.path),
                 scanned_file.size_bytes,
-                "not_parsed",
+                python_parser_status.get(scanned_file.path, "not_parsed"),
             )
             for scanned_file in files
         ),
@@ -281,8 +363,9 @@ def _populate_store(
         ((skipped.path, skipped.reason) for skipped in skipped_paths),
     )
 
-    _insert_nodes(connection, root, directories, files)
-    _insert_edges(connection, directories, files)
+    _insert_nodes(connection, root, directories, files, python_index)
+    _insert_python_tables(connection, python_index)
+    _insert_edges(connection, directories, files, python_index)
     connection.execute(
         """
         INSERT INTO runs(
@@ -354,7 +437,9 @@ def _insert_nodes(
     root: Path,
     directories: tuple[_DirectoryFact, ...],
     files: tuple[Any, ...],
+    python_index: PythonIndex,
 ) -> None:
+    python_parser_status = python_index.parser_status_by_path
     connection.execute(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (REPOSITORY_ID, "Repository", ".", root.name, _metadata_json({"analysis_root": "."})),
@@ -383,12 +468,291 @@ def _insert_nodes(
                 _metadata_json(
                     {
                         "directory_path": _file_directory(scanned_file.path),
-                        "parser_status": "not_parsed",
+                        "parser_status": python_parser_status.get(scanned_file.path, "not_parsed"),
                         "size_bytes": scanned_file.size_bytes,
                     }
                 ),
             )
             for scanned_file in files
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                module.node_id,
+                "PythonModule",
+                module.path,
+                module.module_name,
+                _metadata_json(
+                    {
+                        "docstring_summary": module.docstring_summary,
+                        "module_name": module.module_name,
+                        "package_root": module.package_root,
+                        "parser_status": module.parser_status,
+                    }
+                ),
+            )
+            for module in python_index.modules
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                package.id,
+                "PythonPackage",
+                None,
+                package.name,
+                _metadata_json(
+                    {
+                        "classification": package.classification,
+                        "inferred": package.inferred,
+                    }
+                ),
+            )
+            for package in python_index.packages
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                symbol.id,
+                _python_symbol_node_kind(symbol.kind),
+                symbol.path,
+                symbol.qualified_name,
+                _metadata_json(
+                    {
+                        "bases": list(symbol.bases),
+                        "decorators": list(symbol.decorators),
+                        "docstring_summary": symbol.docstring_summary,
+                        "end_line": symbol.end_line,
+                        "kind": symbol.kind,
+                        "module_node_id": symbol.module_node_id,
+                        "name": symbol.name,
+                        "parent_id": symbol.parent_id,
+                        "qualified_name": symbol.qualified_name,
+                        "start_line": symbol.start_line,
+                    }
+                ),
+            )
+            for symbol in python_index.symbols
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                comment.id,
+                "PythonTaggedComment",
+                comment.path,
+                comment.tag,
+                _metadata_json(
+                    {
+                        "attached_node_id": comment.attached_node_id,
+                        "line": comment.line,
+                        "tag": comment.tag,
+                        "text": comment.text,
+                    }
+                ),
+            )
+            for comment in python_index.tagged_comments
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                error.id,
+                "PythonParseError",
+                error.path,
+                "parse error",
+                _metadata_json(
+                    {
+                        "column": error.column,
+                        "line": error.line,
+                        "message": error.message,
+                    }
+                ),
+            )
+            for error in python_index.parse_errors
+        ),
+    )
+
+
+def _insert_python_tables(connection: sqlite3.Connection, python_index: PythonIndex) -> None:
+    connection.executemany(
+        """
+        INSERT INTO python_modules(
+            path,
+            node_id,
+            module_name,
+            package_root,
+            parser_status,
+            docstring_summary
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                module.path,
+                module.node_id,
+                module.module_name,
+                module.package_root,
+                module.parser_status,
+                module.docstring_summary,
+            )
+            for module in python_index.modules
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_symbols(
+            id,
+            path,
+            module_node_id,
+            parent_id,
+            kind,
+            name,
+            qualified_name,
+            start_line,
+            end_line,
+            docstring_summary,
+            decorators_json,
+            bases_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                symbol.id,
+                symbol.path,
+                symbol.module_node_id,
+                symbol.parent_id,
+                symbol.kind,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.start_line,
+                symbol.end_line,
+                symbol.docstring_summary,
+                _json_value(symbol.decorators),
+                _json_value(symbol.bases),
+            )
+            for symbol in python_index.symbols
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_imports(
+            id,
+            path,
+            module_node_id,
+            kind,
+            module,
+            imported_name,
+            alias,
+            root_name,
+            classification,
+            level,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                import_fact.id,
+                import_fact.path,
+                import_fact.module_node_id,
+                import_fact.kind,
+                import_fact.module,
+                import_fact.imported_name,
+                import_fact.alias,
+                import_fact.root_name,
+                import_fact.classification,
+                import_fact.level,
+                import_fact.line,
+            )
+            for import_fact in python_index.imports
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_packages(id, name, classification, inferred)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            (package.id, package.name, package.classification, int(package.inferred))
+            for package in python_index.packages
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_tagged_comments(
+            id,
+            path,
+            module_node_id,
+            attached_node_id,
+            tag,
+            text,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                comment.id,
+                comment.path,
+                comment.module_node_id,
+                comment.attached_node_id,
+                comment.tag,
+                comment.text,
+                comment.line,
+            )
+            for comment in python_index.tagged_comments
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_parse_errors(id, path, module_node_id, message, line, column)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                error.id,
+                error.path,
+                error.module_node_id,
+                error.message,
+                error.line,
+                error.column,
+            )
+            for error in python_index.parse_errors
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO python_calls(
+            id,
+            path,
+            caller_id,
+            callee_id,
+            callee_name,
+            line,
+            confidence
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                call.id,
+                call.path,
+                call.caller_id,
+                call.callee_id,
+                call.callee_name,
+                call.line,
+                call.confidence,
+            )
+            for call in python_index.calls
         ),
     )
 
@@ -397,30 +761,103 @@ def _insert_edges(
     connection: sqlite3.Connection,
     directories: tuple[_DirectoryFact, ...],
     files: tuple[Any, ...],
+    python_index: PythonIndex,
 ) -> None:
-    edges = [(REPOSITORY_ID, ROOT_DIRECTORY_ID)]
+    edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
+
+    def add_edge(
+        source_id: str,
+        target_id: str,
+        kind: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        edge_rows.append((source_id, target_id, kind, metadata or {}))
+
+    add_edge(REPOSITORY_ID, ROOT_DIRECTORY_ID, "CONTAINS")
     for directory in directories:
         if directory.parent_path is not None:
-            edges.append((_directory_node_id(directory.parent_path), directory.node_id))
+            add_edge(_directory_node_id(directory.parent_path), directory.node_id, "CONTAINS")
     for scanned_file in files:
-        edges.append(
-            (
-                _directory_node_id(_file_directory(scanned_file.path)),
-                _file_node_id(scanned_file.path),
-            )
+        add_edge(
+            _directory_node_id(_file_directory(scanned_file.path)),
+            _file_node_id(scanned_file.path),
+            "CONTAINS",
+        )
+    for module in python_index.modules:
+        add_edge(_file_node_id(module.path), module.node_id, "CONTAINS")
+    for symbol in python_index.symbols:
+        add_edge(symbol.parent_id or symbol.module_node_id, symbol.id, "CONTAINS")
+    for comment in python_index.tagged_comments:
+        add_edge(
+            comment.attached_node_id,
+            comment.id,
+            "CONTAINS",
+            {"line": comment.line, "tag": comment.tag},
+        )
+    for error in python_index.parse_errors:
+        add_edge(
+            error.module_node_id,
+            error.id,
+            "HAS_PARSE_ERROR",
+            {"line": error.line, "message": error.message},
+        )
+
+    import_edges: dict[tuple[str, str, str, str], list[int]] = {}
+    import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
+    for import_fact in python_index.imports:
+        if not import_fact.root_name:
+            continue
+        package_id = python_package_node_id(import_fact.root_name, import_fact.classification)
+        key = (
+            import_fact.module_node_id,
+            package_id,
+            import_fact.root_name,
+            import_fact.classification,
+        )
+        import_edges.setdefault(key, []).append(import_fact.line)
+        import_edge_ids.setdefault(key, []).append(import_fact.id)
+
+    for (source_id, target_id, root_name, classification), lines in sorted(import_edges.items()):
+        add_edge(
+            source_id,
+            target_id,
+            "IMPORTS",
+            {
+                "classification": classification,
+                "import_ids": sorted(
+                    import_edge_ids[(source_id, target_id, root_name, classification)]
+                ),
+                "lines": sorted(set(lines)),
+                "root_name": root_name,
+            },
+        )
+
+    call_edges: dict[tuple[str, str, str], list[int]] = {}
+    for call in python_index.calls:
+        call_edges.setdefault((call.caller_id, call.callee_id, call.callee_name), []).append(
+            call.line
+        )
+    for (source_id, target_id, callee_name), lines in sorted(call_edges.items()):
+        add_edge(
+            source_id,
+            target_id,
+            "CALLS",
+            {"callee_name": callee_name, "confidence": "high", "lines": sorted(set(lines))},
         )
 
     connection.executemany(
         "INSERT INTO edges(id, source_id, target_id, kind, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (
             (
-                _edge_id("CONTAINS", source_id, target_id),
+                _edge_id(kind, source_id, target_id),
                 source_id,
                 target_id,
-                "CONTAINS",
-                _metadata_json({}),
+                kind,
+                _metadata_json(metadata),
             )
-            for source_id, target_id in sorted(edges)
+            for source_id, target_id, kind, metadata in sorted(
+                edge_rows, key=lambda row: (row[0], row[2], row[1])
+            )
         ),
     )
 
@@ -461,6 +898,109 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        python_modules = _rows(
+            connection.execute(
+                """
+                SELECT
+                    path,
+                    node_id,
+                    module_name,
+                    package_root,
+                    parser_status,
+                    docstring_summary
+                FROM python_modules
+                ORDER BY path
+                """
+            )
+        )
+        python_symbols = _decode_python_symbol_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        parent_id,
+                        kind,
+                        name,
+                        qualified_name,
+                        start_line,
+                        end_line,
+                        docstring_summary,
+                        decorators_json,
+                        bases_json
+                    FROM python_symbols
+                    ORDER BY path, qualified_name, id
+                    """
+                )
+            )
+        )
+        python_imports = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    path,
+                    module_node_id,
+                    kind,
+                    module,
+                    imported_name,
+                    alias,
+                    root_name,
+                    classification,
+                    level,
+                    line
+                FROM python_imports
+                ORDER BY path, line, id
+                """
+            )
+        )
+        python_packages = _decode_python_package_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT id, name, classification, inferred
+                    FROM python_packages
+                    ORDER BY classification, name
+                    """
+                )
+            )
+        )
+        python_tagged_comments = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    path,
+                    module_node_id,
+                    attached_node_id,
+                    tag,
+                    text,
+                    line
+                FROM python_tagged_comments
+                ORDER BY path, line, id
+                """
+            )
+        )
+        python_parse_errors = _rows(
+            connection.execute(
+                """
+                SELECT id, path, module_node_id, message, line, column
+                FROM python_parse_errors
+                ORDER BY path
+                """
+            )
+        )
+        python_calls = _rows(
+            connection.execute(
+                """
+                SELECT id, path, caller_id, callee_id, callee_name, line, confidence
+                FROM python_calls
+                ORDER BY path, line, id
+                """
+            )
+        )
         run = _single_row(
             connection.execute(
                 """
@@ -487,6 +1027,13 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "edges": len(edges),
         "files": len(files),
         "nodes": len(nodes),
+        "python_calls": len(python_calls),
+        "python_imports": len(python_imports),
+        "python_modules": len(python_modules),
+        "python_packages": len(python_packages),
+        "python_parse_errors": len(python_parse_errors),
+        "python_symbols": len(python_symbols),
+        "python_tagged_comments": len(python_tagged_comments),
         "skipped_paths": len(skipped_paths),
     }
     skip_reasons = dict(sorted(Counter(path["reason"] for path in skipped_paths).items()))
@@ -500,6 +1047,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "limits": {"max_file_size_bytes": run["max_file_size_bytes"]},
         "metadata": metadata,
         "nodes": _decode_metadata_rows(nodes),
+        "python": {
+            "calls": python_calls,
+            "imports": python_imports,
+            "modules": python_modules,
+            "packages": python_packages,
+            "parse_errors": python_parse_errors,
+            "symbols": python_symbols,
+            "tagged_comments": python_tagged_comments,
+        },
         "repository": repository,
         "run": run,
         "schema": schema,
@@ -517,6 +1073,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "edges": snapshot["edges"],
         "files": snapshot["files"],
         "limits": snapshot["limits"],
+        "python": snapshot["python"],
         "repository": snapshot["repository"],
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
@@ -539,6 +1096,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             for file in snapshot["files"]
         ],
         "freshness": _freshness_payload(),
+        "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
@@ -564,6 +1122,68 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _python_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    python = snapshot["python"]
+    return {
+        "calls": [
+            {
+                "callee_id": call["callee_id"],
+                "callee_name": call["callee_name"],
+                "caller_id": call["caller_id"],
+                "confidence": call["confidence"],
+                "line": call["line"],
+                "path": call["path"],
+            }
+            for call in python["calls"]
+        ],
+        "imports": [
+            {
+                "classification": import_fact["classification"],
+                "imported_name": import_fact["imported_name"],
+                "kind": import_fact["kind"],
+                "line": import_fact["line"],
+                "module": import_fact["module"],
+                "path": import_fact["path"],
+                "root_name": import_fact["root_name"],
+            }
+            for import_fact in python["imports"]
+        ],
+        "modules": [
+            {
+                "docstring_summary": module["docstring_summary"],
+                "module_name": module["module_name"],
+                "parser_status": module["parser_status"],
+                "path": module["path"],
+            }
+            for module in python["modules"]
+        ],
+        "packages": python["packages"],
+        "parse_errors": python["parse_errors"],
+        "symbols": [
+            {
+                "bases": symbol["bases"],
+                "decorators": symbol["decorators"],
+                "docstring_summary": symbol["docstring_summary"],
+                "end_line": symbol["end_line"],
+                "kind": symbol["kind"],
+                "path": symbol["path"],
+                "qualified_name": symbol["qualified_name"],
+                "start_line": symbol["start_line"],
+            }
+            for symbol in python["symbols"]
+        ],
+        "tagged_comments": [
+            {
+                "line": comment["line"],
+                "path": comment["path"],
+                "tag": comment["tag"],
+                "text": comment["text"],
+            }
+            for comment in python["tagged_comments"]
+        ],
+    }
+
+
 def _run_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     run = snapshot["run"]
     return {
@@ -586,6 +1206,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     counts = snapshot["counts"]
     run = snapshot["run"]
     repository = snapshot["repository"]
+    python = snapshot["python"]
+    symbol_labels = _symbol_labels(python)
     lines = [
         "# RepoLens Graph Report",
         "",
@@ -599,7 +1221,11 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- Directories: {counts['directories']}",
         f"- Files: {counts['files']}",
         f"- Skipped paths: {counts['skipped_paths']}",
-        "- Parser facts: not extracted in Issue #5.",
+        f"- Python modules: {counts['python_modules']}",
+        f"- Python symbols: {counts['python_symbols']}",
+        f"- Python imports: {counts['python_imports']}",
+        f"- Python tagged comments: {counts['python_tagged_comments']}",
+        f"- Python parse errors: {counts['python_parse_errors']}",
         "- Live freshness checks: not implemented yet.",
         "",
         "## Files",
@@ -614,6 +1240,154 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected | 0 | not_parsed |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Modules",
+            "",
+            "| Path | Module | Parser status | Docstring |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if python["modules"]:
+        lines.extend(
+            "| "
+            f"`{module['path']}` | "
+            f"`{module['module_name']}` | "
+            f"{module['parser_status']} | "
+            f"{_md_cell(module['docstring_summary'] or '')} |"
+            for module in python["modules"]
+        )
+    else:
+        lines.append("| Not detected |  | not_parsed |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Symbols",
+            "",
+            "| Path | Kind | Qualified name | Lines | Decorators | Bases | Docstring |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if python["symbols"]:
+        lines.extend(
+            "| "
+            f"`{symbol['path']}` | "
+            f"{symbol['kind']} | "
+            f"`{symbol['qualified_name']}` | "
+            f"{symbol['start_line']}-{symbol['end_line']} | "
+            f"{_md_cell(_join_list(symbol['decorators']))} | "
+            f"{_md_cell(_join_list(symbol['bases']))} | "
+            f"{_md_cell(symbol['docstring_summary'] or '')} |"
+            for symbol in python["symbols"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Imports",
+            "",
+            "| Path | Import | Root | Classification | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if python["imports"]:
+        lines.extend(
+            "| "
+            f"`{import_fact['path']}` | "
+            f"`{_python_import_display(import_fact)}` | "
+            f"`{import_fact['root_name']}` | "
+            f"{import_fact['classification']} | "
+            f"{import_fact['line']} |"
+            for import_fact in python["imports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Packages",
+            "",
+            "| Name | Classification | Inferred |",
+            "| --- | --- | --- |",
+        ]
+    )
+    if python["packages"]:
+        lines.extend(
+            f"| `{package['name']}` | {package['classification']} | {package['inferred']} |"
+            for package in python["packages"]
+        )
+    else:
+        lines.append("| Not detected |  | false |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Tagged Comments",
+            "",
+            "| Path | Tag | Text | Line |",
+            "| --- | --- | --- | ---: |",
+        ]
+    )
+    if python["tagged_comments"]:
+        lines.extend(
+            "| "
+            f"`{comment['path']}` | "
+            f"{comment['tag']} | "
+            f"{_md_cell(comment['text'])} | "
+            f"{comment['line']} |"
+            for comment in python["tagged_comments"]
+        )
+    else:
+        lines.append("| Not detected |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Same-Module Calls",
+            "",
+            "| Path | Caller | Callee | Line | Confidence |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+    )
+    if python["calls"]:
+        lines.extend(
+            "| "
+            f"`{call['path']}` | "
+            f"`{symbol_labels.get(call['caller_id'], call['caller_id'])}` | "
+            f"`{symbol_labels.get(call['callee_id'], call['callee_name'])}` | "
+            f"{call['line']} | "
+            f"{call['confidence']} |"
+            for call in python["calls"]
+        )
+    else:
+        lines.append("| Not detected |  |  | 0 |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Parse Errors",
+            "",
+            "| Path | Message | Line | Column |",
+            "| --- | --- | ---: | ---: |",
+        ]
+    )
+    if python["parse_errors"]:
+        lines.extend(
+            "| "
+            f"`{error['path']}` | "
+            f"{_md_cell(error['message'])} | "
+            f"{error['line'] or ''} | "
+            f"{error['column'] or ''} |"
+            for error in python["parse_errors"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
 
     lines.extend(
         [
@@ -636,8 +1410,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "",
             "## Assistant Notes",
             "",
-            "This Issue #5 graph stores repository, directory, file, skipped-path, and run metadata facts only.",
-            "Deep parser facts, imports, symbols, comments, commands, and impact analysis are not detected yet.",
+            "Python source facts are extracted with the standard library AST when files parse successfully.",
+            "Deep semantic call graphs, runtime imports, commands, config parsing, and impact analysis are not detected yet.",
             "",
         ]
     )
@@ -645,6 +1419,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
 
 
 def _graph_index_text(snapshot: dict[str, Any]) -> str:
+    python = snapshot["python"]
     lines = [
         "# RepoLens Graph Index",
         "",
@@ -672,6 +1447,156 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         f"| `{file['path']}` | `{file['node_id']}` | {file['size_bytes']} | {file['parser_status']} |"
         for file in snapshot["files"]
     )
+    lines.extend(
+        [
+            "",
+            "## Python Modules",
+            "",
+            "| Path | Node ID | Module | Parser status |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if python["modules"]:
+        lines.extend(
+            f"| `{module['path']}` | `{module['node_id']}` | `{module['module_name']}` | {module['parser_status']} |"
+            for module in python["modules"]
+        )
+    else:
+        lines.append("| Not detected |  |  | not_parsed |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Symbols",
+            "",
+            "| Node ID | Path | Kind | Qualified name | Lines |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if python["symbols"]:
+        lines.extend(
+            "| "
+            f"`{symbol['id']}` | "
+            f"`{symbol['path']}` | "
+            f"{symbol['kind']} | "
+            f"`{symbol['qualified_name']}` | "
+            f"{symbol['start_line']}-{symbol['end_line']} |"
+            for symbol in python["symbols"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Imports",
+            "",
+            "| Fact ID | Path | Import | Root | Classification | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if python["imports"]:
+        lines.extend(
+            "| "
+            f"`{import_fact['id']}` | "
+            f"`{import_fact['path']}` | "
+            f"`{_python_import_display(import_fact)}` | "
+            f"`{import_fact['root_name']}` | "
+            f"{import_fact['classification']} | "
+            f"{import_fact['line']} |"
+            for import_fact in python["imports"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Packages",
+            "",
+            "| Node ID | Name | Classification | Inferred |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if python["packages"]:
+        lines.extend(
+            "| "
+            f"`{package['id']}` | "
+            f"`{package['name']}` | "
+            f"{package['classification']} | "
+            f"{package['inferred']} |"
+            for package in python["packages"]
+        )
+    else:
+        lines.append("| Not detected |  |  | false |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Tagged Comments",
+            "",
+            "| Node ID | Path | Tag | Text | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if python["tagged_comments"]:
+        lines.extend(
+            "| "
+            f"`{comment['id']}` | "
+            f"`{comment['path']}` | "
+            f"{comment['tag']} | "
+            f"{_md_cell(comment['text'])} | "
+            f"{comment['line']} |"
+            for comment in python["tagged_comments"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Same-Module Calls",
+            "",
+            "| Fact ID | Path | Caller ID | Callee ID | Callee | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if python["calls"]:
+        lines.extend(
+            "| "
+            f"`{call['id']}` | "
+            f"`{call['path']}` | "
+            f"`{call['caller_id']}` | "
+            f"`{call['callee_id']}` | "
+            f"`{call['callee_name']}` | "
+            f"{call['line']} |"
+            for call in python["calls"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Python Parse Errors",
+            "",
+            "| Node ID | Path | Message | Line | Column |",
+            "| --- | --- | --- | ---: | ---: |",
+        ]
+    )
+    if python["parse_errors"]:
+        lines.extend(
+            "| "
+            f"`{error['id']}` | "
+            f"`{error['path']}` | "
+            f"{_md_cell(error['message'])} | "
+            f"{error['line'] or ''} | "
+            f"{error['column'] or ''} |"
+            for error in python["parse_errors"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
     lines.extend(
         [
             "",
@@ -756,6 +1681,56 @@ def _decode_metadata_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return decoded_rows
 
 
+def _decode_python_symbol_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["decorators"] = json.loads(decoded.pop("decorators_json"))
+        decoded["bases"] = json.loads(decoded.pop("bases_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_python_package_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["inferred"] = bool(decoded["inferred"])
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _python_symbol_node_kind(kind: str) -> str:
+    return {
+        "async_function": "PythonAsyncFunction",
+        "async_method": "PythonAsyncMethod",
+        "class": "PythonClass",
+        "function": "PythonFunction",
+        "method": "PythonMethod",
+    }[kind]
+
+
+def _symbol_labels(python: dict[str, Any]) -> dict[str, str]:
+    return {symbol["id"]: symbol["qualified_name"] for symbol in python["symbols"]}
+
+
+def _python_import_display(import_fact: dict[str, Any]) -> str:
+    alias = f" as {import_fact['alias']}" if import_fact["alias"] else ""
+    if import_fact["kind"] == "import":
+        return f"import {import_fact['module']}{alias}"
+    relative_prefix = "." * import_fact["level"]
+    imported_name = import_fact["imported_name"] or ""
+    return f"from {relative_prefix}{import_fact['module']} import {imported_name}{alias}"
+
+
+def _join_list(values: list[str]) -> str:
+    return ", ".join(values)
+
+
+def _md_cell(value: object) -> str:
+    return str(value).replace("\n", " ").replace("|", "\\|")
+
+
 def _directory_node_id(path: str) -> str:
     return ROOT_DIRECTORY_ID if path == ROOT_DIRECTORY_PATH else f"directory:{path}"
 
@@ -785,6 +1760,10 @@ def _directory_sort_key(path: str) -> tuple[int, str]:
 
 
 def _metadata_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _json_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
