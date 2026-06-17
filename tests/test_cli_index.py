@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "2"
+    assert metadata["schema_version"] == "3"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -288,6 +288,97 @@ def test_index_records_python_syntax_errors_nonfatally_and_removes_stale_facts(t
     assert graph_lite["python"]["parse_errors"][0]["message"] == "invalid syntax"
     assert "parse_error" in report
     assert "broken.py" in graph_index
+
+
+def test_index_writes_javascript_import_facts_to_sqlite_and_exports(tmp_path):
+    _write_text(
+        tmp_path / "src" / "app.ts",
+        dedent(
+            """
+            import React from "react";
+            import { map } from "lodash/fp";
+            import * as path from "node:path";
+            import "zone.js";
+            const fs = require("fs");
+            const scoped = require("@scope/pkg/sub/path");
+            const local = require("./local");
+            const dynamic = import("kleur/colors");
+            """
+        ).lstrip(),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        file_status = connection.execute(
+            "SELECT parser_status FROM files WHERE path = 'src/app.ts'"
+        ).fetchone()
+        modules = list(
+            connection.execute(
+                """
+                SELECT path, module_name, extension, parser_status
+                FROM javascript_modules
+                ORDER BY path
+                """
+            )
+        )
+        imports = list(
+            connection.execute(
+                """
+                SELECT kind, specifier, root_name, classification
+                FROM javascript_imports
+                ORDER BY line, id
+                """
+            )
+        )
+        packages = list(
+            connection.execute(
+                """
+                SELECT name, classification
+                FROM javascript_packages
+                ORDER BY classification, name
+                """
+            )
+        )
+
+    assert file_status == ("parsed",)
+    assert modules == [("src/app.ts", "src/app", ".ts", "parsed")]
+    assert ("default_import", "react", "react", "third_party") in imports
+    assert ("named_import", "lodash/fp", "lodash", "third_party") in imports
+    assert ("namespace_import", "node:path", "path", "node_builtin") in imports
+    assert ("side_effect_import", "zone.js", "zone.js", "third_party") in imports
+    assert ("require", "fs", "fs", "node_builtin") in imports
+    assert ("require", "@scope/pkg/sub/path", "@scope/pkg", "third_party") in imports
+    assert ("require", "./local", None, "local_unresolved") in imports
+    assert ("dynamic_import", "kleur/colors", "kleur", "third_party") in imports
+    assert ("path", "node_builtin") in packages
+    assert ("fs", "node_builtin") in packages
+    assert ("@scope/pkg", "third_party") in packages
+    assert ("lodash", "third_party") in packages
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(
+        import_fact["specifier"] == "lodash/fp"
+        and import_fact["root_name"] == "lodash"
+        and import_fact["classification"] == "third_party"
+        for import_fact in graph_json["javascript"]["imports"]
+    )
+    assert any(
+        import_fact["specifier"] == "./local"
+        and import_fact["root_name"] is None
+        and import_fact["classification"] == "local_unresolved"
+        for import_fact in graph_lite["javascript"]["imports"]
+    )
+    assert "## JavaScript Imports" in report
+    assert "lodash/fp" in report
+    assert "node_builtin" in report
+    assert "## JavaScript Packages" in graph_index
+    assert "@scope/pkg" in graph_index
 
 
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
