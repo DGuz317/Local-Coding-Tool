@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "5"
+    assert metadata["schema_version"] == "6"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -542,7 +542,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "5"
+    assert metadata["schema_version"] == "6"
     assert (
         "@/components/App",
         None,
@@ -595,6 +595,139 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
     assert "src/lib/run.ts" in report
     assert "## JavaScript Exports" in graph_index
     assert "default_export" in graph_index
+
+
+def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(tmp_path):
+    _write_text(
+        tmp_path / "pyproject.toml",
+        dedent(
+            """
+            [project]
+            name = "acme-service"
+            version = "0.1.0"
+            dependencies = ["requests>=2"]
+
+            [project.scripts]
+            acme = "acme.cli:main"
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "web-app",
+              "packageManager": "npm@10.0.0",
+              "dependencies": {"react": "^19.0.0"},
+              "scripts": {
+                "test": "vitest --run --token super-secret",
+                "deploy": "npm publish --otp 123456",
+                "start": "vite --host 0.0.0.0"
+              },
+              "bin": {"web-app": "./bin/cli.js"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "package-lock.json", '{"lockfileVersion": 3}\n')
+    _write_text(tmp_path / "src" / "acme_service" / "__init__.py", "")
+    _write_text(
+        tmp_path / "src" / "acme_service" / "__main__.py",
+        "if __name__ == '__main__':\n    main()\n",
+    )
+    _write_text(tmp_path / "Dockerfile", 'FROM node:22\nCMD ["npm", "start"]\n')
+    _write_text(tmp_path / "Makefile", "test:\n\tuv run pytest\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata ORDER BY key"))
+        config_files = list(
+            connection.execute(
+                """
+                SELECT path, config_kind, format, parser_status
+                FROM config_files
+                ORDER BY path
+                """
+            )
+        )
+        packages = list(
+            connection.execute(
+                """
+                SELECT ecosystem, classification, name, dependency_type
+                FROM config_packages
+                ORDER BY ecosystem, classification, name, dependency_type
+                """
+            )
+        )
+        commands = list(
+            connection.execute(
+                """
+                SELECT source, name, purpose, command, not_run, auto_run_recommended
+                FROM config_commands
+                ORDER BY source, name
+                """
+            )
+        )
+        entrypoints = list(
+            connection.execute(
+                """
+                SELECT kind, name, target
+                FROM config_entrypoints
+                ORDER BY kind, name
+                """
+            )
+        )
+        lockfiles = list(
+            connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
+        )
+
+    assert metadata["schema_version"] == "6"
+    assert ("package.json", "package_manifest", "json", "parsed") in config_files
+    assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
+    assert ("package-lock.json", "lockfile", "json", "detected") in config_files
+    assert ("python", "local", "acme-service", "project") in packages
+    assert ("python", "external", "requests", "project.dependencies") in packages
+    assert ("javascript", "local", "web-app", "package") in packages
+    assert ("javascript", "external", "react", "dependencies") in packages
+    assert ("npm", "package-lock.json") in lockfiles
+    assert any(
+        source == "package_script"
+        and name == "test"
+        and purpose == "test"
+        and "super-secret" not in command
+        and not_run == 1
+        for source, name, purpose, command, not_run, _ in commands
+    )
+    assert any(
+        source == "package_script"
+        and name == "deploy"
+        and purpose == "deploy"
+        and auto_run_recommended == 0
+        and "123456" not in command
+        for source, name, purpose, command, _, auto_run_recommended in commands
+    )
+    assert ("python_console_script", "acme", "acme.cli:main") in entrypoints
+    assert (
+        "python_main_guard",
+        "src/acme_service/__main__.py",
+        "src/acme_service/__main__.py",
+    ) in entrypoints
+    assert ("docker_cmd", "CMD", '["npm", "start"]') in entrypoints
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(package["name"] == "react" for package in graph_json["config"]["packages"])
+    assert any(command["name"] == "test" for command in graph_lite["config"]["commands"])
+    assert "## Config Packages" in report
+    assert "react" in report
+    assert "## Config Entrypoints" in graph_index
+    assert "docker_cmd" in graph_index
 
 
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
