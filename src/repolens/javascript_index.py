@@ -1,4 +1,4 @@
-"""JavaScript and TypeScript import extraction for RepoLens graph facts."""
+"""JavaScript and TypeScript structure extraction for RepoLens graph facts."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 
 from repolens.scanner import ScannedFile
 
-JAVASCRIPT_EXTRACTOR_VERSION = "issue-7a-javascript-imports-v1"
+JAVASCRIPT_EXTRACTOR_VERSION = "issue-7b-javascript-symbols-exports-v1"
 
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
@@ -80,6 +80,44 @@ STATIC_IMPORT_FROM_PATTERN = re.compile(
 SIDE_EFFECT_IMPORT_PATTERN = re.compile(
     r"^\s*import\s*(?P<quote>['\"])(?P<specifier>[^'\"]+)(?P=quote)"
 )
+IDENTIFIER_PATTERN = r"[A-Za-z_$][A-Za-z0-9_$]*"
+EXPORT_PREFIX_PATTERN = r"(?:export\s+(?:default\s+)?)?"
+FUNCTION_DECLARATION_PATTERN = re.compile(
+    rf"^\s*{EXPORT_PREFIX_PATTERN}(?:async\s+)?function(?:\s*\*)?\s+"
+    rf"(?P<name>{IDENTIFIER_PATTERN})\b"
+)
+CLASS_DECLARATION_PATTERN = re.compile(
+    rf"^\s*{EXPORT_PREFIX_PATTERN}class\s+(?P<name>{IDENTIFIER_PATTERN})\b"
+)
+INTERFACE_DECLARATION_PATTERN = re.compile(
+    rf"^\s*(?:export\s+)?interface\s+(?P<name>{IDENTIFIER_PATTERN})\b"
+)
+TYPE_ALIAS_PATTERN = re.compile(rf"^\s*(?:export\s+)?type\s+(?P<name>{IDENTIFIER_PATTERN})\s*=")
+ARROW_CONST_PATTERN = re.compile(
+    rf"^\s*(?:export\s+)?const\s+(?P<name>{IDENTIFIER_PATTERN})\s*"
+    rf"(?::[^=]+)?=\s*(?:async\s*)?(?:<[^=>]+>\s*)?"
+    rf"(?:\([^)]*\)|{IDENTIFIER_PATTERN})\s*=>"
+)
+EXPORT_FUNCTION_PATTERN = re.compile(
+    rf"^\s*export\s+(?:default\s+)?(?:async\s+)?function(?:\s*\*)?\s+"
+    rf"(?P<name>{IDENTIFIER_PATTERN})\b"
+)
+EXPORT_CLASS_PATTERN = re.compile(
+    rf"^\s*export\s+(?:default\s+)?class\s+(?P<name>{IDENTIFIER_PATTERN})\b"
+)
+EXPORT_CONST_PATTERN = re.compile(rf"^\s*export\s+const\s+(?P<name>{IDENTIFIER_PATTERN})\b")
+EXPORT_DEFAULT_PATTERN = re.compile(r"^\s*export\s+default\b(?P<body>.*)$")
+EXPORT_LIST_PATTERN = re.compile(r"^\s*export\s*\{(?P<items>[^}]+)\}")
+EXPORT_LIST_ITEM_PATTERN = re.compile(
+    rf"^(?:type\s+)?(?P<local>{IDENTIFIER_PATTERN}|default)"
+    rf"(?:\s+as\s+(?P<exported>{IDENTIFIER_PATTERN}|default))?$"
+)
+MODULE_EXPORTS_PATTERN = re.compile(r"^\s*module\.exports\s*=\s*(?P<rhs>.+?)\s*;?\s*$")
+EXPORTS_PROPERTY_PATTERN = re.compile(
+    rf"^\s*exports\.(?P<name>{IDENTIFIER_PATTERN})\s*=\s*(?P<rhs>.+?)\s*;?\s*$"
+)
+ASSIGNED_NAME_PATTERN = re.compile(rf"^(?P<name>{IDENTIFIER_PATTERN}(?:\.{IDENTIFIER_PATTERN})*)\b")
+JS_KEYWORDS = frozenset({"async", "class", "function", "new", "return"})
 
 
 @dataclass(frozen=True)
@@ -117,12 +155,56 @@ class JavaScriptPackageFact:
 
 
 @dataclass(frozen=True)
+class JavaScriptSymbolFact:
+    """An obvious top-level JS/TS symbol discovered by bounded scanning."""
+
+    id: str
+    path: str
+    module_node_id: str
+    kind: str
+    name: str
+    qualified_name: str
+    line: int
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
+class JavaScriptExportFact:
+    """A clear ES export statement without source body content."""
+
+    id: str
+    path: str
+    module_node_id: str
+    kind: str
+    exported_name: str
+    local_name: str | None
+    line: int
+
+
+@dataclass(frozen=True)
+class JavaScriptCommonJSAssignmentFact:
+    """A clear CommonJS export assignment without source body content."""
+
+    id: str
+    path: str
+    module_node_id: str
+    kind: str
+    exported_name: str
+    assigned_name: str | None
+    line: int
+
+
+@dataclass(frozen=True)
 class JavaScriptIndex:
-    """All JS/TS import facts extracted for one scan result."""
+    """All JS/TS facts extracted for one scan result."""
 
     modules: tuple[JavaScriptModuleFact, ...]
     imports: tuple[JavaScriptImportFact, ...]
     packages: tuple[JavaScriptPackageFact, ...]
+    symbols: tuple[JavaScriptSymbolFact, ...]
+    exports: tuple[JavaScriptExportFact, ...]
+    commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
 
     @property
     def parser_status_by_path(self) -> dict[str, str]:
@@ -130,12 +212,15 @@ class JavaScriptIndex:
 
 
 def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> JavaScriptIndex:
-    """Extract deterministic JS/TS import facts from scanner-approved source files only."""
+    """Extract deterministic JS/TS facts from scanner-approved source files only."""
     javascript_files = tuple(
         file for file in sorted(files, key=lambda item: item.path) if _is_javascript(file)
     )
     modules: list[JavaScriptModuleFact] = []
     imports: list[JavaScriptImportFact] = []
+    symbols: list[JavaScriptSymbolFact] = []
+    exports: list[JavaScriptExportFact] = []
+    commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -162,9 +247,12 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
             )
             continue
 
-        imports_for_file = _extract_imports(path, module_node_id, source)
-        imports.extend(imports_for_file)
-        for import_fact in imports_for_file:
+        file_facts = _extract_file_facts(path, module_node_id, source)
+        imports.extend(file_facts.imports)
+        symbols.extend(file_facts.symbols)
+        exports.extend(file_facts.exports)
+        commonjs_assignments.extend(file_facts.commonjs_assignments)
+        for import_fact in file_facts.imports:
             if import_fact.root_name is not None:
                 observed_packages.add((import_fact.classification, import_fact.root_name))
 
@@ -180,6 +268,11 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         modules=tuple(sorted(modules, key=lambda fact: fact.path)),
         imports=tuple(sorted(imports, key=lambda fact: (fact.path, fact.line, fact.id))),
         packages=packages,
+        symbols=tuple(sorted(symbols, key=lambda fact: (fact.path, fact.qualified_name, fact.id))),
+        exports=tuple(sorted(exports, key=lambda fact: (fact.path, fact.line, fact.id))),
+        commonjs_assignments=tuple(
+            sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
+        ),
     )
 
 
@@ -189,6 +282,10 @@ def javascript_module_node_id(path: str) -> str:
 
 def javascript_package_node_id(name: str, classification: str) -> str:
     return f"javascript_package:{classification}:{name}"
+
+
+def javascript_symbol_node_id(path: str, kind: str, name: str) -> str:
+    return f"javascript_symbol:{path}:{kind}:{name}"
 
 
 def _is_javascript(file: ScannedFile) -> bool:
@@ -206,32 +303,92 @@ def _module_name(path: str) -> str:
     return PurePosixPath(path).with_suffix("").as_posix()
 
 
-def _extract_imports(
-    path: str, module_node_id: str, source: str
-) -> tuple[JavaScriptImportFact, ...]:
-    facts: list[JavaScriptImportFact] = []
-    id_counts: Counter[str] = Counter()
+@dataclass(frozen=True)
+class _JavaScriptFileFacts:
+    imports: tuple[JavaScriptImportFact, ...]
+    symbols: tuple[JavaScriptSymbolFact, ...]
+    exports: tuple[JavaScriptExportFact, ...]
+    commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
+
+
+def _extract_file_facts(path: str, module_node_id: str, source: str) -> _JavaScriptFileFacts:
+    imports: list[JavaScriptImportFact] = []
+    symbols: list[JavaScriptSymbolFact] = []
+    exports: list[JavaScriptExportFact] = []
+    commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    import_id_counts: Counter[str] = Counter()
+    symbol_id_counts: Counter[str] = Counter()
+    export_id_counts: Counter[str] = Counter()
+    commonjs_id_counts: Counter[str] = Counter()
+    brace_depth = 0
+
     for line_number, line in enumerate(_strip_comments_preserving_strings(source), start=1):
-        static_import = _static_import_fact(path, module_node_id, line, line_number, id_counts)
+        static_import = _static_import_fact(
+            path, module_node_id, line, line_number, import_id_counts
+        )
         if static_import is not None:
-            facts.append(static_import)
+            imports.append(static_import)
 
         for specifier in _literal_call_specifiers(line, "require"):
-            facts.append(
-                _import_fact(path, module_node_id, "require", specifier, line_number, id_counts)
+            imports.append(
+                _import_fact(
+                    path,
+                    module_node_id,
+                    "require",
+                    specifier,
+                    line_number,
+                    import_id_counts,
+                )
             )
         for specifier in _literal_call_specifiers(line, "import"):
-            facts.append(
+            imports.append(
                 _import_fact(
                     path,
                     module_node_id,
                     "dynamic_import",
                     specifier,
                     line_number,
-                    id_counts,
+                    import_id_counts,
                 )
             )
-    return tuple(facts)
+
+        if brace_depth == 0:
+            symbol = _top_level_symbol_fact(
+                path,
+                module_node_id,
+                line,
+                line_number,
+                symbol_id_counts,
+            )
+            if symbol is not None:
+                symbols.append(symbol)
+            exports.extend(
+                _top_level_export_facts(
+                    path,
+                    module_node_id,
+                    line,
+                    line_number,
+                    export_id_counts,
+                )
+            )
+            commonjs_assignment = _commonjs_assignment_fact(
+                path,
+                module_node_id,
+                line,
+                line_number,
+                commonjs_id_counts,
+            )
+            if commonjs_assignment is not None:
+                commonjs_assignments.append(commonjs_assignment)
+
+        brace_depth = max(0, brace_depth + _brace_delta_outside_strings(line))
+
+    return _JavaScriptFileFacts(
+        imports=tuple(imports),
+        symbols=tuple(symbols),
+        exports=tuple(exports),
+        commonjs_assignments=tuple(commonjs_assignments),
+    )
 
 
 def _static_import_fact(
@@ -272,6 +429,249 @@ def _static_import_kind(clause: str) -> str:
     if normalized.startswith("{") or "{" in normalized:
         return "named_import"
     return "default_import"
+
+
+def _top_level_symbol_fact(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+) -> JavaScriptSymbolFact | None:
+    for kind, pattern in (
+        ("function", FUNCTION_DECLARATION_PATTERN),
+        ("arrow_function", ARROW_CONST_PATTERN),
+        ("class", CLASS_DECLARATION_PATTERN),
+        ("interface", INTERFACE_DECLARATION_PATTERN),
+        ("type_alias", TYPE_ALIAS_PATTERN),
+    ):
+        match = pattern.match(line)
+        if match is not None:
+            return _symbol_fact(
+                path,
+                module_node_id,
+                kind,
+                match.group("name"),
+                line_number,
+                id_counts,
+            )
+    return None
+
+
+def _symbol_fact(
+    path: str,
+    module_node_id: str,
+    kind: str,
+    name: str,
+    line: int,
+    id_counts: Counter[str],
+) -> JavaScriptSymbolFact:
+    key = "|".join((path, kind, name))
+    id_counts[key] += 1
+    suffix = "" if id_counts[key] == 1 else f"#{id_counts[key]}"
+    return JavaScriptSymbolFact(
+        id=f"{javascript_symbol_node_id(path, kind, name)}{suffix}",
+        path=path,
+        module_node_id=module_node_id,
+        kind=kind,
+        name=name,
+        qualified_name=name,
+        line=line,
+        start_line=line,
+        end_line=line,
+    )
+
+
+def _top_level_export_facts(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+) -> tuple[JavaScriptExportFact, ...]:
+    facts: list[JavaScriptExportFact] = []
+    if _is_default_export(line):
+        facts.append(
+            _export_fact(
+                path,
+                module_node_id,
+                "default_export",
+                "default",
+                _default_export_local_name(line),
+                line_number,
+                id_counts,
+            )
+        )
+        return tuple(facts)
+
+    for kind, pattern in (
+        ("function_export", EXPORT_FUNCTION_PATTERN),
+        ("class_export", EXPORT_CLASS_PATTERN),
+        ("const_export", EXPORT_CONST_PATTERN),
+    ):
+        match = pattern.match(line)
+        if match is not None:
+            name = match.group("name")
+            facts.append(
+                _export_fact(path, module_node_id, kind, name, name, line_number, id_counts)
+            )
+            return tuple(facts)
+
+    facts.extend(_export_list_facts(path, module_node_id, line, line_number, id_counts))
+    return tuple(facts)
+
+
+def _is_default_export(line: str) -> bool:
+    return EXPORT_DEFAULT_PATTERN.match(line) is not None
+
+
+def _default_export_local_name(line: str) -> str | None:
+    match = EXPORT_DEFAULT_PATTERN.match(line)
+    if match is None:
+        return None
+    body = match.group("body").strip()
+    function_match = re.match(
+        rf"^(?:async\s+)?function(?:\s*\*)?\s+(?P<name>{IDENTIFIER_PATTERN})\b",
+        body,
+    )
+    if function_match is not None:
+        return function_match.group("name")
+    class_match = re.match(rf"^class\s+(?P<name>{IDENTIFIER_PATTERN})\b", body)
+    if class_match is not None:
+        return class_match.group("name")
+
+    name_match = ASSIGNED_NAME_PATTERN.match(body.rstrip(";").strip())
+    if name_match is None:
+        return None
+    name = name_match.group("name")
+    if name in JS_KEYWORDS:
+        return None
+    remainder = body.rstrip(";").strip()[name_match.end() :].strip()
+    return name if not remainder else None
+
+
+def _export_list_facts(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+) -> tuple[JavaScriptExportFact, ...]:
+    match = EXPORT_LIST_PATTERN.match(line)
+    if match is None:
+        return ()
+
+    facts: list[JavaScriptExportFact] = []
+    for raw_item in match.group("items").split(","):
+        item_match = EXPORT_LIST_ITEM_PATTERN.match(raw_item.strip())
+        if item_match is None:
+            continue
+        local_name = item_match.group("local")
+        exported_name = item_match.group("exported") or local_name
+        facts.append(
+            _export_fact(
+                path,
+                module_node_id,
+                "named_export",
+                exported_name,
+                local_name,
+                line_number,
+                id_counts,
+            )
+        )
+    return tuple(facts)
+
+
+def _export_fact(
+    path: str,
+    module_node_id: str,
+    kind: str,
+    exported_name: str,
+    local_name: str | None,
+    line: int,
+    id_counts: Counter[str],
+) -> JavaScriptExportFact:
+    key = "|".join((path, kind, exported_name))
+    id_counts[key] += 1
+    suffix = "" if id_counts[key] == 1 else f"#{id_counts[key]}"
+    return JavaScriptExportFact(
+        id=f"javascript_export:{path}:{kind}:{exported_name}{suffix}",
+        path=path,
+        module_node_id=module_node_id,
+        kind=kind,
+        exported_name=exported_name,
+        local_name=local_name,
+        line=line,
+    )
+
+
+def _commonjs_assignment_fact(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+) -> JavaScriptCommonJSAssignmentFact | None:
+    module_exports = MODULE_EXPORTS_PATTERN.match(line)
+    if module_exports is not None:
+        return _commonjs_fact(
+            path,
+            module_node_id,
+            "module_exports",
+            "module.exports",
+            _assigned_name(module_exports.group("rhs")),
+            line_number,
+            id_counts,
+        )
+
+    exports_property = EXPORTS_PROPERTY_PATTERN.match(line)
+    if exports_property is None:
+        return None
+    exported_name = exports_property.group("name")
+    return _commonjs_fact(
+        path,
+        module_node_id,
+        "exports_property",
+        exported_name,
+        _assigned_name(exports_property.group("rhs")),
+        line_number,
+        id_counts,
+    )
+
+
+def _commonjs_fact(
+    path: str,
+    module_node_id: str,
+    kind: str,
+    exported_name: str,
+    assigned_name: str | None,
+    line: int,
+    id_counts: Counter[str],
+) -> JavaScriptCommonJSAssignmentFact:
+    key = "|".join((path, kind, exported_name))
+    id_counts[key] += 1
+    suffix = "" if id_counts[key] == 1 else f"#{id_counts[key]}"
+    return JavaScriptCommonJSAssignmentFact(
+        id=f"javascript_commonjs:{path}:{kind}:{exported_name}{suffix}",
+        path=path,
+        module_node_id=module_node_id,
+        kind=kind,
+        exported_name=exported_name,
+        assigned_name=assigned_name,
+        line=line,
+    )
+
+
+def _assigned_name(rhs: str) -> str | None:
+    normalized = rhs.strip().rstrip(";").strip()
+    match = ASSIGNED_NAME_PATTERN.match(normalized)
+    if match is None:
+        return None
+    name = match.group("name")
+    if name in JS_KEYWORDS:
+        return None
+    remainder = normalized[match.end() :].strip()
+    return name if not remainder else None
 
 
 def _import_fact(
@@ -378,6 +778,28 @@ def _strip_comments_preserving_strings(source: str) -> tuple[str, ...]:
             index += 1
         lines.append("".join(line))
     return tuple(lines)
+
+
+def _brace_delta_outside_strings(line: str) -> int:
+    delta = 0
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character == "{":
+            delta += 1
+        elif character == "}":
+            delta -= 1
+    return delta
 
 
 def _literal_call_specifiers(line: str, function_name: str) -> tuple[str, ...]:
