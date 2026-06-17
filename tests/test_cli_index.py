@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "4"
+    assert metadata["schema_version"] == "5"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -483,9 +483,124 @@ def test_index_writes_javascript_symbol_export_and_commonjs_facts_to_artifacts(t
     assert "module.exports" in graph_index
 
 
+def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_path):
+    _write_text(
+        tmp_path / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                  "@/*": ["src/*"],
+                  "@ambiguous/*": ["src/*", "lib/*"]
+                }
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "src" / "lib" / "run.ts", "export const run = () => 'done';\n")
+    _write_text(tmp_path / "src" / "components" / "App.tsx", "export const App = () => null;\n")
+    _write_text(
+        tmp_path / "src" / "main.tsx",
+        dedent(
+            """
+            import React from "react";
+            import { run } from "@/lib/run";
+            import { App } from "@/components/App";
+            import maybe from "@ambiguous/maybe";
+
+            export { App };
+            export default App;
+            """
+        ).lstrip(),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata ORDER BY key"))
+        imports = list(
+            connection.execute(
+                """
+                SELECT specifier, root_name, classification, resolved_path, resolution_status
+                FROM javascript_imports
+                ORDER BY specifier
+                """
+            )
+        )
+        import_edges = list(
+            connection.execute(
+                """
+                SELECT source_id, target_id, kind, metadata_json
+                FROM edges
+                WHERE source_id = 'javascript_module:src/main.tsx'
+                ORDER BY target_id
+                """
+            )
+        )
+
+    assert metadata["schema_version"] == "5"
+    assert (
+        "@/components/App",
+        None,
+        "local_resolved",
+        "src/components/App.tsx",
+        "resolved_alias",
+    ) in imports
+    assert ("@/lib/run", None, "local_resolved", "src/lib/run.ts", "resolved_alias") in imports
+    assert (
+        "@ambiguous/maybe",
+        None,
+        "local_unresolved",
+        None,
+        "unresolved_complex_alias",
+    ) in imports
+    assert ("react", "react", "third_party", None, "external") in imports
+
+    assert any(
+        target_id == "javascript_module:src/lib/run.ts"
+        and kind == "IMPORTS"
+        and '"resolved_path":"src/lib/run.ts"' in metadata_json
+        for _, target_id, kind, metadata_json in import_edges
+    )
+    assert not any("@ambiguous/maybe" in metadata_json for *_, metadata_json in import_edges)
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(
+        import_fact["specifier"] == "@/lib/run"
+        and import_fact["resolved_path"] == "src/lib/run.ts"
+        and import_fact["resolution_status"] == "resolved_alias"
+        for import_fact in graph_json["javascript"]["imports"]
+    )
+    assert any(
+        import_fact["specifier"] == "@ambiguous/maybe"
+        and import_fact["resolved_path"] is None
+        and import_fact["resolution_status"] == "unresolved_complex_alias"
+        for import_fact in graph_lite["javascript"]["imports"]
+    )
+    assert any(
+        edge["target_id"] == "javascript_module:src/components/App.tsx"
+        and edge["kind"] == "IMPORTS"
+        for edge in graph_json["edges"]
+    )
+    assert "## JavaScript Imports" in report
+    assert "resolved_alias" in report
+    assert "src/lib/run.ts" in report
+    assert "## JavaScript Exports" in graph_index
+    assert "default_export" in graph_index
+
+
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    _write_text(tmp_path / "src" / "widget.ts", "export const widget = () => 'ok';\n")
     (tmp_path / "README.md").write_text("# Fixture\n", encoding="utf-8")
 
     first_result = runner.invoke(app, ["index", str(tmp_path)])

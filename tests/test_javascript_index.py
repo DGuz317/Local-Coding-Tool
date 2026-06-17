@@ -161,6 +161,85 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
     }
 
 
+def test_javascript_index_resolves_simple_typescript_path_aliases(tmp_path):
+    _write_text(
+        tmp_path / "tsconfig.json",
+        dedent(
+            """
+            {
+              // TypeScript config JSON commonly permits comments.
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                  "@/*": ["src/*"],
+                  "@app/*": ["src/app/*"],
+                },
+              },
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "src" / "shared" / "format.ts", "export const format = () => 'ok';\n")
+    _write_text(tmp_path / "src" / "app" / "entry.tsx", "export const Entry = () => null;\n")
+    _write_text(
+        tmp_path / "src" / "main.ts",
+        dedent(
+            """
+            import { format } from "@/shared/format";
+            import { Entry } from "@app/entry";
+            import React from "react";
+            """
+        ).lstrip(),
+    )
+
+    scan = scan_repository(tmp_path)
+    javascript_index = extract_javascript_index(tmp_path, scan.files)
+
+    imports = {item.specifier: item for item in javascript_index.imports}
+    assert imports["@/shared/format"].classification == "local_resolved"
+    assert imports["@/shared/format"].root_name is None
+    assert imports["@/shared/format"].resolved_path == "src/shared/format.ts"
+    assert imports["@/shared/format"].resolution_status == "resolved_alias"
+    assert imports["@app/entry"].resolved_path == "src/app/entry.tsx"
+    assert imports["react"].classification == "third_party"
+
+    packages = {(package.classification, package.name) for package in javascript_index.packages}
+    assert packages == {("third_party", "react")}
+
+
+def test_javascript_index_leaves_complex_aliases_unresolved_without_packages(tmp_path):
+    _write_text(
+        tmp_path / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "paths": {
+                  "@ambiguous/*": ["src/*", "lib/*"],
+                  "@missing/*": ["src/missing/*"]
+                }
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "src" / "app.ts", 'import thing from "@ambiguous/thing";\n')
+    _write_text(tmp_path / "src" / "other.ts", 'import missing from "@missing/thing";\n')
+
+    scan = scan_repository(tmp_path)
+    javascript_index = extract_javascript_index(tmp_path, scan.files)
+
+    imports = {item.specifier: item for item in javascript_index.imports}
+    assert imports["@ambiguous/thing"].classification == "local_unresolved"
+    assert imports["@ambiguous/thing"].root_name is None
+    assert imports["@ambiguous/thing"].resolved_path is None
+    assert imports["@ambiguous/thing"].resolution_status == "unresolved_complex_alias"
+    assert imports["@missing/thing"].classification == "local_unresolved"
+    assert imports["@missing/thing"].resolved_path is None
+    assert imports["@missing/thing"].resolution_status == "unresolved_missing_alias"
+    assert javascript_index.packages == ()
+
+
 def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_path):
     _write_text(
         tmp_path / "src" / "module.ts",
