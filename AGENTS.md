@@ -185,10 +185,11 @@ Completed or split-completed:
 - #8 Config, Command, Package, And Entrypoint Indexing.
 - #9 Markdown, Comments, Docs, And Agent Guidance Indexing.
 - #10 Incremental Update And Staleness Classification.
+- #11 Report And Safe Raw Text Search CLI.
 
 Next planned slice:
 
-- #11 Report And Safe Raw Text Search CLI.
+- #12 Structured Graph Query Service.
 
 ## Architecture-Level Context
 
