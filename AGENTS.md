@@ -187,10 +187,11 @@ Completed or split-completed:
 - #10 Incremental Update And Staleness Classification.
 - #11 Report And Safe Raw Text Search CLI.
 - #12 Structured Graph Query Service.
+- #13 Impact Analysis And Reading Order Queries.
 
 Next planned slice:
 
-- #13 Impact Analysis And Reading Order Queries.
+- #14 Read-Only Stdio MCP Server.
 
 ## Architecture-Level Context
 
