@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "6"
+    assert metadata["schema_version"] == "7"
     assert repositories == [("repository:.", ".", tmp_path.name)]
     assert directories == [
         (".", "directory:.", None),
@@ -542,7 +542,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "6"
+    assert metadata["schema_version"] == "7"
     assert (
         "@/components/App",
         None,
@@ -684,7 +684,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "6"
+    assert metadata["schema_version"] == "7"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -728,6 +728,162 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
     assert "react" in report
     assert "## Config Entrypoints" in graph_index
     assert "docker_cmd" in graph_index
+
+
+def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_path):
+    _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
+    _write_text(
+        tmp_path / "src" / "app.ts",
+        dedent(
+            """
+            // TODO: handle browser fallback
+            export const app = () => true;
+            /* SECURITY: keep auth check close */
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "docs" / "guide.md", "# Guide\n")
+    _write_text(tmp_path / "AGENTS.md", "# AGENTS.md\n\nUse repo-specific workflow.\n")
+    _write_text(
+        tmp_path / ".agents" / "skills" / "review" / "SKILL.md",
+        dedent(
+            """
+            ---
+            name: review
+            description: Review repository changes for regressions.
+            ---
+
+            # Review
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "README.md",
+        dedent(
+            """
+            # RepoLens
+
+            RepoLens maps local repositories. Extra details are not mirrored.
+
+            ## Setup
+            See [Guide](docs/guide.md), `src/app.py`, and AGENTS.md.
+
+            ```python
+            SECRET_CODE_FENCE_BODY = "must not be exported"
+            ```
+
+            ## Setup
+            """
+        ).lstrip(),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata ORDER BY key"))
+        markdown_files = list(
+            connection.execute(
+                """
+                SELECT path, doc_kind, importance, title, intro
+                FROM documentation_files
+                ORDER BY path
+                """
+            )
+        )
+        headings = list(
+            connection.execute(
+                """
+                SELECT path, heading_id, text, line
+                FROM markdown_headings
+                WHERE path = 'README.md'
+                ORDER BY line
+                """
+            )
+        )
+        links = list(
+            connection.execute(
+                """
+                SELECT path, label, target_path
+                FROM markdown_links
+                ORDER BY path, label
+                """
+            )
+        )
+        mentions = list(
+            connection.execute(
+                """
+                SELECT path, mentioned_path, target_path
+                FROM markdown_path_mentions
+                ORDER BY path, mentioned_path
+                """
+            )
+        )
+        fences = list(
+            connection.execute(
+                """
+                SELECT path, language, info_string
+                FROM markdown_code_fences
+                ORDER BY path, start_line
+                """
+            )
+        )
+        tagged_comments = list(
+            connection.execute(
+                """
+                SELECT tag, text, language
+                FROM documentation_tagged_comments
+                ORDER BY tag, text
+                """
+            )
+        )
+        skills = list(
+            connection.execute("SELECT name, description, path FROM skills ORDER BY name")
+        )
+
+    assert metadata["schema_version"] == "7"
+    assert (
+        "README.md",
+        "readme",
+        "important",
+        "RepoLens",
+        "RepoLens maps local repositories.",
+    ) in markdown_files
+    assert ("AGENTS.md", "agent_instructions", "important", "AGENTS.md", None) in markdown_files
+    assert ("README.md", "repolens", "RepoLens", 1) in headings
+    assert ("README.md", "setup", "Setup", 5) in headings
+    assert ("README.md", "setup-1", "Setup", 12) in headings
+    assert ("README.md", "Guide", "docs/guide.md") in links
+    assert ("README.md", "src/app.py", "src/app.py") in mentions
+    assert ("README.md", "AGENTS.md", "AGENTS.md") in mentions
+    assert ("README.md", "python", "python") in fences
+    assert ("SECURITY", "keep auth check close", "javascript") in tagged_comments
+    assert ("TODO", "handle browser fallback", "javascript") in tagged_comments
+    assert (
+        "review",
+        "Review repository changes for regressions.",
+        ".agents/skills/review/SKILL.md",
+    ) in skills
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
+    graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+
+    assert any(
+        file["doc_kind"] == "agent_instructions" for file in graph_json["documentation"]["files"]
+    )
+    assert any(skill["name"] == "review" for skill in graph_lite["documentation"]["skills"])
+    assert "## Markdown Headings" in report
+    assert "setup-1" in report
+    assert "## Skills" in graph_index
+    assert "review" in graph_index
+
+    for artifact in GRAPH_ARTIFACTS:
+        artifact_text = (tmp_path / ".repolens" / artifact).read_text(
+            encoding="utf-8", errors="ignore"
+        )
+        assert "SECRET_CODE_FENCE_BODY" not in artifact_text, artifact
 
 
 def test_index_exports_are_deterministic_except_allowed_run_timestamp(tmp_path):
