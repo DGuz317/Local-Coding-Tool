@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -26,6 +27,7 @@ from repolens.documentation_index import (
 )
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
+    JAVASCRIPT_SOURCE_SUFFIXES,
     JavaScriptIndex,
     extract_javascript_index,
     javascript_module_node_id,
@@ -37,10 +39,17 @@ from repolens.python_index import (
     extract_python_index,
     python_package_node_id,
 )
-from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
+from repolens.scanner import (
+    ARTIFACT_DIR_NAME,
+    DEFAULT_MAX_FILE_SIZE_BYTES,
+    ScanError,
+    ScannedFile,
+    ScanResult,
+    scan_repository,
+)
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 7
+GRAPH_SCHEMA_VERSION = 8
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -63,6 +72,25 @@ REPOSITORY_ID = "repository:."
 ROOT_DIRECTORY_PATH = "."
 ROOT_DIRECTORY_ID = "directory:."
 
+CHANGE_TYPES = (
+    "deleted",
+    "new",
+    "parse_error",
+    "dependency_change",
+    "structural_change",
+    "content_only_change",
+    "no_change",
+)
+HASH_FIELDS = (
+    "raw",
+    "normalized",
+    "graph",
+    "dependency",
+    "symbol",
+    "line_range",
+)
+PARSER_ERROR_WARNING = "Parser errors detected in the live graph overlay."
+
 
 class GraphStoreError(RuntimeError):
     """Raised when the authoritative graph store cannot be rebuilt."""
@@ -83,15 +111,138 @@ class GraphArtifactsStatus:
     warnings: tuple[str, ...]
     detected_schema_version: str | None = None
     supported_schema_version: int = GRAPH_SCHEMA_VERSION
+    freshness: dict[str, Any] | None = None
+    file_changes: tuple["FileChange", ...] = ()
 
 
-def rebuild_graph_artifacts(root: Path, scan: ScanResult) -> tuple[str, ...]:
+@dataclass(frozen=True)
+class FileState:
+    """A stored or live fingerprint for one scanner-approved file."""
+
+    path: str
+    size_bytes: int
+    mtime_ns: int
+    raw_hash: str
+    normalized_hash: str
+    graph_hash: str
+    dependency_hash: str
+    symbol_hash: str
+    line_range_hash: str
+    language: str
+    parser_status: str
+    indexed_at_utc: str
+
+    def hash_payload(self, other: "FileState | None") -> dict[str, dict[str, str | None]]:
+        """Return old/current hash details for status payloads."""
+        return {
+            "raw": {"old": self.raw_hash, "current": other.raw_hash if other else None},
+            "normalized": {
+                "old": self.normalized_hash,
+                "current": other.normalized_hash if other else None,
+            },
+            "graph": {"old": self.graph_hash, "current": other.graph_hash if other else None},
+            "dependency": {
+                "old": self.dependency_hash,
+                "current": other.dependency_hash if other else None,
+            },
+            "symbol": {"old": self.symbol_hash, "current": other.symbol_hash if other else None},
+            "line_range": {
+                "old": self.line_range_hash,
+                "current": other.line_range_hash if other else None,
+            },
+        }
+
+    def current_hash_payload(self) -> dict[str, dict[str, str | None]]:
+        """Return a new-file hash payload using current values only."""
+        return {
+            "raw": {"old": None, "current": self.raw_hash},
+            "normalized": {"old": None, "current": self.normalized_hash},
+            "graph": {"old": None, "current": self.graph_hash},
+            "dependency": {"old": None, "current": self.dependency_hash},
+            "symbol": {"old": None, "current": self.symbol_hash},
+            "line_range": {"old": None, "current": self.line_range_hash},
+        }
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """Path-based latest change classification for one file."""
+
+    path: str
+    change_type: str
+    secondary_signals: dict[str, bool]
+    hashes: dict[str, dict[str, str | None]]
+    parser_status: dict[str, str | None]
+    size_bytes: dict[str, int | None]
+    language: dict[str, str | None]
+
+    @property
+    def changed(self) -> bool:
+        return self.change_type != "no_change"
+
+    def to_status_dict(self) -> dict[str, object]:
+        return {
+            "change_type": self.change_type,
+            "hashes": self.hashes,
+            "language": self.language,
+            "parser_status": self.parser_status,
+            "path": self.path,
+            "secondary_signals": self.secondary_signals,
+            "size_bytes": self.size_bytes,
+        }
+
+    def to_changed_file_dict(self) -> dict[str, object]:
+        return {
+            "change_type": self.change_type,
+            "path": self.path,
+            "secondary_signals": self.secondary_signals,
+        }
+
+
+@dataclass(frozen=True)
+class _ExtractedIndexes:
+    python: PythonIndex
+    javascript: JavaScriptIndex
+    config: ConfigIndex
+    documentation: DocumentationIndex
+    parser_status_by_path: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _GraphSignature:
+    graph_hash: str
+    dependency_hash: str
+    symbol_hash: str
+    line_range_hash: str
+
+
+@dataclass(frozen=True)
+class _GitMetadata:
+    detected: bool
+    branch: str | None
+    commit: str | None
+
+    def to_payload(self) -> dict[str, object]:
+        return {"branch": self.branch, "commit": self.commit, "detected": self.detected}
+
+
+def rebuild_graph_artifacts(
+    root: Path,
+    scan: ScanResult,
+    *,
+    file_changes: tuple[FileChange, ...] = (),
+) -> tuple[str, ...]:
     """Rebuild the graph store and exports from one safe discovery result."""
-    build_graph_store(root, scan)
+    build_graph_store(root, scan, file_changes=file_changes)
     return export_graph_artifacts(root)
 
 
-def build_graph_store(root: Path, scan: ScanResult) -> Path:
+def build_graph_store(
+    root: Path,
+    scan: ScanResult,
+    *,
+    file_changes: tuple[FileChange, ...] = (),
+) -> Path:
     """Build ``graph.sqlite`` in a temporary file and replace it after success."""
     artifact_dir = root / ARTIFACT_DIR_NAME
     target = root / GRAPH_STORE_PATH
@@ -111,7 +262,13 @@ def build_graph_store(root: Path, scan: ScanResult) -> Path:
         with sqlite3.connect(temp_path) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             _create_schema(connection)
-            _populate_store(connection, root, scan, indexed_at_utc=_utc_now())
+            _populate_store(
+                connection,
+                root,
+                scan,
+                indexed_at_utc=_utc_now(),
+                file_changes=file_changes,
+            )
             connection.commit()
             _ensure_supported_schema(connection)
 
@@ -183,13 +340,85 @@ def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
             detected_schema_version=schema_version,
         )
 
+    try:
+        stored_metadata, stored_file_states = _read_graph_freshness_inputs(root)
+    except sqlite3.Error:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="graph_freshness_unreadable",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Graph freshness metadata is unreadable. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata={},
+                reason="graph_freshness_unreadable",
+            ),
+        )
+
+    if stored_metadata.get("exporter_version") != GRAPH_EXPORTER_VERSION:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="extractor_version_changed",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Extractor version changed. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata=stored_metadata,
+                reason="extractor_version_changed",
+            ),
+        )
+
+    current_config_hash = _effective_config_hash(DEFAULT_MAX_FILE_SIZE_BYTES)
+    if stored_metadata.get("effective_config_hash") != current_config_hash:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="effective_config_changed",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Effective RepoLens config changed. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata=stored_metadata,
+                reason="effective_config_changed",
+            ),
+        )
+
+    try:
+        freshness, file_changes = _compute_live_freshness(
+            root,
+            stored_metadata=stored_metadata,
+            stored_file_states=stored_file_states,
+        )
+    except ScanError:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="live_scan_failed",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Live freshness scan failed. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata=stored_metadata,
+                reason="live_scan_failed",
+            ),
+        )
+
+    warnings = _freshness_warnings(file_changes)
     return GraphArtifactsStatus(
-        status="available",
-        reason="graph_artifacts_present",
-        fresh=None,
+        status=str(freshness["status"]),
+        reason=str(freshness["reason"]),
+        fresh=bool(freshness["fresh"]),
         missing_artifacts=(),
-        warnings=("Graph artifacts exist, but live freshness checks are not implemented yet.",),
+        warnings=warnings,
         detected_schema_version=schema_version,
+        freshness=freshness,
+        file_changes=file_changes,
     )
 
 
@@ -218,6 +447,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             node_id TEXT NOT NULL UNIQUE,
             directory_path TEXT NOT NULL REFERENCES directories(path) ON DELETE CASCADE,
             size_bytes INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            raw_hash TEXT NOT NULL,
+            normalized_hash TEXT NOT NULL,
+            graph_hash TEXT NOT NULL,
+            dependency_hash TEXT NOT NULL,
+            symbol_hash TEXT NOT NULL,
+            line_range_hash TEXT NOT NULL,
+            language TEXT NOT NULL,
+            indexed_at_utc TEXT NOT NULL,
             parser_status TEXT NOT NULL
         ) WITHOUT ROWID;
 
@@ -525,6 +763,13 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             graph_schema_version INTEGER NOT NULL,
             status TEXT NOT NULL
         );
+
+        CREATE TABLE file_changes (
+            path TEXT PRIMARY KEY,
+            change_type TEXT NOT NULL,
+            secondary_signals_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        ) WITHOUT ROWID;
         """
     )
 
@@ -535,20 +780,20 @@ def _populate_store(
     scan: ScanResult,
     *,
     indexed_at_utc: str,
+    file_changes: tuple[FileChange, ...],
 ) -> None:
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
-    python_index = extract_python_index(root, files)
-    javascript_index = extract_javascript_index(root, files)
-    config_index = extract_config_index(root, files)
-    documentation_index = extract_documentation_index(root, files)
-    parser_status_by_path = {
-        **python_index.parser_status_by_path,
-        **javascript_index.parser_status_by_path,
-        **config_index.parser_status_by_path,
-        **documentation_index.parser_status_by_path,
-    }
+    extracted = _extract_indexes(root, files)
+    file_states_by_path = _file_states_by_path(
+        root,
+        files,
+        extracted,
+        indexed_at_utc=indexed_at_utc,
+    )
+    git_metadata = _read_git_metadata(root)
+    effective_config_hash = _effective_config_hash(scan.max_file_size_bytes)
 
     connection.executemany(
         "INSERT INTO metadata(key, value) VALUES (?, ?)",
@@ -557,6 +802,10 @@ def _populate_store(
             ("schema_version", str(GRAPH_SCHEMA_VERSION)),
             ("artifact_version", str(GRAPH_ARTIFACT_VERSION)),
             ("exporter_version", GRAPH_EXPORTER_VERSION),
+            ("effective_config_hash", effective_config_hash),
+            ("git_branch", git_metadata.branch or ""),
+            ("git_commit", git_metadata.commit or ""),
+            ("git_detected", "1" if git_metadata.detected else "0"),
         ),
     )
     connection.execute(
@@ -570,8 +819,23 @@ def _populate_store(
     )
     connection.executemany(
         """
-        INSERT INTO files(path, node_id, directory_path, size_bytes, parser_status)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO files(
+            path,
+            node_id,
+            directory_path,
+            size_bytes,
+            mtime_ns,
+            raw_hash,
+            normalized_hash,
+            graph_hash,
+            dependency_hash,
+            symbol_hash,
+            line_range_hash,
+            language,
+            indexed_at_utc,
+            parser_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -579,7 +843,16 @@ def _populate_store(
                 _file_node_id(scanned_file.path),
                 _file_directory(scanned_file.path),
                 scanned_file.size_bytes,
-                parser_status_by_path.get(scanned_file.path, "not_parsed"),
+                file_states_by_path[scanned_file.path].mtime_ns,
+                file_states_by_path[scanned_file.path].raw_hash,
+                file_states_by_path[scanned_file.path].normalized_hash,
+                file_states_by_path[scanned_file.path].graph_hash,
+                file_states_by_path[scanned_file.path].dependency_hash,
+                file_states_by_path[scanned_file.path].symbol_hash,
+                file_states_by_path[scanned_file.path].line_range_hash,
+                file_states_by_path[scanned_file.path].language,
+                indexed_at_utc,
+                file_states_by_path[scanned_file.path].parser_status,
             )
             for scanned_file in files
         ),
@@ -594,24 +867,26 @@ def _populate_store(
         root,
         directories,
         files,
-        python_index,
-        javascript_index,
-        config_index,
-        documentation_index,
+        extracted.python,
+        extracted.javascript,
+        extracted.config,
+        extracted.documentation,
+        file_states_by_path,
     )
-    _insert_python_tables(connection, python_index)
-    _insert_javascript_tables(connection, javascript_index)
-    _insert_config_tables(connection, config_index)
-    _insert_documentation_tables(connection, documentation_index)
+    _insert_python_tables(connection, extracted.python)
+    _insert_javascript_tables(connection, extracted.javascript)
+    _insert_config_tables(connection, extracted.config)
+    _insert_documentation_tables(connection, extracted.documentation)
     _insert_edges(
         connection,
         directories,
         files,
-        python_index,
-        javascript_index,
-        config_index,
-        documentation_index,
+        extracted.python,
+        extracted.javascript,
+        extracted.config,
+        extracted.documentation,
     )
+    _insert_file_changes(connection, file_changes)
     connection.execute(
         """
         INSERT INTO runs(
@@ -643,6 +918,408 @@ def _populate_store(
             "completed",
         ),
     )
+
+
+def _extract_indexes(root: Path, files: tuple[ScannedFile, ...]) -> _ExtractedIndexes:
+    python_index = extract_python_index(root, files)
+    javascript_index = extract_javascript_index(root, files)
+    config_index = extract_config_index(root, files)
+    documentation_index = extract_documentation_index(root, files)
+    parser_status_by_path = {
+        **python_index.parser_status_by_path,
+        **javascript_index.parser_status_by_path,
+        **config_index.parser_status_by_path,
+        **documentation_index.parser_status_by_path,
+    }
+    return _ExtractedIndexes(
+        python=python_index,
+        javascript=javascript_index,
+        config=config_index,
+        documentation=documentation_index,
+        parser_status_by_path=parser_status_by_path,
+    )
+
+
+def _file_states_by_path(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+    extracted: _ExtractedIndexes,
+    *,
+    indexed_at_utc: str,
+) -> dict[str, FileState]:
+    signatures = _file_signatures_by_path(files, extracted)
+    return {
+        scanned_file.path: _file_state(
+            root,
+            scanned_file,
+            signature=signatures[scanned_file.path],
+            parser_status=extracted.parser_status_by_path.get(scanned_file.path, "not_parsed"),
+            indexed_at_utc=indexed_at_utc,
+        )
+        for scanned_file in files
+    }
+
+
+def _file_state(
+    root: Path,
+    scanned_file: ScannedFile,
+    *,
+    signature: _GraphSignature,
+    parser_status: str,
+    indexed_at_utc: str,
+) -> FileState:
+    path = root / scanned_file.path
+    try:
+        raw_bytes = path.read_bytes()
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        raw_bytes = b""
+        mtime_ns = 0
+    return FileState(
+        path=scanned_file.path,
+        size_bytes=scanned_file.size_bytes,
+        mtime_ns=mtime_ns,
+        raw_hash=_sha256_bytes(raw_bytes),
+        normalized_hash=_normalized_hash(raw_bytes),
+        graph_hash=signature.graph_hash,
+        dependency_hash=signature.dependency_hash,
+        symbol_hash=signature.symbol_hash,
+        line_range_hash=signature.line_range_hash,
+        language=_language_for_path(scanned_file.path),
+        parser_status=parser_status,
+        indexed_at_utc=indexed_at_utc,
+    )
+
+
+def _file_signatures_by_path(
+    files: tuple[ScannedFile, ...], extracted: _ExtractedIndexes
+) -> dict[str, _GraphSignature]:
+    buckets: dict[str, dict[str, list[dict[str, object]]]] = {
+        file.path: {"dependency": [], "graph": [], "line_range": [], "symbol": []} for file in files
+    }
+
+    def add(path: str, bucket: str, kind: str, payload: dict[str, object]) -> None:
+        if path in buckets:
+            buckets[path][bucket].append({"kind": kind, **payload})
+
+    def add_graph(path: str, kind: str, payload: dict[str, object]) -> None:
+        add(path, "graph", kind, payload)
+
+    def add_dependency(path: str, kind: str, payload: dict[str, object]) -> None:
+        add(path, "dependency", kind, payload)
+        add_graph(path, kind, payload)
+
+    def add_symbol(path: str, kind: str, payload: dict[str, object]) -> None:
+        add(path, "symbol", kind, payload)
+        add_graph(path, kind, payload)
+
+    def add_line_range(path: str, kind: str, payload: dict[str, object]) -> None:
+        add(path, "line_range", kind, payload)
+
+    for py_module in extracted.python.modules:
+        add_graph(
+            py_module.path,
+            "python_module",
+            {
+                "docstring_summary": py_module.docstring_summary,
+                "module_name": py_module.module_name,
+                "package_root": py_module.package_root,
+                "parser_status": py_module.parser_status,
+            },
+        )
+    for py_symbol in extracted.python.symbols:
+        add_symbol(
+            py_symbol.path,
+            "python_symbol",
+            {
+                "bases": py_symbol.bases,
+                "decorators": py_symbol.decorators,
+                "docstring_summary": py_symbol.docstring_summary,
+                "kind": py_symbol.kind,
+                "name": py_symbol.name,
+                "parent_id": py_symbol.parent_id,
+                "qualified_name": py_symbol.qualified_name,
+            },
+        )
+        add_line_range(
+            py_symbol.path,
+            "python_symbol",
+            {"end_line": py_symbol.end_line, "start_line": py_symbol.start_line},
+        )
+    for py_import in extracted.python.imports:
+        add_dependency(
+            py_import.path,
+            "python_import",
+            {
+                "alias": py_import.alias,
+                "classification": py_import.classification,
+                "imported_name": py_import.imported_name,
+                "kind": py_import.kind,
+                "level": py_import.level,
+                "module": py_import.module,
+                "root_name": py_import.root_name,
+            },
+        )
+        add_line_range(py_import.path, "python_import", {"line": py_import.line})
+    for py_comment in extracted.python.tagged_comments:
+        add_graph(
+            py_comment.path,
+            "python_tagged_comment",
+            {
+                "attached_node_id": py_comment.attached_node_id,
+                "tag": py_comment.tag,
+                "text": py_comment.text,
+            },
+        )
+        add_line_range(py_comment.path, "python_tagged_comment", {"line": py_comment.line})
+    for py_error in extracted.python.parse_errors:
+        add_graph(
+            py_error.path,
+            "python_parse_error",
+            {"column": py_error.column, "message": py_error.message},
+        )
+        add_line_range(py_error.path, "python_parse_error", {"line": py_error.line})
+    for py_call in extracted.python.calls:
+        add_graph(
+            py_call.path,
+            "python_call",
+            {
+                "callee_id": py_call.callee_id,
+                "callee_name": py_call.callee_name,
+                "caller_id": py_call.caller_id,
+                "confidence": py_call.confidence,
+            },
+        )
+        add_line_range(py_call.path, "python_call", {"line": py_call.line})
+
+    for js_module in extracted.javascript.modules:
+        add_graph(
+            js_module.path,
+            "javascript_module",
+            {
+                "extension": js_module.extension,
+                "module_name": js_module.module_name,
+                "parser_status": js_module.parser_status,
+            },
+        )
+    for js_symbol in extracted.javascript.symbols:
+        add_symbol(
+            js_symbol.path,
+            "javascript_symbol",
+            {
+                "kind": js_symbol.kind,
+                "name": js_symbol.name,
+                "qualified_name": js_symbol.qualified_name,
+            },
+        )
+        add_line_range(
+            js_symbol.path,
+            "javascript_symbol",
+            {
+                "end_line": js_symbol.end_line,
+                "line": js_symbol.line,
+                "start_line": js_symbol.start_line,
+            },
+        )
+    for js_import in extracted.javascript.imports:
+        add_dependency(
+            js_import.path,
+            "javascript_import",
+            {
+                "classification": js_import.classification,
+                "kind": js_import.kind,
+                "resolution_status": js_import.resolution_status,
+                "resolved_path": js_import.resolved_path,
+                "root_name": js_import.root_name,
+                "specifier": js_import.specifier,
+            },
+        )
+        add_line_range(js_import.path, "javascript_import", {"line": js_import.line})
+    for js_export in extracted.javascript.exports:
+        add_graph(
+            js_export.path,
+            "javascript_export",
+            {
+                "exported_name": js_export.exported_name,
+                "kind": js_export.kind,
+                "local_name": js_export.local_name,
+            },
+        )
+        add_line_range(js_export.path, "javascript_export", {"line": js_export.line})
+    for js_assignment in extracted.javascript.commonjs_assignments:
+        add_graph(
+            js_assignment.path,
+            "javascript_commonjs_assignment",
+            {
+                "assigned_name": js_assignment.assigned_name,
+                "exported_name": js_assignment.exported_name,
+                "kind": js_assignment.kind,
+            },
+        )
+        add_line_range(
+            js_assignment.path,
+            "javascript_commonjs_assignment",
+            {"line": js_assignment.line},
+        )
+
+    for config in extracted.config.config_files:
+        add_graph(
+            config.path,
+            "config_file",
+            {
+                "config_kind": config.config_kind,
+                "format": config.format,
+                "metadata": config.metadata,
+                "parser_status": config.parser_status,
+                "top_level_keys": config.top_level_keys,
+            },
+        )
+    for package in extracted.config.packages:
+        add_dependency(
+            package.source_path,
+            "config_package",
+            {
+                "classification": package.classification,
+                "dependency_type": package.dependency_type,
+                "ecosystem": package.ecosystem,
+                "name": package.name,
+                "version_constraint": package.version_constraint,
+            },
+        )
+    for manager in extracted.config.package_managers:
+        add_graph(
+            manager.source_path,
+            "config_package_manager",
+            {
+                "ecosystem": manager.ecosystem,
+                "evidence_kind": manager.evidence_kind,
+                "name": manager.name,
+            },
+        )
+    for package_root in extracted.config.package_roots:
+        add_graph(
+            package_root.source_path,
+            "config_package_root",
+            {
+                "ecosystem": package_root.ecosystem,
+                "name": package_root.name,
+                "path": package_root.path,
+            },
+        )
+    for lockfile in extracted.config.lockfiles:
+        add_graph(
+            lockfile.path,
+            "config_lockfile",
+            {
+                "ecosystem": lockfile.ecosystem,
+                "format": lockfile.format,
+                "manager": lockfile.manager,
+            },
+        )
+    for command in extracted.config.commands:
+        add_graph(
+            command.path,
+            "config_command",
+            {
+                "auto_run_recommended": command.auto_run_recommended,
+                "command": command.command,
+                "name": command.name,
+                "not_run": command.not_run,
+                "purpose": command.purpose,
+                "source": command.source,
+            },
+        )
+    for entrypoint in extracted.config.entrypoints:
+        add_graph(
+            entrypoint.path,
+            "config_entrypoint",
+            {
+                "evidence": entrypoint.evidence,
+                "kind": entrypoint.kind,
+                "name": entrypoint.name,
+                "target": entrypoint.target,
+            },
+        )
+        add_line_range(
+            entrypoint.path,
+            "config_entrypoint",
+            {"line": entrypoint.line},
+        )
+    for config_error in extracted.config.parse_errors:
+        add_graph(config_error.path, "config_parse_error", {"message": config_error.message})
+
+    for markdown in extracted.documentation.markdown_files:
+        add_graph(
+            markdown.path,
+            "documentation_file",
+            {
+                "doc_kind": markdown.doc_kind,
+                "importance": markdown.importance,
+                "intro": markdown.intro,
+                "parser_status": markdown.parser_status,
+                "title": markdown.title,
+            },
+        )
+    for heading in extracted.documentation.headings:
+        add_graph(
+            heading.path,
+            "markdown_heading",
+            {"heading_id": heading.heading_id, "level": heading.level, "text": heading.text},
+        )
+        add_line_range(heading.path, "markdown_heading", {"line": heading.line})
+    for link in extracted.documentation.links:
+        add_graph(
+            link.path,
+            "markdown_link",
+            {
+                "label": link.label,
+                "target_fragment": link.target_fragment,
+                "target_path": link.target_path,
+            },
+        )
+        add_line_range(link.path, "markdown_link", {"line": link.line})
+    for mention in extracted.documentation.path_mentions:
+        add_graph(
+            mention.path,
+            "markdown_path_mention",
+            {"mentioned_path": mention.mentioned_path, "target_path": mention.target_path},
+        )
+        add_line_range(mention.path, "markdown_path_mention", {"line": mention.line})
+    for fence in extracted.documentation.code_fences:
+        add_graph(
+            fence.path,
+            "markdown_code_fence",
+            {"info_string": fence.info_string, "language": fence.language},
+        )
+        add_line_range(
+            fence.path,
+            "markdown_code_fence",
+            {"end_line": fence.end_line, "start_line": fence.start_line},
+        )
+    for doc_comment in extracted.documentation.tagged_comments:
+        add_graph(
+            doc_comment.path,
+            "documentation_tagged_comment",
+            {
+                "language": doc_comment.language,
+                "syntax": doc_comment.syntax,
+                "tag": doc_comment.tag,
+                "text": doc_comment.text,
+            },
+        )
+        add_line_range(doc_comment.path, "documentation_tagged_comment", {"line": doc_comment.line})
+    for skill in extracted.documentation.skills:
+        add_graph(skill.path, "skill", {"description": skill.description, "name": skill.name})
+
+    return {
+        path: _GraphSignature(
+            graph_hash=_facts_hash(path_buckets["graph"]),
+            dependency_hash=_facts_hash(path_buckets["dependency"]),
+            symbol_hash=_facts_hash(path_buckets["symbol"]),
+            line_range_hash=_facts_hash(path_buckets["line_range"]),
+        )
+        for path, path_buckets in buckets.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -687,13 +1364,8 @@ def _insert_nodes(
     javascript_index: JavaScriptIndex,
     config_index: ConfigIndex,
     documentation_index: DocumentationIndex,
+    file_states_by_path: dict[str, FileState],
 ) -> None:
-    parser_status_by_path = {
-        **python_index.parser_status_by_path,
-        **javascript_index.parser_status_by_path,
-        **config_index.parser_status_by_path,
-        **documentation_index.parser_status_by_path,
-    }
     connection.execute(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (REPOSITORY_ID, "Repository", ".", root.name, _metadata_json({"analysis_root": "."})),
@@ -722,7 +1394,10 @@ def _insert_nodes(
                 _metadata_json(
                     {
                         "directory_path": _file_directory(scanned_file.path),
-                        "parser_status": parser_status_by_path.get(scanned_file.path, "not_parsed"),
+                        "graph_hash": file_states_by_path[scanned_file.path].graph_hash,
+                        "language": file_states_by_path[scanned_file.path].language,
+                        "parser_status": file_states_by_path[scanned_file.path].parser_status,
+                        "raw_hash": file_states_by_path[scanned_file.path].raw_hash,
                         "size_bytes": scanned_file.size_bytes,
                     }
                 ),
@@ -1785,6 +2460,26 @@ def _insert_documentation_tables(
     )
 
 
+def _insert_file_changes(
+    connection: sqlite3.Connection, file_changes: tuple[FileChange, ...]
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO file_changes(path, change_type, secondary_signals_json, payload_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            (
+                change.path,
+                change.change_type,
+                _json_value(change.secondary_signals),
+                _json_value(change.to_status_dict()),
+            )
+            for change in sorted(file_changes, key=lambda item: item.path)
+        ),
+    )
+
+
 def _insert_edges(
     connection: sqlite3.Connection,
     directories: tuple[_DirectoryFact, ...],
@@ -2158,7 +2853,21 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         files = _rows(
             connection.execute(
                 """
-                SELECT path, node_id, directory_path, size_bytes, parser_status
+                SELECT
+                    path,
+                    node_id,
+                    directory_path,
+                    size_bytes,
+                    mtime_ns,
+                    raw_hash,
+                    normalized_hash,
+                    graph_hash,
+                    dependency_hash,
+                    symbol_hash,
+                    line_range_hash,
+                    language,
+                    indexed_at_utc,
+                    parser_status
                 FROM files
                 ORDER BY path
                 """
@@ -2536,6 +3245,17 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        file_changes = _decode_file_change_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT path, change_type, secondary_signals_json, payload_json
+                    FROM file_changes
+                    ORDER BY path
+                    """
+                )
+            )
+        )
 
     counts = {
         "config_commands": len(config_commands),
@@ -2622,6 +3342,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "repository": repository,
         "run": run,
         "schema": schema,
+        "file_changes": file_changes,
         "skip_reasons": skip_reasons,
         "skipped_paths": skipped_paths,
     }
@@ -2631,6 +3352,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph",
         "artifact_version": snapshot["artifact_version"],
+        "changes": _changes_payload(snapshot["file_changes"]),
         "config": snapshot["config"],
         "counts": snapshot["counts"],
         "directories": snapshot["directories"],
@@ -2656,14 +3378,17 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "files": [
             {
                 "path": file["path"],
+                "graph_hash": file["graph_hash"],
                 "parser_status": file["parser_status"],
+                "raw_hash": file["raw_hash"],
                 "size_bytes": file["size_bytes"],
             }
             for file in snapshot["files"]
         ],
+        "changes": _changes_payload(snapshot["file_changes"]),
         "config": _config_lite_payload(snapshot),
         "documentation": _documentation_lite_payload(snapshot),
-        "freshness": _freshness_payload(),
+        "freshness": _stored_freshness_payload(),
         "javascript": _javascript_lite_payload(snapshot),
         "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
@@ -2677,8 +3402,11 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph-status",
         "artifact_version": snapshot["artifact_version"],
+        "changes": _changes_payload(snapshot["file_changes"]),
         "counts": snapshot["counts"],
-        "freshness": _freshness_payload(),
+        "effective_config_hash": snapshot["metadata"].get("effective_config_hash"),
+        "freshness": _stored_freshness_payload(),
+        "git": _git_metadata_from_metadata(snapshot["metadata"]).to_payload(),
         "limits": snapshot["limits"],
         "repository": snapshot["repository"],
         "run": _run_payload(snapshot),
@@ -2951,14 +3679,6 @@ def _run_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _freshness_payload() -> dict[str, Any]:
-    return {
-        "fresh": None,
-        "reason": "live_freshness_not_implemented",
-        "status": "available",
-    }
-
-
 def _graph_report_text(snapshot: dict[str, Any]) -> str:
     counts = snapshot["counts"]
     run = snapshot["run"]
@@ -3003,7 +3723,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- Markdown code fences: {counts['markdown_code_fences']}",
         f"- Documentation tagged comments: {counts['documentation_tagged_comments']}",
         f"- Skills: {counts['skills']}",
-        "- Live freshness checks: not implemented yet.",
+        "- Live freshness checks: available.",
         "",
         "## Files",
         "",
@@ -4349,6 +5069,373 @@ def _ensure_supported_schema(connection: sqlite3.Connection) -> None:
         raise GraphStoreError("unsupported_schema_version")
 
 
+def _read_graph_freshness_inputs(root: Path) -> tuple[dict[str, str], dict[str, FileState]]:
+    with sqlite3.connect(root / GRAPH_STORE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        metadata = _metadata(connection)
+        rows = connection.execute(
+            """
+            SELECT
+                path,
+                size_bytes,
+                mtime_ns,
+                raw_hash,
+                normalized_hash,
+                graph_hash,
+                dependency_hash,
+                symbol_hash,
+                line_range_hash,
+                language,
+                parser_status,
+                indexed_at_utc
+            FROM files
+            ORDER BY path
+            """
+        ).fetchall()
+    file_states = {}
+    for row in rows:
+        state = _file_state_from_row(row)
+        file_states[state.path] = state
+    return metadata, file_states
+
+
+def _file_state_from_row(row: sqlite3.Row) -> FileState:
+    return FileState(
+        path=str(row["path"]),
+        size_bytes=int(row["size_bytes"]),
+        mtime_ns=int(row["mtime_ns"]),
+        raw_hash=str(row["raw_hash"]),
+        normalized_hash=str(row["normalized_hash"]),
+        graph_hash=str(row["graph_hash"]),
+        dependency_hash=str(row["dependency_hash"]),
+        symbol_hash=str(row["symbol_hash"]),
+        line_range_hash=str(row["line_range_hash"]),
+        language=str(row["language"]),
+        parser_status=str(row["parser_status"]),
+        indexed_at_utc=str(row["indexed_at_utc"]),
+    )
+
+
+def _compute_live_freshness(
+    root: Path,
+    *,
+    stored_metadata: dict[str, str],
+    stored_file_states: dict[str, FileState],
+) -> tuple[dict[str, Any], tuple[FileChange, ...]]:
+    scan = scan_repository(root)
+    files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
+    extracted = _extract_indexes(root, files)
+    current_states = _file_states_by_path(root, files, extracted, indexed_at_utc=_utc_now())
+    file_changes = _classify_file_changes(stored_file_states, current_states)
+    changed_files = tuple(change for change in file_changes if change.changed)
+    indexed_git = _git_metadata_from_metadata(stored_metadata)
+    current_git = _read_git_metadata(root)
+    git_changed = _git_metadata_changed(indexed_git, current_git)
+
+    fresh = not changed_files and not git_changed
+    reason = (
+        "graph_current"
+        if fresh
+        else "git_metadata_changed"
+        if git_changed
+        else "file_changes_detected"
+    )
+    status = "available" if fresh else "stale"
+    freshness = {
+        "change_counts": _change_counts(file_changes),
+        "changed_files": [change.to_changed_file_dict() for change in changed_files],
+        "effective_config_hash": {
+            "current": _effective_config_hash(scan.max_file_size_bytes),
+            "indexed": stored_metadata.get("effective_config_hash"),
+        },
+        "files": [change.to_status_dict() for change in file_changes],
+        "fresh": fresh,
+        "full_reparse_required": False,
+        "git": {"current": current_git.to_payload(), "indexed": indexed_git.to_payload()},
+        "reason": reason,
+        "status": status,
+    }
+    return freshness, file_changes
+
+
+def _classify_file_changes(
+    old_states: dict[str, FileState], current_states: dict[str, FileState]
+) -> tuple[FileChange, ...]:
+    changes: list[FileChange] = []
+    for path in sorted(set(old_states) | set(current_states)):
+        old = old_states.get(path)
+        current = current_states.get(path)
+        if old is None and current is not None:
+            changes.append(
+                FileChange(
+                    path=path,
+                    change_type="new",
+                    secondary_signals=_secondary_signals(None, current),
+                    hashes=current.current_hash_payload(),
+                    parser_status={"old": None, "current": current.parser_status},
+                    size_bytes={"old": None, "current": current.size_bytes},
+                    language={"old": None, "current": current.language},
+                )
+            )
+            continue
+        if old is not None and current is None:
+            changes.append(
+                FileChange(
+                    path=path,
+                    change_type="deleted",
+                    secondary_signals=_secondary_signals(old, None),
+                    hashes=old.hash_payload(None),
+                    parser_status={"old": old.parser_status, "current": None},
+                    size_bytes={"old": old.size_bytes, "current": None},
+                    language={"old": old.language, "current": None},
+                )
+            )
+            continue
+        if old is None or current is None:
+            continue
+
+        signals = _secondary_signals(old, current)
+        if current.parser_status == "parse_error":
+            change_type = "parse_error"
+        elif signals["dependency_changed"]:
+            change_type = "dependency_change"
+        elif signals["symbol_changed"] or signals["graph_changed"]:
+            change_type = "structural_change"
+        elif (
+            signals["raw_content_changed"]
+            or signals["normalized_content_changed"]
+            or signals["line_range_changed"]
+        ):
+            change_type = "content_only_change"
+        else:
+            change_type = "no_change"
+        changes.append(
+            FileChange(
+                path=path,
+                change_type=change_type,
+                secondary_signals=signals,
+                hashes=old.hash_payload(current),
+                parser_status={"old": old.parser_status, "current": current.parser_status},
+                size_bytes={"old": old.size_bytes, "current": current.size_bytes},
+                language={"old": old.language, "current": current.language},
+            )
+        )
+    return tuple(changes)
+
+
+def _secondary_signals(old: FileState | None, current: FileState | None) -> dict[str, bool]:
+    if old is None or current is None:
+        return {
+            "dependency_changed": True,
+            "graph_changed": True,
+            "line_range_changed": True,
+            "normalized_content_changed": True,
+            "raw_content_changed": True,
+            "symbol_changed": True,
+        }
+    return {
+        "dependency_changed": old.dependency_hash != current.dependency_hash,
+        "graph_changed": old.graph_hash != current.graph_hash,
+        "line_range_changed": old.line_range_hash != current.line_range_hash,
+        "normalized_content_changed": old.normalized_hash != current.normalized_hash,
+        "raw_content_changed": old.raw_hash != current.raw_hash,
+        "symbol_changed": old.symbol_hash != current.symbol_hash,
+    }
+
+
+def _change_counts(file_changes: tuple[FileChange, ...] | list[FileChange]) -> dict[str, int]:
+    counts = {change_type: 0 for change_type in CHANGE_TYPES}
+    counts.update(Counter(change.change_type for change in file_changes))
+    return counts
+
+
+def _freshness_warnings(file_changes: tuple[FileChange, ...]) -> tuple[str, ...]:
+    if any(change.parser_status.get("current") == "parse_error" for change in file_changes):
+        return (PARSER_ERROR_WARNING,)
+    return ()
+
+
+def _rebuild_required_freshness(
+    root: Path, *, stored_metadata: dict[str, str], reason: str
+) -> dict[str, Any]:
+    current_git = _read_git_metadata(root)
+    return {
+        "change_counts": {change_type: 0 for change_type in CHANGE_TYPES},
+        "changed_files": [],
+        "effective_config_hash": {
+            "current": _effective_config_hash(DEFAULT_MAX_FILE_SIZE_BYTES),
+            "indexed": stored_metadata.get("effective_config_hash"),
+        },
+        "files": [],
+        "fresh": False,
+        "full_reparse_required": True,
+        "git": {
+            "current": current_git.to_payload(),
+            "indexed": _git_metadata_from_metadata(stored_metadata).to_payload(),
+        },
+        "reason": reason,
+        "status": "rebuild_required",
+    }
+
+
+def _changes_payload(file_changes: list[dict[str, Any]]) -> dict[str, Any]:
+    change_objects = [
+        FileChange(
+            path=str(change["path"]),
+            change_type=str(change["change_type"]),
+            secondary_signals=dict(change["secondary_signals"]),
+            hashes=dict(change["hashes"]),
+            parser_status=dict(change["parser_status"]),
+            size_bytes=dict(change["size_bytes"]),
+            language=dict(change["language"]),
+        )
+        for change in file_changes
+    ]
+    return {
+        "change_counts": _change_counts(change_objects),
+        "changed_files": [
+            change.to_changed_file_dict() for change in change_objects if change.changed
+        ],
+        "files": [change.to_status_dict() for change in change_objects],
+    }
+
+
+def _stored_freshness_payload() -> dict[str, Any]:
+    return {
+        "fresh": True,
+        "full_reparse_required": False,
+        "reason": "graph_current",
+        "status": "available",
+    }
+
+
+def _git_metadata_from_metadata(metadata: dict[str, str]) -> _GitMetadata:
+    return _GitMetadata(
+        detected=metadata.get("git_detected") == "1",
+        branch=metadata.get("git_branch") or None,
+        commit=metadata.get("git_commit") or None,
+    )
+
+
+def _git_metadata_changed(indexed: _GitMetadata, current: _GitMetadata) -> bool:
+    if not indexed.detected and not current.detected:
+        return False
+    return indexed.branch != current.branch or indexed.commit != current.commit
+
+
+def _read_git_metadata(root: Path) -> _GitMetadata:
+    git_dir = _git_dir(root)
+    if git_dir is None:
+        return _GitMetadata(detected=False, branch=None, commit=None)
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return _GitMetadata(detected=False, branch=None, commit=None)
+
+    if head.startswith("ref:"):
+        ref = head.removeprefix("ref:").strip()
+        branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else ref
+        return _GitMetadata(detected=True, branch=branch, commit=_read_git_ref(git_dir, ref))
+    return _GitMetadata(detected=True, branch=None, commit=head or None)
+
+
+def _git_dir(root: Path) -> Path | None:
+    git_path = root / ".git"
+    if git_path.is_dir():
+        return git_path
+    if not git_path.is_file():
+        return None
+    try:
+        content = git_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    raw_git_dir = content.removeprefix("gitdir:").strip()
+    candidate = Path(raw_git_dir)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    return candidate.resolve()
+
+
+def _read_git_ref(git_dir: Path, ref: str) -> str | None:
+    ref_path = git_dir / ref
+    try:
+        commit = ref_path.read_text(encoding="utf-8", errors="replace").strip()
+        if commit:
+            return commit
+    except OSError:
+        pass
+    try:
+        for line in (
+            (git_dir / "packed-refs").read_text(encoding="utf-8", errors="replace").splitlines()
+        ):
+            if not line or line.startswith(("#", "^")):
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) == 2 and parts[1] == ref:
+                return parts[0]
+    except OSError:
+        return None
+    return None
+
+
+def _effective_config_hash(max_file_size_bytes: int) -> str:
+    return _facts_hash(
+        [
+            {
+                "artifact_version": GRAPH_ARTIFACT_VERSION,
+                "max_file_size_bytes": max_file_size_bytes,
+                "scan_policy_version": 1,
+            }
+        ]
+    )
+
+
+def _language_for_path(path: str) -> str:
+    posix_path = PurePosixPath(path)
+    suffix = posix_path.suffix.lower()
+    if suffix == ".py":
+        return "python"
+    if suffix in {".ts", ".tsx", ".mts", ".cts"}:
+        return "typescript"
+    if suffix in JAVASCRIPT_SOURCE_SUFFIXES:
+        return "javascript"
+    if suffix in {".md", ".markdown", ".mdx"}:
+        return "markdown"
+    if suffix in {".json", ".toml", ".yaml", ".yml"}:
+        return "config"
+    return "text"
+
+
+def _normalized_hash(raw_bytes: bytes) -> str:
+    text = raw_bytes.decode("utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized_lines: list[str] = []
+    previous_blank = False
+    for line in text.split("\n"):
+        stripped = line.rstrip(" \t")
+        is_blank = stripped == ""
+        if is_blank and previous_blank:
+            continue
+        normalized_lines.append(stripped)
+        previous_blank = is_blank
+    return _sha256_string("\n".join(normalized_lines))
+
+
+def _facts_hash(facts: list[dict[str, object]]) -> str:
+    canonical_facts = sorted(facts, key=lambda item: json.dumps(item, sort_keys=True, default=list))
+    return _sha256_string(_json_value(canonical_facts))
+
+
+def _sha256_bytes(raw_bytes: bytes) -> str:
+    return hashlib.sha256(raw_bytes).hexdigest()
+
+
+def _sha256_string(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _read_schema_version(graph_store: Path) -> str | None:
     with sqlite3.connect(graph_store) as connection:
         return _schema_version(connection)
@@ -4421,6 +5508,14 @@ def _decode_config_command_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
         decoded["not_run"] = bool(decoded["not_run"])
         decoded["auto_run_recommended"] = bool(decoded["auto_run_recommended"])
         decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_file_change_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        payload = json.loads(str(row["payload_json"]))
+        decoded_rows.append(payload)
     return decoded_rows
 
 

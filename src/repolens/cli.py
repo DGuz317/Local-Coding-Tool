@@ -10,7 +10,7 @@ from typing import Annotated
 import typer
 
 from repolens.graph import inspect_graph_artifacts
-from repolens.indexer import RepoLensIndexError, index_repository
+from repolens.indexer import RepoLensIndexError, index_repository, update_repository
 
 app = typer.Typer(help="RepoLens MCP repository intelligence CLI.")
 
@@ -95,6 +95,78 @@ def index(
 
 
 @app.command()
+def update(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path to update.",
+        ),
+    ],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Update RepoLens artifacts using live file change classification."""
+    try:
+        result = update_repository(repo_path)
+    except RepoLensIndexError as exc:
+        error = str(exc) or exc.__class__.__name__
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "data": {},
+                        "error": {"message": error},
+                        "limits": {},
+                        "ok": False,
+                        "warnings": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            typer.echo(f"Update failed: {error}", err=True)
+        raise typer.Exit(1) from exc
+
+    data = result.to_cli_data()
+    warnings = list(result.previous_status.warnings)
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "data": data,
+                    "limits": {"max_file_size_bytes": result.index.scan.max_file_size_bytes},
+                    "ok": True,
+                    "warnings": warnings,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    counts = data["counts"]
+    if not isinstance(counts, dict):
+        raise typer.Exit(1)
+    if result.initialized:
+        typer.echo(f"Initialized graph artifacts: {result.root}")
+    else:
+        typer.echo(f"Updated graph artifacts: {result.root}")
+        _print_change_summary(result.previous_status.freshness or {})
+    typer.echo(f"Eligible files: {counts['eligible_files']}")
+    typer.echo(f"Skipped paths: {counts['skipped_paths']}")
+    for warning in warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
+@app.command()
 def status(
     repo_path: Annotated[
         Path,
@@ -121,6 +193,7 @@ def status(
         "artifact_dir": ".repolens",
         "detected_schema_version": graph_status.detected_schema_version,
         "fresh": graph_status.fresh,
+        "freshness": graph_status.freshness or {},
         "missing_artifacts": missing_artifacts,
         "reason": graph_status.reason,
         "recommended_action": recommended_action
@@ -171,7 +244,35 @@ def status(
             typer.echo(f"Detected schema version: {graph_status.detected_schema_version}")
         typer.echo(f"Supported schema version: {graph_status.supported_schema_version}")
         typer.echo(f"Recommended action: {recommended_action}")
+        _print_change_summary(graph_status.freshness or {})
     else:
-        typer.echo(
-            "Graph artifacts are present, but live freshness checks are not implemented yet."
-        )
+        if graph_status.fresh:
+            typer.echo("Graph artifacts are fresh.")
+        else:
+            typer.echo(f"Recommended action: {recommended_action}")
+        _print_change_summary(graph_status.freshness or {})
+    for warning in warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
+def _print_change_summary(freshness: dict[str, object]) -> None:
+    change_counts = freshness.get("change_counts")
+    if isinstance(change_counts, dict):
+        typer.echo("Change summary:")
+        for change_type in (
+            "deleted",
+            "new",
+            "parse_error",
+            "dependency_change",
+            "structural_change",
+            "content_only_change",
+        ):
+            count = change_counts.get(change_type, 0)
+            if count:
+                typer.echo(f"- {change_type.replace('_', ' ')}: {count}")
+    changed_files = freshness.get("changed_files")
+    if isinstance(changed_files, list) and changed_files:
+        typer.echo("Changed files:")
+        for changed_file in changed_files[:10]:
+            if isinstance(changed_file, dict):
+                typer.echo(f"- {changed_file.get('path')}: {changed_file.get('change_type')}")
