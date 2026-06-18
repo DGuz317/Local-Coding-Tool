@@ -188,10 +188,11 @@ Completed or split-completed:
 - #11 Report And Safe Raw Text Search CLI.
 - #12 Structured Graph Query Service.
 - #13 Impact Analysis And Reading Order Queries.
+- #14 Read-Only Stdio MCP Server.
 
 Next planned slice:
 
-- #14 Read-Only Stdio MCP Server.
+- #15 Docker, Assistant Config, And Release Readiness Docs.
 
 ## Architecture-Level Context
 
