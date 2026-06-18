@@ -186,9 +186,11 @@ Completed or split-completed:
   * #7B JS/TS Symbols, Exports, And CommonJS Facts.
   * #7C TypeScript Alias Resolution And Export Hardening.
 
+* #8 Config, Command, Package, And Entrypoint Indexing.
+
 Next planned slice:
 
-* #8 Config, Command, Package, And Entrypoint Indexing.
+* #9 Markdown, Comments, Docs, And Agent Guidance Indexing.
 
 ## Architecture-Level Context
 
