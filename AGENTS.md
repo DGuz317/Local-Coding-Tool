@@ -184,10 +184,11 @@ Completed or split-completed:
   - #7C TypeScript Alias Resolution And Export Hardening.
 - #8 Config, Command, Package, And Entrypoint Indexing.
 - #9 Markdown, Comments, Docs, And Agent Guidance Indexing.
+- #10 Incremental Update And Staleness Classification.
 
 Next planned slice:
 
-- #10 Incremental Update And Staleness Classification.
+- #11 Report And Safe Raw Text Search CLI.
 
 ## Architecture-Level Context
 
