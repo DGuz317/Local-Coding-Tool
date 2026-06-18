@@ -32,6 +32,17 @@ The architectural review is rendered as a single self-contained HTML file in the
   </body>
 </html>
 ```
+## Offline fallback
+
+If CDN access is unavailable or the environment should avoid network access, still create the HTML report.
+
+Fallback rules:
+
+- Do not fail the architecture review because Tailwind or Mermaid cannot load.
+- Use plain CSS embedded in the HTML file.
+- Replace Mermaid diagrams with simple hand-built boxes/arrows or pre-rendered text diagrams.
+- Mention at the top of the report: "Rendered in offline fallback mode."
+- Keep the same candidate-card structure.
 
 ## Header
 
