@@ -172,6 +172,124 @@ def test_neighbors_and_entrypoints_include_pagination_and_truncation(tmp_path):
     }
 
 
+def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    result = service.impact_analysis("src/auth/login.ts", max_results=2)
+
+    assert result["ok"] is True
+    assert result["confidence"] == "high"
+    assert result["data"]["ambiguous"] is False
+    assert result["limits"] == {"max_depth": 2, "max_results": 2}
+    assert result["data"]["caps"] == {"depth": 1, "max_results": 2}
+
+    direct_paths = [item["path"] for item in result["data"]["direct_affected_files"]]
+    assert direct_paths == ["src/auth/login.ts", "src/auth/router.ts"]
+
+    likely_paths = [item["path"] for item in result["data"]["likely_affected_files"]]
+    assert likely_paths == ["tests/login.test.ts", "README.md"]
+    assert result["data"]["truncated"]["likely_affected_files"] is True
+
+    assert [item["path"] for item in result["data"]["dependencies"]] == ["src/auth/policy.ts"]
+    assert [item["path"] for item in result["data"]["dependents"]] == [
+        "src/auth/router.ts",
+        "tests/login.test.ts",
+    ]
+    assert result["data"]["likely_tests"][0]["path"] == "tests/login.test.ts"
+    assert result["data"]["likely_tests"][0]["reason"] == "imports_target"
+    assert result["data"]["related_docs"][0]["path"] == "README.md"
+    assert result["data"]["related_configs"][0]["path"] == "package.json"
+    assert result["data"]["risk_comments"][0] == {
+        "confidence": "high",
+        "line": 3,
+        "path": "src/auth/login.ts",
+        "reason": "tagged_comment_on_target_file",
+        "tag": "RISK",
+        "text": "validation protects locked accounts",
+    }
+    assert [command["name"] for command in result["data"]["candidate_verification_commands"]] == [
+        "lint",
+        "test",
+    ]
+    assert all(command["not_run"] for command in result["data"]["candidate_verification_commands"])
+    assert result["evidence"][-1] == {"source": "graph_metadata", "tool": "impact_analysis"}
+
+
+def test_reading_order_uses_task_tokens_tests_caps_and_contextual_configs(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    result = service.suggest_reading_order("Add validation to login flow tests", max_files=3)
+
+    assert result["ok"] is True
+    assert result["confidence"] == "medium"
+    assert result["limits"] == {"max_files": 3}
+    assert result["data"]["caps"] == {"max_files": 3}
+    assert result["data"]["tokens"] == ["validation", "login", "flow", "test"]
+    assert result["data"]["truncated"] is True
+    assert result["pagination"]["truncated"] is True
+    assert [item["path"] for item in result["data"]["reading_order"]] == [
+        "src/auth/login.ts",
+        "tests/login.test.ts",
+        "README.md",
+    ]
+    assert result["data"]["reading_order"][0]["reason"] == "task_matches_symbols"
+    assert result["data"]["reading_order"][1]["reason"] == "likely_related_test"
+    assert "package.json" not in [item["path"] for item in result["data"]["reading_order"]]
+    assert result["data"]["reading_order"][0]["evidence"]
+
+    config_result = service.suggest_reading_order("fix package test command", max_files=3)
+
+    assert config_result["data"]["reading_order"][0]["path"] == "package.json"
+    assert config_result["data"]["reading_order"][0]["reason"] == "config_matches_task"
+
+
+def test_impact_analysis_and_reading_order_return_ambiguous_candidates(tmp_path):
+    _write_text(tmp_path / "src" / "demo" / "one.py", "def handler():\n    return 1\n")
+    _write_text(tmp_path / "src" / "demo" / "two.py", "def handler():\n    return 2\n")
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    impact = service.impact_analysis("handler")
+    reading = service.suggest_reading_order("handler")
+
+    assert impact["ok"] is True
+    assert impact["confidence"] == "low"
+    assert impact["data"]["ambiguous"] is True
+    assert [candidate["node"]["path"] for candidate in impact["data"]["candidates"]] == [
+        "src/demo/one.py",
+        "src/demo/two.py",
+    ]
+    assert impact["data"]["direct_affected_files"] == []
+
+    assert reading["ok"] is True
+    assert reading["confidence"] == "low"
+    assert reading["data"]["ambiguous"] is True
+    assert [candidate["node"]["path"] for candidate in reading["data"]["candidates"]] == [
+        "src/demo/one.py",
+        "src/demo/two.py",
+    ]
+    assert reading["data"]["reading_order"] == []
+
+
+def test_impact_analysis_and_reading_order_include_stale_warnings(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_text(tmp_path / "src" / "auth" / "login.ts", "export function changed() {}\n")
+    service = GraphQueryService(tmp_path)
+
+    impact = service.impact_analysis("src/auth/login.ts")
+    reading = service.suggest_reading_order("login flow")
+
+    assert impact["warnings"] == [
+        "Graph artifacts may be stale; file metadata changed since indexing."
+    ]
+    assert reading["warnings"] == impact["warnings"]
+
+
 def _write_fixture_repo(root) -> None:
     _write_text(
         root / "pyproject.toml",
@@ -227,6 +345,85 @@ def _write_fixture_repo(root) -> None:
             export class PublicWidget {}
             class PrivateWidget {}
             function privateHelper() {}
+            """
+        ).lstrip(),
+    )
+
+
+def _write_impact_fixture_repo(root) -> None:
+    _write_text(
+        root / "package.json",
+        dedent(
+            """
+            {
+              "name": "auth-demo",
+              "scripts": {
+                "lint": "eslint .",
+                "publish": "npm publish",
+                "test": "vitest run tests/login.test.ts"
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "README.md",
+        dedent(
+            """
+            # Auth Demo
+
+            The login flow is implemented in `src/auth/login.ts`.
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "auth" / "policy.ts",
+        dedent(
+            """
+            export function requirePolicy() {
+              return true;
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "auth" / "login.ts",
+        dedent(
+            """
+            import { requirePolicy } from "./policy";
+
+            // RISK: validation protects locked accounts
+            export function validateLogin(input: { user: string }) {
+              return requirePolicy() && input.user.length > 0;
+            }
+
+            export function loginFlow(input: { user: string }) {
+              return validateLogin(input);
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "auth" / "router.ts",
+        dedent(
+            """
+            import { loginFlow } from "./login";
+
+            export function routeLogin() {
+              return loginFlow({ user: "demo" });
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "tests" / "login.test.ts",
+        dedent(
+            """
+            import { validateLogin } from "../src/auth/login";
+
+            test("validates login", () => {
+              expect(validateLogin({ user: "demo" })).toBe(true);
+            });
             """
         ).lstrip(),
     )
