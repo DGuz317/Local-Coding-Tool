@@ -9,6 +9,7 @@ description = "Local-first repository intelligence backend for AI coding assista
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "mcp>=1.12,<2",
     "typer>=0.15,<1",
 ]
 
