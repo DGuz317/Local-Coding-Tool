@@ -11,6 +11,13 @@ import typer
 
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
+from repolens.report import RepoLensReportError, read_graph_report
+from repolens.text_search import (
+    SEARCH_DEFAULT_MAX_RESULTS,
+    SEARCH_MAX_RESULTS_LIMIT,
+    RepoLensSearchError,
+    search_raw_text,
+)
 
 app = typer.Typer(help="RepoLens MCP repository intelligence CLI.")
 
@@ -95,6 +102,38 @@ def index(
 
 
 @app.command()
+def report(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path whose graph report should be printed.",
+        ),
+    ],
+    regenerate: Annotated[
+        bool,
+        typer.Option(
+            "--regenerate",
+            help="Regenerate graph exports from .repolens/graph.sqlite before printing.",
+        ),
+    ] = False,
+) -> None:
+    """Print the existing RepoLens graph report."""
+    try:
+        result = read_graph_report(repo_path, regenerate=regenerate)
+    except RepoLensReportError as exc:
+        error = str(exc) or exc.__class__.__name__
+        typer.echo(f"Report failed: {error}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(result.text, nl=False)
+
+
+@app.command()
 def update(
     repo_path: Annotated[
         Path,
@@ -162,6 +201,104 @@ def update(
         _print_change_summary(result.previous_status.freshness or {})
     typer.echo(f"Eligible files: {counts['eligible_files']}")
     typer.echo(f"Skipped paths: {counts['skipped_paths']}")
+    for warning in warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
+@app.command()
+def search(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path to search.",
+        ),
+    ],
+    query: Annotated[str, typer.Argument(help="Non-empty raw text query.")],
+    case_sensitive: Annotated[
+        bool,
+        typer.Option("--case-sensitive", help="Match query with case-sensitive comparison."),
+    ] = False,
+    max_results: Annotated[
+        int,
+        typer.Option(
+            "--max-results",
+            min=1,
+            max=SEARCH_MAX_RESULTS_LIMIT,
+            help="Maximum number of match previews to return.",
+        ),
+    ] = SEARCH_DEFAULT_MAX_RESULTS,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Search eligible live files for raw text."""
+    try:
+        result = search_raw_text(
+            repo_path,
+            query,
+            case_sensitive=case_sensitive,
+            max_results=max_results,
+        )
+    except RepoLensSearchError as exc:
+        error = str(exc) or exc.__class__.__name__
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "data": {},
+                        "error": {"message": error},
+                        "limits": {"max_results": max_results},
+                        "ok": False,
+                        "warnings": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            typer.echo(f"Search failed: {error}", err=True)
+        raise typer.Exit(1) from exc
+
+    limits = {
+        "max_file_size_bytes": result.scan.max_file_size_bytes,
+        "max_results": result.max_results,
+        "preview_chars": result.preview_chars,
+    }
+    warnings = list(result.warnings)
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "data": result.to_cli_data(),
+                    "limits": limits,
+                    "ok": True,
+                    "warnings": warnings,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    typer.echo(
+        f"Found {result.total_matches} matches for {json.dumps(result.query)} "
+        f"(showing {len(result.matches)})."
+    )
+    if result.truncated:
+        typer.echo(f"Results truncated at {result.max_results} matches.")
+    for match in result.matches:
+        truncated_marker = (
+            " [preview truncated]"
+            if match.preview_truncated_before or match.preview_truncated_after
+            else ""
+        )
+        typer.echo(f"{match.path}:{match.line}:{match.column}: {match.preview}{truncated_marker}")
     for warning in warnings:
         typer.echo(f"Warning: {warning}", err=True)
 
