@@ -18,6 +18,12 @@ from repolens.config_index import (
     config_file_node_id,
     extract_config_index,
 )
+from repolens.documentation_index import (
+    DOCUMENTATION_EXTRACTOR_VERSION,
+    DocumentationIndex,
+    documentation_file_node_id,
+    extract_documentation_index,
+)
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     JavaScriptIndex,
@@ -34,10 +40,11 @@ from repolens.python_index import (
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanResult
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 6
+GRAPH_SCHEMA_VERSION = 7
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
-    f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+{CONFIG_EXTRACTOR_VERSION}"
+    f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
+    f"{CONFIG_EXTRACTOR_VERSION}+{DOCUMENTATION_EXTRACTOR_VERSION}"
 )
 
 GRAPH_STORE_FILENAME = "graph.sqlite"
@@ -439,6 +446,72 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             message TEXT NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE documentation_files (
+            path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
+            node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+            doc_kind TEXT NOT NULL,
+            importance TEXT NOT NULL,
+            parser_status TEXT NOT NULL,
+            title TEXT,
+            intro TEXT
+        ) WITHOUT ROWID;
+
+        CREATE TABLE markdown_headings (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            document_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            heading_id TEXT NOT NULL,
+            level INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE markdown_links (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            document_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            label TEXT NOT NULL,
+            target_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            target_fragment TEXT,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE markdown_path_mentions (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            document_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            mentioned_path TEXT NOT NULL,
+            target_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE markdown_code_fences (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            document_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            language TEXT,
+            info_string TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER
+        ) WITHOUT ROWID;
+
+        CREATE TABLE documentation_tagged_comments (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            tag TEXT NOT NULL,
+            text TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            language TEXT NOT NULL,
+            syntax TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT
+        ) WITHOUT ROWID;
+
         CREATE TABLE runs (
             id INTEGER PRIMARY KEY,
             indexed_at_utc TEXT NOT NULL,
@@ -469,10 +542,12 @@ def _populate_store(
     python_index = extract_python_index(root, files)
     javascript_index = extract_javascript_index(root, files)
     config_index = extract_config_index(root, files)
+    documentation_index = extract_documentation_index(root, files)
     parser_status_by_path = {
         **python_index.parser_status_by_path,
         **javascript_index.parser_status_by_path,
         **config_index.parser_status_by_path,
+        **documentation_index.parser_status_by_path,
     }
 
     connection.executemany(
@@ -515,12 +590,28 @@ def _populate_store(
     )
 
     _insert_nodes(
-        connection, root, directories, files, python_index, javascript_index, config_index
+        connection,
+        root,
+        directories,
+        files,
+        python_index,
+        javascript_index,
+        config_index,
+        documentation_index,
     )
     _insert_python_tables(connection, python_index)
     _insert_javascript_tables(connection, javascript_index)
     _insert_config_tables(connection, config_index)
-    _insert_edges(connection, directories, files, python_index, javascript_index, config_index)
+    _insert_documentation_tables(connection, documentation_index)
+    _insert_edges(
+        connection,
+        directories,
+        files,
+        python_index,
+        javascript_index,
+        config_index,
+        documentation_index,
+    )
     connection.execute(
         """
         INSERT INTO runs(
@@ -595,11 +686,13 @@ def _insert_nodes(
     python_index: PythonIndex,
     javascript_index: JavaScriptIndex,
     config_index: ConfigIndex,
+    documentation_index: DocumentationIndex,
 ) -> None:
     parser_status_by_path = {
         **python_index.parser_status_by_path,
         **javascript_index.parser_status_by_path,
         **config_index.parser_status_by_path,
+        **documentation_index.parser_status_by_path,
     }
     connection.execute(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
@@ -635,6 +728,100 @@ def _insert_nodes(
                 ),
             )
             for scanned_file in files
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                markdown.node_id,
+                "MarkdownFile",
+                markdown.path,
+                markdown.path.rsplit("/", 1)[-1],
+                _metadata_json(
+                    {
+                        "doc_kind": markdown.doc_kind,
+                        "importance": markdown.importance,
+                        "intro": markdown.intro,
+                        "parser_status": markdown.parser_status,
+                        "title": markdown.title,
+                    }
+                ),
+            )
+            for markdown in documentation_index.markdown_files
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                heading.id,
+                "MarkdownHeading",
+                heading.path,
+                heading.text,
+                _metadata_json(
+                    {
+                        "heading_id": heading.heading_id,
+                        "level": heading.level,
+                        "line": heading.line,
+                    }
+                ),
+            )
+            for heading in documentation_index.headings
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                fence.id,
+                "MarkdownCodeFence",
+                fence.path,
+                fence.language or "code fence",
+                _metadata_json(
+                    {
+                        "end_line": fence.end_line,
+                        "info_string": fence.info_string,
+                        "language": fence.language,
+                        "start_line": fence.start_line,
+                    }
+                ),
+            )
+            for fence in documentation_index.code_fences
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                comment.id,
+                "TaggedComment",
+                comment.path,
+                comment.tag,
+                _metadata_json(
+                    {
+                        "language": comment.language,
+                        "line": comment.line,
+                        "syntax": comment.syntax,
+                        "tag": comment.tag,
+                        "text": comment.text,
+                    }
+                ),
+            )
+            for comment in documentation_index.tagged_comments
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                skill.id,
+                "Skill",
+                skill.path,
+                skill.name,
+                _metadata_json({"description": skill.description, "manifest_path": skill.path}),
+            )
+            for skill in documentation_index.skills
         ),
     )
     connection.executemany(
@@ -1428,6 +1615,176 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
     )
 
 
+def _insert_documentation_tables(
+    connection: sqlite3.Connection,
+    documentation_index: DocumentationIndex,
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO documentation_files(
+            path,
+            node_id,
+            doc_kind,
+            importance,
+            parser_status,
+            title,
+            intro
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                markdown.path,
+                markdown.node_id,
+                markdown.doc_kind,
+                markdown.importance,
+                markdown.parser_status,
+                markdown.title,
+                markdown.intro,
+            )
+            for markdown in documentation_index.markdown_files
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO markdown_headings(
+            id,
+            path,
+            document_node_id,
+            heading_id,
+            level,
+            text,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                heading.id,
+                heading.path,
+                heading.document_node_id,
+                heading.heading_id,
+                heading.level,
+                heading.text,
+                heading.line,
+            )
+            for heading in documentation_index.headings
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO markdown_links(
+            id,
+            path,
+            document_node_id,
+            label,
+            target_path,
+            target_fragment,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                link.id,
+                link.path,
+                link.document_node_id,
+                link.label,
+                link.target_path,
+                link.target_fragment,
+                link.line,
+            )
+            for link in documentation_index.links
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO markdown_path_mentions(
+            id,
+            path,
+            document_node_id,
+            mentioned_path,
+            target_path,
+            line
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                mention.id,
+                mention.path,
+                mention.document_node_id,
+                mention.mentioned_path,
+                mention.target_path,
+                mention.line,
+            )
+            for mention in documentation_index.path_mentions
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO markdown_code_fences(
+            id,
+            path,
+            document_node_id,
+            language,
+            info_string,
+            start_line,
+            end_line
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                fence.id,
+                fence.path,
+                fence.document_node_id,
+                fence.language,
+                fence.info_string,
+                fence.start_line,
+                fence.end_line,
+            )
+            for fence in documentation_index.code_fences
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO documentation_tagged_comments(
+            id,
+            path,
+            tag,
+            text,
+            line,
+            language,
+            syntax
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                comment.id,
+                comment.path,
+                comment.tag,
+                comment.text,
+                comment.line,
+                comment.language,
+                comment.syntax,
+            )
+            for comment in documentation_index.tagged_comments
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO skills(id, path, name, description)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            (skill.id, skill.path, skill.name, skill.description)
+            for skill in documentation_index.skills
+        ),
+    )
+
+
 def _insert_edges(
     connection: sqlite3.Connection,
     directories: tuple[_DirectoryFact, ...],
@@ -1435,6 +1792,7 @@ def _insert_edges(
     python_index: PythonIndex,
     javascript_index: JavaScriptIndex,
     config_index: ConfigIndex,
+    documentation_index: DocumentationIndex,
 ) -> None:
     edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
 
@@ -1456,6 +1814,110 @@ def _insert_edges(
             _file_node_id(scanned_file.path),
             "CONTAINS",
         )
+    for markdown in documentation_index.markdown_files:
+        add_edge(
+            _file_node_id(markdown.path),
+            markdown.node_id,
+            "CONTAINS",
+            {"doc_kind": markdown.doc_kind, "importance": markdown.importance},
+        )
+    for heading in documentation_index.headings:
+        add_edge(
+            heading.document_node_id,
+            heading.id,
+            "CONTAINS",
+            {"heading_id": heading.heading_id, "level": heading.level, "line": heading.line},
+        )
+    for fence in documentation_index.code_fences:
+        add_edge(
+            fence.document_node_id,
+            fence.id,
+            "CONTAINS",
+            {
+                "end_line": fence.end_line,
+                "info_string": fence.info_string,
+                "language": fence.language,
+                "start_line": fence.start_line,
+            },
+        )
+    for skill in documentation_index.skills:
+        add_edge(
+            documentation_file_node_id(skill.path),
+            skill.id,
+            "DECLARES_SKILL",
+            {"name": skill.name},
+        )
+
+    markdown_file_paths = {markdown.path for markdown in documentation_index.markdown_files}
+    javascript_module_paths = {module.path for module in javascript_index.modules}
+
+    def documentation_comment_source_node_id(path: str) -> str:
+        if path in markdown_file_paths:
+            return documentation_file_node_id(path)
+        if path in javascript_module_paths:
+            return javascript_module_node_id(path)
+        return _file_node_id(path)
+
+    for tagged_comment in documentation_index.tagged_comments:
+        add_edge(
+            documentation_comment_source_node_id(tagged_comment.path),
+            tagged_comment.id,
+            "CONTAINS",
+            {
+                "language": tagged_comment.language,
+                "line": tagged_comment.line,
+                "tag": tagged_comment.tag,
+            },
+        )
+
+    markdown_link_edges: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for link in documentation_index.links:
+        link_key = (link.document_node_id, _file_node_id(link.target_path))
+        markdown_link_edges.setdefault(link_key, []).append(
+            {
+                "fragment": link.target_fragment,
+                "id": link.id,
+                "label": link.label,
+                "line": link.line,
+                "target_path": link.target_path,
+            }
+        )
+    for (source_id, target_id), link_facts in sorted(markdown_link_edges.items()):
+        add_edge(
+            source_id,
+            target_id,
+            "LINKS_TO_FILE",
+            {
+                "lines": sorted({link["line"] for link in link_facts}),
+                "links": sorted(link_facts, key=lambda link: (link["line"], link["label"])),
+            },
+        )
+
+    markdown_mention_edges: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for mention in documentation_index.path_mentions:
+        mention_key = (mention.document_node_id, _file_node_id(mention.target_path))
+        markdown_mention_edges.setdefault(mention_key, []).append(
+            {
+                "id": mention.id,
+                "line": mention.line,
+                "mentioned_path": mention.mentioned_path,
+                "target_path": mention.target_path,
+            }
+        )
+    for (source_id, target_id), mention_facts in sorted(markdown_mention_edges.items()):
+        add_edge(
+            source_id,
+            target_id,
+            "MENTIONS_FILE",
+            {
+                "lines": sorted({mention["line"] for mention in mention_facts}),
+                "mentions": sorted(
+                    mention_facts,
+                    key=lambda mention: (mention["line"], mention["mentioned_path"]),
+                ),
+            },
+        )
+
     for python_module in python_index.modules:
         add_edge(_file_node_id(python_module.path), python_module.node_id, "CONTAINS")
     for javascript_module in javascript_index.modules:
@@ -1562,14 +2024,14 @@ def _insert_edges(
         if not python_import.root_name:
             continue
         package_id = python_package_node_id(python_import.root_name, python_import.classification)
-        key = (
+        python_import_key = (
             python_import.module_node_id,
             package_id,
             python_import.root_name,
             python_import.classification,
         )
-        import_edges.setdefault(key, []).append(python_import.line)
-        import_edge_ids.setdefault(key, []).append(python_import.id)
+        import_edges.setdefault(python_import_key, []).append(python_import.line)
+        import_edge_ids.setdefault(python_import_key, []).append(python_import.id)
 
     for (source_id, target_id, root_name, classification), lines in sorted(import_edges.items()):
         add_edge(
@@ -1592,30 +2054,40 @@ def _insert_edges(
     for javascript_import in javascript_index.imports:
         if javascript_import.resolved_path is not None:
             target_id = javascript_module_node_id(javascript_import.resolved_path)
-            key = (
+            javascript_import_key = (
                 javascript_import.module_node_id,
                 target_id,
                 javascript_import.resolved_path,
                 javascript_import.classification,
             )
-            javascript_import_edges.setdefault(key, []).append(javascript_import.line)
-            javascript_import_edge_ids.setdefault(key, []).append(javascript_import.id)
-            javascript_import_specifiers.setdefault(key, set()).add(javascript_import.specifier)
+            javascript_import_edges.setdefault(javascript_import_key, []).append(
+                javascript_import.line
+            )
+            javascript_import_edge_ids.setdefault(javascript_import_key, []).append(
+                javascript_import.id
+            )
+            javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
+                javascript_import.specifier
+            )
             continue
         if javascript_import.root_name is None:
             continue
         package_id = javascript_package_node_id(
             javascript_import.root_name, javascript_import.classification
         )
-        key = (
+        javascript_import_key = (
             javascript_import.module_node_id,
             package_id,
             javascript_import.root_name,
             javascript_import.classification,
         )
-        javascript_import_edges.setdefault(key, []).append(javascript_import.line)
-        javascript_import_edge_ids.setdefault(key, []).append(javascript_import.id)
-        javascript_import_specifiers.setdefault(key, set()).add(javascript_import.specifier)
+        javascript_import_edges.setdefault(javascript_import_key, []).append(javascript_import.line)
+        javascript_import_edge_ids.setdefault(javascript_import_key, []).append(
+            javascript_import.id
+        )
+        javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
+            javascript_import.specifier
+        )
 
     for (source_id, target_id, target_name, classification), lines in sorted(
         javascript_import_edges.items()
@@ -1981,6 +2453,69 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        documentation_files = _rows(
+            connection.execute(
+                """
+                SELECT path, node_id, doc_kind, importance, parser_status, title, intro
+                FROM documentation_files
+                ORDER BY path
+                """
+            )
+        )
+        markdown_headings = _rows(
+            connection.execute(
+                """
+                SELECT id, path, document_node_id, heading_id, level, text, line
+                FROM markdown_headings
+                ORDER BY path, line, id
+                """
+            )
+        )
+        markdown_links = _rows(
+            connection.execute(
+                """
+                SELECT id, path, document_node_id, label, target_path, target_fragment, line
+                FROM markdown_links
+                ORDER BY path, line, id
+                """
+            )
+        )
+        markdown_path_mentions = _rows(
+            connection.execute(
+                """
+                SELECT id, path, document_node_id, mentioned_path, target_path, line
+                FROM markdown_path_mentions
+                ORDER BY path, line, target_path, id
+                """
+            )
+        )
+        markdown_code_fences = _rows(
+            connection.execute(
+                """
+                SELECT id, path, document_node_id, language, info_string, start_line, end_line
+                FROM markdown_code_fences
+                ORDER BY path, start_line, id
+                """
+            )
+        )
+        documentation_tagged_comments = _rows(
+            connection.execute(
+                """
+                SELECT id, path, tag, text, line, language, syntax
+                FROM documentation_tagged_comments
+                ORDER BY path, line, id
+                """
+            )
+        )
+        skills = _rows(
+            connection.execute(
+                """
+                SELECT id, path, name, description
+                FROM skills
+                ORDER BY name, path
+                """
+            )
+        )
         run = _single_row(
             connection.execute(
                 """
@@ -2011,6 +2546,8 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "config_package_roots": len(config_package_roots),
         "config_packages": len(config_packages),
         "config_parse_errors": len(config_parse_errors),
+        "documentation_files": len(documentation_files),
+        "documentation_tagged_comments": len(documentation_tagged_comments),
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
@@ -2028,6 +2565,11 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "python_parse_errors": len(python_parse_errors),
         "python_symbols": len(python_symbols),
         "python_tagged_comments": len(python_tagged_comments),
+        "markdown_code_fences": len(markdown_code_fences),
+        "markdown_headings": len(markdown_headings),
+        "markdown_links": len(markdown_links),
+        "markdown_path_mentions": len(markdown_path_mentions),
+        "skills": len(skills),
         "skipped_paths": len(skipped_paths),
     }
     skip_reasons = dict(sorted(Counter(path["reason"] for path in skipped_paths).items()))
@@ -2046,6 +2588,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         },
         "counts": counts,
         "directories": directories,
+        "documentation": {
+            "code_fences": markdown_code_fences,
+            "files": documentation_files,
+            "headings": markdown_headings,
+            "links": markdown_links,
+            "path_mentions": markdown_path_mentions,
+            "skills": skills,
+            "tagged_comments": documentation_tagged_comments,
+        },
         "edges": _decode_metadata_rows(edges),
         "files": files,
         "javascript": {
@@ -2083,6 +2634,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "config": snapshot["config"],
         "counts": snapshot["counts"],
         "directories": snapshot["directories"],
+        "documentation": snapshot["documentation"],
         "edges": snapshot["edges"],
         "files": snapshot["files"],
         "javascript": snapshot["javascript"],
@@ -2110,6 +2662,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             for file in snapshot["files"]
         ],
         "config": _config_lite_payload(snapshot),
+        "documentation": _documentation_lite_payload(snapshot),
         "freshness": _freshness_payload(),
         "javascript": _javascript_lite_payload(snapshot),
         "python": _python_lite_payload(snapshot),
@@ -2189,6 +2742,81 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             for package in config["packages"]
         ],
         "parse_errors": config["parse_errors"],
+    }
+
+
+def _documentation_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    documentation = snapshot["documentation"]
+    return {
+        "code_fences": [
+            {
+                "end_line": fence["end_line"],
+                "info_string": fence["info_string"],
+                "language": fence["language"],
+                "path": fence["path"],
+                "start_line": fence["start_line"],
+            }
+            for fence in documentation["code_fences"]
+        ],
+        "files": [
+            {
+                "doc_kind": markdown["doc_kind"],
+                "importance": markdown["importance"],
+                "intro": markdown["intro"],
+                "parser_status": markdown["parser_status"],
+                "path": markdown["path"],
+                "title": markdown["title"],
+            }
+            for markdown in documentation["files"]
+        ],
+        "headings": [
+            {
+                "heading_id": heading["heading_id"],
+                "level": heading["level"],
+                "line": heading["line"],
+                "path": heading["path"],
+                "text": heading["text"],
+            }
+            for heading in documentation["headings"]
+        ],
+        "links": [
+            {
+                "label": link["label"],
+                "line": link["line"],
+                "path": link["path"],
+                "target_fragment": link["target_fragment"],
+                "target_path": link["target_path"],
+            }
+            for link in documentation["links"]
+        ],
+        "path_mentions": [
+            {
+                "line": mention["line"],
+                "mentioned_path": mention["mentioned_path"],
+                "path": mention["path"],
+                "target_path": mention["target_path"],
+            }
+            for mention in documentation["path_mentions"]
+        ],
+        "skills": [
+            {
+                "description": skill["description"],
+                "name": skill["name"],
+                "path": skill["path"],
+            }
+            for skill in documentation["skills"]
+        ],
+        "tagged_comments": [
+            {
+                "language": comment["language"],
+                "line": comment["line"],
+                "path": comment["path"],
+                "syntax": comment["syntax"],
+                "tag": comment["tag"],
+                "text": comment["text"],
+            }
+            for comment in documentation["tagged_comments"]
+        ],
     }
 
 
@@ -2338,6 +2966,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     python = snapshot["python"]
     javascript = snapshot["javascript"]
     config = snapshot["config"]
+    documentation = snapshot["documentation"]
     symbol_labels = _symbol_labels(python)
     lines = [
         "# RepoLens Graph Report",
@@ -2367,6 +2996,13 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- Config packages: {counts['config_packages']}",
         f"- Config commands: {counts['config_commands']}",
         f"- Config entrypoints: {counts['config_entrypoints']}",
+        f"- Documentation files: {counts['documentation_files']}",
+        f"- Markdown headings: {counts['markdown_headings']}",
+        f"- Markdown links: {counts['markdown_links']}",
+        f"- Markdown path mentions: {counts['markdown_path_mentions']}",
+        f"- Markdown code fences: {counts['markdown_code_fences']}",
+        f"- Documentation tagged comments: {counts['documentation_tagged_comments']}",
+        f"- Skills: {counts['skills']}",
         "- Live freshness checks: not implemented yet.",
         "",
         "## Files",
@@ -2381,6 +3017,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected | 0 | not_parsed |")
+
+    lines.extend(_documentation_report_lines(documentation))
 
     lines.extend(
         [
@@ -2863,6 +3501,7 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
     python = snapshot["python"]
     javascript = snapshot["javascript"]
     config = snapshot["config"]
+    documentation = snapshot["documentation"]
     lines = [
         "# RepoLens Graph Index",
         "",
@@ -2890,6 +3529,7 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         f"| `{file['path']}` | `{file['node_id']}` | {file['size_bytes']} | {file['parser_status']} |"
         for file in snapshot["files"]
     )
+    lines.extend(_documentation_index_lines(documentation))
     lines.extend(
         [
             "",
@@ -3370,6 +4010,315 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         lines.append("| None | none |")
     lines.append("")
     return "\n".join(lines)
+
+
+def _documentation_report_lines(documentation: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## Documentation Files",
+        "",
+        "| Path | Kind | Importance | Parser status | Title | Intro |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    if documentation["files"]:
+        lines.extend(
+            "| "
+            f"`{markdown['path']}` | "
+            f"{markdown['doc_kind']} | "
+            f"{markdown['importance']} | "
+            f"{markdown['parser_status']} | "
+            f"{_md_cell(markdown['title'] or '')} | "
+            f"{_md_cell(markdown['intro'] or '')} |"
+            for markdown in documentation["files"]
+        )
+    else:
+        lines.append("| Not detected |  |  | not_parsed |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Headings",
+            "",
+            "| Path | Heading ID | Level | Text | Line |",
+            "| --- | --- | ---: | --- | ---: |",
+        ]
+    )
+    if documentation["headings"]:
+        lines.extend(
+            "| "
+            f"`{heading['path']}` | "
+            f"`{heading['heading_id']}` | "
+            f"{heading['level']} | "
+            f"{_md_cell(heading['text'])} | "
+            f"{heading['line']} |"
+            for heading in documentation["headings"]
+        )
+    else:
+        lines.append("| Not detected |  | 0 |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Links",
+            "",
+            "| Path | Label | Target | Fragment | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["links"]:
+        lines.extend(
+            "| "
+            f"`{link['path']}` | "
+            f"{_md_cell(link['label'])} | "
+            f"`{link['target_path']}` | "
+            f"`{link['target_fragment'] or ''}` | "
+            f"{link['line']} |"
+            for link in documentation["links"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Path Mentions",
+            "",
+            "| Path | Mention | Target | Line |",
+            "| --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["path_mentions"]:
+        lines.extend(
+            "| "
+            f"`{mention['path']}` | "
+            f"`{mention['mentioned_path']}` | "
+            f"`{mention['target_path']}` | "
+            f"{mention['line']} |"
+            for mention in documentation["path_mentions"]
+        )
+    else:
+        lines.append("| Not detected |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Code Fences",
+            "",
+            "| Path | Language | Info string | Lines |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if documentation["code_fences"]:
+        lines.extend(
+            "| "
+            f"`{fence['path']}` | "
+            f"`{fence['language'] or ''}` | "
+            f"`{_md_cell(fence['info_string'])}` | "
+            f"{fence['start_line']}-{fence['end_line'] or ''} |"
+            for fence in documentation["code_fences"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Documentation Tagged Comments",
+            "",
+            "| Path | Language | Syntax | Tag | Text | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["tagged_comments"]:
+        lines.extend(
+            "| "
+            f"`{comment['path']}` | "
+            f"{comment['language']} | "
+            f"{comment['syntax']} | "
+            f"{comment['tag']} | "
+            f"{_md_cell(comment['text'])} | "
+            f"{comment['line']} |"
+            for comment in documentation["tagged_comments"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Skills",
+            "",
+            "| Path | Name | Description |",
+            "| --- | --- | --- |",
+        ]
+    )
+    if documentation["skills"]:
+        lines.extend(
+            f"| `{skill['path']}` | `{skill['name']}` | {_md_cell(skill['description'] or '')} |"
+            for skill in documentation["skills"]
+        )
+    else:
+        lines.append("| Not detected |  |  |")
+    return lines
+
+
+def _documentation_index_lines(documentation: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## Documentation Files",
+        "",
+        "| Path | Node ID | Kind | Importance | Parser status | Title |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    if documentation["files"]:
+        lines.extend(
+            "| "
+            f"`{markdown['path']}` | "
+            f"`{markdown['node_id']}` | "
+            f"{markdown['doc_kind']} | "
+            f"{markdown['importance']} | "
+            f"{markdown['parser_status']} | "
+            f"{_md_cell(markdown['title'] or '')} |"
+            for markdown in documentation["files"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | not_parsed |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Headings",
+            "",
+            "| Node ID | Path | Heading ID | Level | Text | Line |",
+            "| --- | --- | --- | ---: | --- | ---: |",
+        ]
+    )
+    if documentation["headings"]:
+        lines.extend(
+            "| "
+            f"`{heading['id']}` | "
+            f"`{heading['path']}` | "
+            f"`{heading['heading_id']}` | "
+            f"{heading['level']} | "
+            f"{_md_cell(heading['text'])} | "
+            f"{heading['line']} |"
+            for heading in documentation["headings"]
+        )
+    else:
+        lines.append("| Not detected |  |  | 0 |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Links",
+            "",
+            "| Fact ID | Path | Label | Target | Fragment | Line |",
+            "| --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["links"]:
+        lines.extend(
+            "| "
+            f"`{link['id']}` | "
+            f"`{link['path']}` | "
+            f"{_md_cell(link['label'])} | "
+            f"`{link['target_path']}` | "
+            f"`{link['target_fragment'] or ''}` | "
+            f"{link['line']} |"
+            for link in documentation["links"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Path Mentions",
+            "",
+            "| Fact ID | Path | Mention | Target | Line |",
+            "| --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["path_mentions"]:
+        lines.extend(
+            "| "
+            f"`{mention['id']}` | "
+            f"`{mention['path']}` | "
+            f"`{mention['mentioned_path']}` | "
+            f"`{mention['target_path']}` | "
+            f"{mention['line']} |"
+            for mention in documentation["path_mentions"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Markdown Code Fences",
+            "",
+            "| Node ID | Path | Language | Info string | Lines |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if documentation["code_fences"]:
+        lines.extend(
+            "| "
+            f"`{fence['id']}` | "
+            f"`{fence['path']}` | "
+            f"`{fence['language'] or ''}` | "
+            f"`{_md_cell(fence['info_string'])}` | "
+            f"{fence['start_line']}-{fence['end_line'] or ''} |"
+            for fence in documentation["code_fences"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## Documentation Tagged Comments",
+            "",
+            "| Node ID | Path | Language | Syntax | Tag | Text | Line |",
+            "| --- | --- | --- | --- | --- | --- | ---: |",
+        ]
+    )
+    if documentation["tagged_comments"]:
+        lines.extend(
+            "| "
+            f"`{comment['id']}` | "
+            f"`{comment['path']}` | "
+            f"{comment['language']} | "
+            f"{comment['syntax']} | "
+            f"{comment['tag']} | "
+            f"{_md_cell(comment['text'])} | "
+            f"{comment['line']} |"
+            for comment in documentation["tagged_comments"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Skills",
+            "",
+            "| Node ID | Path | Name | Description |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if documentation["skills"]:
+        lines.extend(
+            "| "
+            f"`{skill['id']}` | "
+            f"`{skill['path']}` | "
+            f"`{skill['name']}` | "
+            f"{_md_cell(skill['description'] or '')} |"
+            for skill in documentation["skills"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |")
+    return lines
 
 
 def _atomic_write_text(target: Path, content: str) -> None:
