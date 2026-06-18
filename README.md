@@ -121,13 +121,61 @@ repolens mcp /path/to/repo
 
 The v0.1 MCP server is read-only. It does not update graphs, modify files, execute shell commands, or expose a full-source file read tool. Available tools are `repo_summary`, `graph_status`, `get_graph_report`, `search_graph`, `search_text`, `get_node`, `get_neighbors`, `shortest_path`, `impact_analysis`, `suggest_reading_order`, and `list_entrypoints`.
 
+**Note**: `repolens mcp <repo-path>` is intended to be launched by an MCP client. It is not an interactive command. Running it manually should block silently while waiting for JSON-RPC messages on stdin.
+
 ### OpenCode Example
 
 An OpenCode MCP example is provided at `docs/opencode-mcp.example.jsonc`. It is intentionally documentation only and is not active repo configuration.
 
+For local contributor development from this repository, create `opencode.json` in the repository root:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "repolens": {
+      "type": "local",
+      "command": [
+        "uv",
+        "run",
+        "repolens",
+        "mcp",
+        "/absolute/path/to/repo"
+      ],
+      "cwd": "/absolute/path/to/repo",
+      "enabled": true,
+      "timeout": 10000
+    }
+  }
+}
+```
+
+Replace `/absolute/path/to/repo` with the absolute path to the repository being indexed.
+
+If RepoLens is already installed as a tool, the native installed CLI form is:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "repolens": {
+      "type": "local",
+      "command": [
+        "repolens",
+        "mcp",
+        "/absolute/path/to/repo"
+      ],
+      "cwd": "/absolute/path/to/repo",
+      "enabled": true,
+      "timeout": 10000
+    }
+  }
+}
+```
+
 Docker-based example shape:
 
-```jsonc
+```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
@@ -148,28 +196,16 @@ Docker-based example shape:
         "mcp",
         "/workspace"
       ],
-      "enabled": true
+      "enabled": true,
+      "timeout": 10000
     }
   }
 }
 ```
 
-Native example shape:
+Replace `1000:1000` with your host user and group IDs from `id -u` and `id -g`.
 
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "repolens": {
-      "type": "local",
-      "command": ["repolens", "mcp", "/absolute/path/to/repo"],
-      "enabled": true
-    }
-  }
-}
-```
-
-Replace `1000:1000` with your host user and group IDs from `id -u` and `id -g`. Replace `/absolute/path/to/repo` with the absolute path to the repository being indexed.
+The `repolens mcp` command is a stdio MCP server, not an interactive CLI. It should be started by OpenCode or another MCP client. If you run it manually in a terminal, it should wait silently for JSON-RPC input; do not type into it.
 
 ## Security Behavior
 
@@ -267,3 +303,4 @@ Deferred features:
 - Runtime package registry lookups during indexing.
 - Deep semantic call graphs, full TypeScript compiler resolution, Tree-sitter parsing, and Node-based parsers.
 - Dependabot/dependency update automation and contributor pre-commit hook setup.
+

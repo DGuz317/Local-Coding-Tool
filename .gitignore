@@ -11,6 +11,3 @@ wheels/
 
 # Virtual environments
 .venv
-
-# Repolens
-.repolens/
