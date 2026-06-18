@@ -1,0 +1,11 @@
+.git/
+.mypy_cache/
+.pytest_cache/
+.repolens/
+.ruff_cache/
+.venv/
+__pycache__/
+build/
+dist/
+wheels/
+*.egg-info/
