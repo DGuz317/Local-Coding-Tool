@@ -11,6 +11,7 @@ import typer
 
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
+from repolens.mcp_server import run_mcp_server
 from repolens.report import RepoLensReportError, read_graph_report
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
@@ -390,6 +391,24 @@ def status(
         _print_change_summary(graph_status.freshness or {})
     for warning in warnings:
         typer.echo(f"Warning: {warning}", err=True)
+
+
+@app.command()
+def mcp(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path to serve through read-only MCP tools.",
+        ),
+    ],
+) -> None:
+    """Start a read-only RepoLens stdio MCP server."""
+    run_mcp_server(repo_path)
 
 
 def _print_change_summary(freshness: dict[str, object]) -> None:
