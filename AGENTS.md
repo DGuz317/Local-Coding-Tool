@@ -186,10 +186,11 @@ Completed or split-completed:
 - #9 Markdown, Comments, Docs, And Agent Guidance Indexing.
 - #10 Incremental Update And Staleness Classification.
 - #11 Report And Safe Raw Text Search CLI.
+- #12 Structured Graph Query Service.
 
 Next planned slice:
 
-- #12 Structured Graph Query Service.
+- #13 Impact Analysis And Reading Order Queries.
 
 ## Architecture-Level Context
 
