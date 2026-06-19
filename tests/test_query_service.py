@@ -211,6 +211,18 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
     assert result["data"]["ambiguous"] is False
     assert result["limits"] == {"max_depth": 2, "max_results": 2}
     assert result["data"]["caps"] == {"depth": 1, "max_results": 2}
+    assert result["data"]["impact_groups"]["likely_tests"]["label"] == "Related tests"
+    assert result["data"]["impact_groups"]["likely_tests"]["items"][0]["path"] == (
+        "tests/login.test.ts"
+    )
+    assert result["data"]["impact_groups"]["related_docs"]["truncated"] is False
+    assert result["data"]["rollups"]["counts"]["likely_tests"] == 1
+    assert result["data"]["rollups"]["counts"]["related_docs"] == 1
+    assert result["data"]["rollups"]["truncated_groups"] == []
+
+    limited = service.impact_analysis("src/auth/login.ts", max_results=1)
+    assert limited["data"]["impact_groups"]["direct_affected_files"]["truncated"] is True
+    assert "direct_affected_files" in limited["data"]["rollups"]["truncated_groups"]
 
     direct_paths = [item["path"] for item in result["data"]["direct_affected_files"]]
     assert direct_paths == ["src/auth/login.ts", "src/auth/router.ts"]
@@ -242,6 +254,36 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
     ]
     assert all(command["not_run"] for command in result["data"]["candidate_verification_commands"])
     assert result["evidence"][-1] == {"source": "graph_metadata", "tool": "impact_analysis"}
+
+
+def test_impact_analysis_target_expansion_does_not_walk_to_parent_or_siblings(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    result = service.impact_analysis("validateLogin", max_results=10)
+
+    assert result["ok"] is True
+    assert result["data"]["target"]["label"] == "validateLogin"
+    assert result["data"]["dependencies"] == []
+    assert result["data"]["dependents"] == []
+    assert result["data"]["direct_affected_files"] == [
+        {
+            "confidence": "high",
+            "evidence": [
+                {
+                    "node_id": result["data"]["target"]["id"],
+                    "source": "target_resolution",
+                }
+            ],
+            "node": result["data"]["target"],
+            "path": "src/auth/login.ts",
+            "reason": "target_file",
+        }
+    ]
+    assert result["data"]["likely_tests"] == []
+    assert result["data"]["related_docs"] == []
+    assert [item["path"] for item in result["data"]["related_configs"]] == ["package.json"]
 
 
 def test_reading_order_uses_task_tokens_tests_caps_and_contextual_configs(tmp_path):

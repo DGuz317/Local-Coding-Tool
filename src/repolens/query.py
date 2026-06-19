@@ -151,6 +151,12 @@ _CONFIG_NODE_KINDS = {
 }
 _DOCUMENTATION_NODE_KINDS = {"MarkdownFile", "MarkdownHeading", "Skill"}
 _SOURCE_MODULE_KINDS = {"JavaScriptModule", "PythonModule"}
+_FILE_ANALYSIS_NODE_KINDS = {
+    "ConfigFile",
+    "JavaScriptModule",
+    "MarkdownFile",
+    "PythonModule",
+}
 _FILE_RECOMMENDATION_KIND_PRIORITY = {
     "source": 0,
     "test": 1,
@@ -1454,6 +1460,26 @@ class GraphQueryService:
             for row in connection.execute("SELECT id FROM nodes WHERE path = ?", (path,))
         }
 
+    def _direct_contains_child_ids(
+        self,
+        connection: sqlite3.Connection,
+        node_ids: set[str],
+    ) -> set[str]:
+        if not node_ids:
+            return set()
+        placeholders = ",".join("?" for _ in node_ids)
+        return {
+            str(row["target_id"])
+            for row in connection.execute(
+                f"""
+                SELECT target_id
+                FROM edges
+                WHERE kind = 'CONTAINS' AND source_id IN ({placeholders})
+                """,
+                sorted(node_ids),
+            )
+        }
+
     def _analysis_node_ids(
         self,
         connection: sqlite3.Connection,
@@ -1461,8 +1487,19 @@ class GraphQueryService:
     ) -> set[str]:
         node_ids = {str(target_node["id"])}
         path = _node_path(target_node)
-        if path is not None:
-            node_ids.update(self._node_ids_for_path(connection, path))
+        if target_node["kind"] in _FILE_ANALYSIS_NODE_KINDS and path is not None:
+            same_path_ids = self._node_ids_for_path(connection, path)
+            file_ids = {
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM nodes WHERE path = ? AND kind = 'File'",
+                    (path,),
+                )
+            }
+            node_ids.update(file_ids)
+            node_ids.update(self._direct_contains_child_ids(connection, file_ids | same_path_ids))
+        else:
+            node_ids.update(self._direct_contains_child_ids(connection, node_ids))
         return node_ids
 
     def _impact_context(
@@ -1556,34 +1593,38 @@ class GraphQueryService:
             related_config_paths=tuple(item["path"] for item in related_configs),
         )
         likely_affected = _dedupe_file_items([*likely_tests, *related_docs, *related_configs])
+        groups = _impact_groups(
+            max_results=max_results,
+            direct_affected=direct_affected,
+            dependencies=dependencies,
+            dependents=dependents,
+            likely_tests=likely_tests,
+            related_docs=related_docs,
+            related_configs=related_configs,
+            risk_comments=risk_comments,
+            candidate_commands=candidate_commands,
+        )
+        rollups = _impact_rollups(groups)
 
         return {
             "ambiguous": False,
-            "candidate_verification_commands": candidate_commands[:max_results],
+            "candidate_verification_commands": groups["candidate_verification_commands"]["items"],
             "candidates": [],
             "caps": {"depth": depth, "max_results": max_results},
-            "dependencies": dependencies[:max_results],
-            "dependents": dependents[:max_results],
-            "direct_affected_files": direct_affected[:max_results],
+            "dependencies": groups["dependencies"]["items"],
+            "dependents": groups["dependents"]["items"],
+            "direct_affected_files": groups["direct_affected_files"]["items"],
+            "impact_groups": groups,
             "likely_affected_files": likely_affected[:max_results],
-            "likely_tests": likely_tests[:max_results],
-            "related_configs": related_configs[:max_results],
-            "related_docs": related_docs[:max_results],
+            "likely_tests": groups["likely_tests"]["items"],
+            "related_configs": groups["related_configs"]["items"],
+            "related_docs": groups["related_docs"]["items"],
             "requested_target": requested_target,
             "resolution": {"ambiguous": False, "candidates": [], "node": target_node},
-            "risk_comments": risk_comments[:max_results],
+            "risk_comments": groups["risk_comments"]["items"],
+            "rollups": rollups,
             "target": target_node,
-            "truncated": {
-                "candidate_verification_commands": len(candidate_commands) > max_results,
-                "dependencies": len(dependencies) > max_results,
-                "dependents": len(dependents) > max_results,
-                "direct_affected_files": len(direct_affected) > max_results,
-                "likely_affected_files": len(likely_affected) > max_results,
-                "likely_tests": len(likely_tests) > max_results,
-                "related_configs": len(related_configs) > max_results,
-                "related_docs": len(related_docs) > max_results,
-                "risk_comments": len(risk_comments) > max_results,
-            },
+            "truncated": _impact_truncation(groups, likely_affected, max_results),
         }
 
     def _impact_relationships(
@@ -2089,6 +2130,17 @@ def _empty_impact_data(
     depth: int,
     max_results: int,
 ) -> dict[str, Any]:
+    groups = _impact_groups(
+        max_results=max_results,
+        direct_affected=[],
+        dependencies=[],
+        dependents=[],
+        likely_tests=[],
+        related_docs=[],
+        related_configs=[],
+        risk_comments=[],
+        candidate_commands=[],
+    )
     return {
         "ambiguous": resolved.ambiguous,
         "candidate_verification_commands": [],
@@ -2097,6 +2149,7 @@ def _empty_impact_data(
         "dependencies": [],
         "dependents": [],
         "direct_affected_files": [],
+        "impact_groups": groups,
         "likely_affected_files": [],
         "likely_tests": [],
         "related_configs": [],
@@ -2104,18 +2157,111 @@ def _empty_impact_data(
         "requested_target": target,
         "resolution": _resolution_payload(resolved),
         "risk_comments": [],
+        "rollups": _impact_rollups(groups),
         "target": None,
-        "truncated": {
-            "candidate_verification_commands": False,
-            "dependencies": False,
-            "dependents": False,
-            "direct_affected_files": False,
-            "likely_affected_files": False,
-            "likely_tests": False,
-            "related_configs": False,
-            "related_docs": False,
-            "risk_comments": False,
-        },
+        "truncated": _impact_truncation(groups, [], max_results),
+    }
+
+
+def _impact_groups(
+    *,
+    max_results: int,
+    direct_affected: list[dict[str, Any]],
+    dependencies: list[dict[str, Any]],
+    dependents: list[dict[str, Any]],
+    likely_tests: list[dict[str, Any]],
+    related_docs: list[dict[str, Any]],
+    related_configs: list[dict[str, Any]],
+    risk_comments: list[dict[str, Any]],
+    candidate_commands: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        "direct_affected_files": _impact_group(
+            label="Target and likely dependent files",
+            reason="Files to inspect first when planning an edit around the target.",
+            items=direct_affected,
+            max_results=max_results,
+        ),
+        "dependencies": _impact_group(
+            label="Likely dependencies",
+            reason="Files or symbols the target references through indexed graph relationships.",
+            items=dependencies,
+            max_results=max_results,
+        ),
+        "dependents": _impact_group(
+            label="Likely dependents",
+            reason="Files or symbols that reference the target through indexed graph relationships.",
+            items=dependents,
+            max_results=max_results,
+        ),
+        "likely_tests": _impact_group(
+            label="Related tests",
+            reason="Tests connected by direct references or deterministic path/name similarity; not coverage proof.",
+            items=likely_tests,
+            max_results=max_results,
+        ),
+        "related_docs": _impact_group(
+            label="Related documentation",
+            reason="Documentation files that link to or mention the target.",
+            items=related_docs,
+            max_results=max_results,
+        ),
+        "related_configs": _impact_group(
+            label="Related configuration",
+            reason="Configuration files that provide package, command, or entrypoint context for the target.",
+            items=related_configs,
+            max_results=max_results,
+        ),
+        "risk_comments": _impact_group(
+            label="Risk notes",
+            reason="Tagged comments on the target or likely dependent files.",
+            items=risk_comments,
+            max_results=max_results,
+        ),
+        "candidate_verification_commands": _impact_group(
+            label="Candidate verification commands",
+            reason="Declared lint, test, or typecheck commands recorded as candidates only; not run or auto-recommended.",
+            items=candidate_commands,
+            max_results=max_results,
+        ),
+    }
+
+
+def _impact_group(
+    *,
+    label: str,
+    reason: str,
+    items: list[dict[str, Any]],
+    max_results: int,
+) -> dict[str, Any]:
+    return {
+        "items": items[:max_results],
+        "label": label,
+        "reason": reason,
+        "total": len(items),
+        "truncated": len(items) > max_results,
+    }
+
+
+def _impact_rollups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    counts = {name: int(group["total"]) for name, group in groups.items()}
+    return {
+        "counts": counts,
+        "total_groups": len(groups),
+        "total_items": sum(counts.values()),
+        "truncated_groups": [name for name, group in groups.items() if group["truncated"]],
+    }
+
+
+def _impact_truncation(
+    groups: dict[str, dict[str, Any]],
+    likely_affected: list[dict[str, Any]],
+    max_results: int,
+) -> dict[str, bool]:
+    return {
+        **{name: bool(group["truncated"]) for name, group in groups.items()},
+        "impact_groups": any(group["truncated"] for group in groups.values()),
+        "likely_affected_files": len(likely_affected) > max_results,
     }
 
 
