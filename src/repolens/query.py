@@ -66,10 +66,12 @@ _DEFAULT_PATH_EDGE_KINDS = {
     "IMPORTS",
     "LINKS_TO_FILE",
     "MENTIONS_FILE",
+    "RELATED_TEST",
 }
 _EDGE_PRIORITY = {
     "CALLS": 0,
     "IMPORTS": 1,
+    "RELATED_TEST": 1,
     "DECLARES_ENTRYPOINT": 2,
     "DECLARES_COMMAND": 3,
     "DECLARES_PACKAGE": 4,
@@ -101,6 +103,7 @@ _ENTRYPOINT_KIND_PRIORITY = {
     "shebang": 7,
 }
 _IMPACT_EDGE_KINDS = {"CALLS", "IMPORTS"}
+_RELATED_TEST_EDGE_KINDS = {"RELATED_TEST"}
 _RELATED_DOC_EDGE_KINDS = {"LINKS_TO_FILE", "MENTIONS_FILE"}
 _VERIFICATION_PURPOSES = {"lint", "test", "typecheck"}
 _TEST_PATH_TOKENS = {"spec", "test", "tests"}
@@ -1648,48 +1651,41 @@ class GraphQueryService:
         files_by_path: dict[str, dict[str, Any]],
         dependent_relationships: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        del target_node_ids
+        del dependent_relationships
         candidates: list[dict[str, Any]] = []
-        for relationship in dependent_relationships:
-            path = str(relationship["path"])
-            if not _is_test_path(path):
+        if target_path is None:
+            return candidates
+
+        nodes_by_id = self._nodes_by_id(connection)
+        for edge in self._edges_for_nodes(
+            connection,
+            target_node_ids,
+            direction="outgoing",
+            edge_kinds=_RELATED_TEST_EDGE_KINDS,
+        ):
+            if edge["source_id"] not in target_node_ids:
+                continue
+            node = nodes_by_id.get(str(edge["target_id"]))
+            if node is None:
+                continue
+            path = _node_path(node)
+            if path is None or path not in files_by_path or not _is_test_path(path):
                 continue
             candidates.append(
                 _file_context_item(
                     path=path,
-                    reason=str(relationship["reason"]),
-                    confidence="high",
-                    evidence=relationship["evidence"],
-                    node=relationship["node"],
+                    reason=_related_test_reason(edge),
+                    confidence=str(edge.get("confidence", "medium")),
+                    evidence=edge.get("evidence", []),
+                    node=node,
+                    resolution_strategy=str(edge.get("resolution_strategy", "direct")),
                 )
             )
-
-        if target_path is not None:
-            for path in sorted(files_by_path):
-                if not _is_test_path(path):
-                    continue
-                matched_tokens = _shared_path_tokens(target_path, path)
-                if not matched_tokens:
-                    continue
-                candidates.append(
-                    _file_context_item(
-                        path=path,
-                        reason="path_name_similarity",
-                        confidence="medium",
-                        evidence=[
-                            {
-                                "matched_tokens": matched_tokens,
-                                "source": "path_name_similarity",
-                                "target_path": target_path,
-                            }
-                        ],
-                    )
-                )
 
         candidates = _dedupe_file_items(candidates)
         candidates.sort(
             key=lambda item: (
-                0 if item["reason"] == "imports_target" else 1,
+                0 if str(item.get("resolution_strategy", "")).startswith("direct_import") else 1,
                 str(item["path"]),
             )
         )
@@ -2068,12 +2064,15 @@ class GraphQueryService:
                         confidence=str(item["confidence"]),
                         evidence=[
                             *item["evidence"],
-                            {"source": "likely_test_heuristic", "target_path": source_path},
+                            {"source": "related_test_edges", "target_path": source_path},
                         ],
                         category="test",
                         node=item.get("node"),
-                        score=120 if item["reason"] == "imports_target" else 80,
+                        score=120
+                        if str(item.get("resolution_strategy", "")).startswith("direct_import")
+                        else 80,
                         source_path=source_path,
+                        resolution_strategy=item.get("resolution_strategy"),
                     )
                 )
         tests.sort(key=lambda item: (-int(item["_score"]), str(item["path"])))
@@ -2162,6 +2161,7 @@ def _file_context_item(
     confidence: str,
     evidence: list[dict[str, Any]],
     node: dict[str, Any] | None = None,
+    resolution_strategy: str | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "confidence": confidence,
@@ -2169,6 +2169,8 @@ def _file_context_item(
         "path": path,
         "reason": reason,
     }
+    if resolution_strategy is not None:
+        item["resolution_strategy"] = resolution_strategy
     if node is not None:
         item["node"] = node
     return item
@@ -2184,6 +2186,8 @@ def _dedupe_file_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if _confidence_rank(str(item["confidence"])) > _confidence_rank(str(current["confidence"])):
             current["confidence"] = item["confidence"]
+            if "resolution_strategy" in item:
+                current["resolution_strategy"] = item["resolution_strategy"]
         current["evidence"] = _merge_evidence(current["evidence"], item["evidence"])
     return list(deduped.values())
 
@@ -2282,6 +2286,18 @@ def _relationship_reason(edge_kind: str, direction: str) -> str:
     if direction == "outgoing" and edge_kind == "CALLS":
         return "target_calls"
     return "related_by_graph_edge"
+
+
+def _related_test_reason(edge: dict[str, Any]) -> str:
+    metadata = edge.get("metadata", {})
+    reason = metadata.get("reason")
+    if isinstance(reason, list):
+        reasons = {str(item) for item in reason}
+        if "direct_import_related_test" in reasons:
+            return "direct_import_related_test"
+        if "path_name_similarity" in reasons:
+            return "path_name_similarity"
+    return str(reason) if reason else "likely_related_test"
 
 
 def _relationship_confidence(edge_kind: str) -> str:
@@ -2446,6 +2462,7 @@ def _reading_order_item(
     node: dict[str, Any] | None,
     score: int,
     source_path: str | None = None,
+    resolution_strategy: str | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "_score": score,
@@ -2458,6 +2475,8 @@ def _reading_order_item(
     }
     if source_path is not None:
         item["source_path"] = source_path
+    if resolution_strategy is not None:
+        item["resolution_strategy"] = resolution_strategy
     return item
 
 

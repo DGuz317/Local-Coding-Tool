@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from collections import Counter
@@ -51,7 +52,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 10
+GRAPH_SCHEMA_VERSION = 11
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -2971,6 +2972,66 @@ def _insert_edges(
             resolution_strategy="same_file_symbol",
         )
 
+    path_by_node_id = _analysis_path_by_node_id(files, python_index, javascript_index)
+    analysis_node_id_by_path = _analysis_node_id_by_path(files, python_index, javascript_index)
+    source_paths = sorted(
+        path
+        for path in analysis_node_id_by_path
+        if _is_source_path(path) and not _is_test_path(path)
+    )
+    test_paths = sorted(path for path in analysis_node_id_by_path if _is_test_path(path))
+
+    for edge in list(edge_rows):
+        if edge.kind != "IMPORTS":
+            continue
+        test_path = path_by_node_id.get(edge.source_id)
+        source_path = path_by_node_id.get(edge.target_id)
+        if test_path is None or source_path is None:
+            continue
+        if not _is_test_path(test_path) or _is_test_path(source_path):
+            continue
+        add_edge(
+            edge.target_id,
+            edge.source_id,
+            "RELATED_TEST",
+            {
+                "reason": "direct_import_related_test",
+                "source_path": source_path,
+                "test_path": test_path,
+            },
+            confidence="high",
+            resolution_strategy="direct_import",
+            evidence=[_related_test_direct_import_evidence(edge, source_path, test_path)],
+        )
+
+    for source_path in source_paths:
+        source_node_id = analysis_node_id_by_path[source_path]
+        for test_path in test_paths:
+            matched_tokens = _shared_path_tokens(source_path, test_path)
+            if not matched_tokens:
+                continue
+            add_edge(
+                source_node_id,
+                analysis_node_id_by_path[test_path],
+                "RELATED_TEST",
+                {
+                    "matched_tokens": matched_tokens,
+                    "reason": "path_name_similarity",
+                    "source_path": source_path,
+                    "test_path": test_path,
+                },
+                confidence="medium",
+                resolution_strategy="path_name_similarity",
+                evidence=[
+                    {
+                        "kind": "related_test_path_name_similarity",
+                        "matched_tokens": matched_tokens,
+                        "source_path": source_path,
+                        "test_path": test_path,
+                    }
+                ],
+            )
+
     normalized_edges = _normalize_edge_facts(edge_rows)
     connection.executemany(
         """
@@ -3074,6 +3135,86 @@ def _edge_evidence_from_metadata(metadata: dict[str, Any]) -> list[dict[str, Any
             if isinstance(line, int):
                 evidence.append({"kind": "line", "line": line})
     return _dedupe_json_like(evidence)[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _analysis_path_by_node_id(
+    files: tuple[Any, ...], python_index: PythonIndex, javascript_index: JavaScriptIndex
+) -> dict[str, str]:
+    paths = {_file_node_id(scanned_file.path): scanned_file.path for scanned_file in files}
+    paths.update({module.node_id: module.path for module in python_index.modules})
+    paths.update({module.node_id: module.path for module in javascript_index.modules})
+    return paths
+
+
+def _analysis_node_id_by_path(
+    files: tuple[Any, ...], python_index: PythonIndex, javascript_index: JavaScriptIndex
+) -> dict[str, str]:
+    node_ids = {scanned_file.path: _file_node_id(scanned_file.path) for scanned_file in files}
+    node_ids.update({module.path: module.node_id for module in python_index.modules})
+    node_ids.update({module.path: module.node_id for module in javascript_index.modules})
+    return node_ids
+
+
+def _related_test_direct_import_evidence(
+    edge: _EdgeFact, source_path: str, test_path: str
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "import_edge_kind": edge.kind,
+        "kind": "related_test_direct_import",
+        "source_path": source_path,
+        "test_path": test_path,
+    }
+    lines = edge.metadata.get("lines")
+    if isinstance(lines, list) and lines:
+        evidence["line"] = lines[0]
+        evidence["lines"] = lines[:MAX_EDGE_EVIDENCE_ITEMS]
+    import_ids = edge.metadata.get("import_ids")
+    if isinstance(import_ids, list) and import_ids:
+        evidence["import_ids"] = import_ids[:MAX_EDGE_EVIDENCE_ITEMS]
+    specifiers = edge.metadata.get("specifiers")
+    if isinstance(specifiers, list) and specifiers:
+        evidence["specifiers"] = specifiers[:MAX_EDGE_EVIDENCE_ITEMS]
+    return evidence
+
+
+def _is_test_path(path: str) -> bool:
+    pure_path = PurePosixPath(path)
+    parts = tuple(part.casefold() for part in pure_path.parts)
+    stem_tokens = set(_meaningful_path_tokens(pure_path.stem))
+    return (
+        any(part in {"test", "tests", "spec", "specs"} for part in parts)
+        or pure_path.name.casefold().startswith("test_")
+        or pure_path.stem.casefold().endswith((".test", ".spec", "_test", "_spec"))
+        or bool(stem_tokens & {"spec", "test", "tests"})
+    )
+
+
+def _is_source_path(path: str) -> bool:
+    suffix = PurePosixPath(path).suffix.casefold()
+    return suffix == ".py" or suffix in JAVASCRIPT_SOURCE_SUFFIXES
+
+
+def _shared_path_tokens(source_path: str, candidate_path: str) -> list[str]:
+    source_name_tokens = set(_meaningful_path_tokens(PurePosixPath(source_path).stem))
+    candidate_tokens = set(_meaningful_path_tokens(candidate_path))
+    ignored = {"index", "source", "src", "spec", "test", "tests"}
+    return sorted((source_name_tokens - ignored) & (candidate_tokens - ignored))
+
+
+def _meaningful_path_tokens(value: str) -> tuple[str, ...]:
+    tokens = []
+    for token in _tokens(value):
+        normalized = token[:-1] if len(token) > 3 and token.endswith("s") else token
+        tokens.append(normalized)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9]+", value.replace("_", " ").replace("-", " "))
+        if token
+    )
 
 
 def _import_resolution_strategy(classification: str) -> str:

@@ -225,7 +225,7 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
         "tests/login.test.ts",
     ]
     assert result["data"]["likely_tests"][0]["path"] == "tests/login.test.ts"
-    assert result["data"]["likely_tests"][0]["reason"] == "imports_target"
+    assert result["data"]["likely_tests"][0]["reason"] == "direct_import_related_test"
     assert result["data"]["related_docs"][0]["path"] == "README.md"
     assert result["data"]["related_configs"][0]["path"] == "package.json"
     assert result["data"]["risk_comments"][0] == {
