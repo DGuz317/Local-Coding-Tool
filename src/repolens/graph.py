@@ -2862,6 +2862,7 @@ def _insert_edges(
     javascript_import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
     javascript_import_statuses: dict[tuple[str, str, str, str], set[str]] = {}
+    javascript_import_facts: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for javascript_import in javascript_index.imports:
         if javascript_import.resolved_path is not None:
             target_id = javascript_module_node_id(javascript_import.resolved_path)
@@ -2882,6 +2883,16 @@ def _insert_edges(
             )
             javascript_import_statuses.setdefault(javascript_import_key, set()).add(
                 javascript_import.resolution_status
+            )
+            javascript_import_facts.setdefault(javascript_import_key, []).append(
+                {
+                    "id": javascript_import.id,
+                    "kind": javascript_import.kind,
+                    "line": javascript_import.line,
+                    "resolved_path": javascript_import.resolved_path,
+                    "resolution_status": javascript_import.resolution_status,
+                    "specifier": javascript_import.specifier,
+                }
             )
             continue
         if javascript_import.root_name is None:
@@ -2904,6 +2915,15 @@ def _insert_edges(
         )
         javascript_import_statuses.setdefault(javascript_import_key, set()).add(
             javascript_import.resolution_status
+        )
+        javascript_import_facts.setdefault(javascript_import_key, []).append(
+            {
+                "id": javascript_import.id,
+                "kind": javascript_import.kind,
+                "line": javascript_import.line,
+                "resolution_status": javascript_import.resolution_status,
+                "specifier": javascript_import.specifier,
+            }
         )
 
     for (source_id, target_id, target_name, classification), lines in sorted(
@@ -2935,6 +2955,9 @@ def _insert_edges(
             resolution_strategy=_javascript_import_resolution_strategy(
                 classification,
                 javascript_import_statuses[(source_id, target_id, target_name, classification)],
+            ),
+            evidence=_javascript_import_evidence(
+                javascript_import_facts[(source_id, target_id, target_name, classification)]
             ),
         )
 
@@ -3152,10 +3175,28 @@ def _javascript_import_confidence(classification: str, statuses: set[str]) -> st
 
 def _javascript_import_resolution_strategy(classification: str, statuses: set[str]) -> str:
     if classification == "local_resolved":
+        strategies = []
         if "resolved_alias" in statuses:
-            return "alias_import"
-        return "local_import"
+            strategies.append("alias_import")
+        if "resolved_relative" in statuses:
+            strategies.append("relative_import")
+        return "+".join(sorted(strategies)) if strategies else "local_import"
     return _import_resolution_strategy(classification)
+
+
+def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "import_id": fact["id"],
+            "kind": "javascript_import",
+            "line": fact["line"],
+            "resolved_path": fact.get("resolved_path"),
+            "resolution_status": fact["resolution_status"],
+            "specifier": fact["specifier"],
+            "statement_kind": fact["kind"],
+        }
+        for fact in sorted(facts, key=lambda item: (item["line"], item["id"]))
+    ][:MAX_EDGE_EVIDENCE_ITEMS]
 
 
 def _dedupe_json_like(values: list[Any]) -> list[Any]:
