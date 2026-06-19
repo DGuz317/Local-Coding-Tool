@@ -1371,10 +1371,19 @@ class GraphQueryService:
         if direction in {"incoming", "both"}:
             conditions.append(f"target_id IN ({placeholders})")
             params.extend(sorted_node_ids)
-        sql = (
-            "SELECT id, source_id, target_id, kind, metadata_json FROM edges WHERE "
-            + " OR ".join(f"({condition})" for condition in conditions)
-        )
+        sql = """
+            SELECT
+                id,
+                source_id,
+                target_id,
+                kind,
+                confidence,
+                resolution_strategy,
+                evidence_json,
+                metadata_json
+            FROM edges
+            WHERE
+            """ + " OR ".join(f"({condition})" for condition in conditions)
         if edge_kinds:
             kind_placeholders = ",".join("?" for _ in edge_kinds)
             sql = f"SELECT * FROM ({sql}) WHERE kind IN ({kind_placeholders})"
@@ -2552,14 +2561,18 @@ def _node_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 def _edge_row_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = _decode_metadata(data.pop("metadata_json", None))
+    data["evidence"] = _decode_list(data.pop("evidence_json", None))
     return data
 
 
 def _edge_payload(edge: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": edge["id"],
+        "confidence": edge.get("confidence", "high"),
+        "evidence": edge.get("evidence", []),
         "kind": edge["kind"],
         "metadata": edge.get("metadata", {}),
+        "resolution_strategy": edge.get("resolution_strategy", "direct"),
         "source_id": edge["source_id"],
         "target_id": edge["target_id"],
     }
@@ -2575,6 +2588,18 @@ def _decode_metadata(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _decode_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        decoded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    return decoded if isinstance(decoded, list) else []
 
 
 def _entrypoint_payload(row: dict[str, Any]) -> dict[str, Any]:

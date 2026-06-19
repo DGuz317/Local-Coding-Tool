@@ -49,7 +49,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 8
+GRAPH_SCHEMA_VERSION = 9
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -90,6 +90,8 @@ HASH_FIELDS = (
     "line_range",
 )
 PARSER_ERROR_WARNING = "Parser errors detected in the live graph overlay."
+MAX_EDGE_EVIDENCE_ITEMS = 20
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 class GraphStoreError(RuntimeError):
@@ -224,6 +226,17 @@ class _GitMetadata:
 
     def to_payload(self) -> dict[str, object]:
         return {"branch": self.branch, "commit": self.commit, "detected": self.detected}
+
+
+@dataclass(frozen=True)
+class _EdgeFact:
+    source_id: str
+    target_id: str
+    kind: str
+    metadata: dict[str, Any]
+    confidence: str
+    resolution_strategy: str
+    evidence: list[dict[str, Any]]
 
 
 def rebuild_graph_artifacts(
@@ -477,6 +490,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             source_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             target_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             kind TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            resolution_strategy TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
             metadata_json TEXT NOT NULL
         ) WITHOUT ROWID;
 
@@ -2489,15 +2505,32 @@ def _insert_edges(
     config_index: ConfigIndex,
     documentation_index: DocumentationIndex,
 ) -> None:
-    edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
+    edge_rows: list[_EdgeFact] = []
 
     def add_edge(
         source_id: str,
         target_id: str,
         kind: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        confidence: str = "high",
+        resolution_strategy: str = "direct",
+        evidence: list[dict[str, Any]] | None = None,
     ) -> None:
-        edge_rows.append((source_id, target_id, kind, metadata or {}))
+        edge_metadata = metadata or {}
+        edge_rows.append(
+            _EdgeFact(
+                source_id=source_id,
+                target_id=target_id,
+                kind=kind,
+                metadata=edge_metadata,
+                confidence=confidence,
+                resolution_strategy=resolution_strategy,
+                evidence=evidence
+                if evidence is not None
+                else _edge_evidence_from_metadata(edge_metadata),
+            )
+        )
 
     add_edge(REPOSITORY_ID, ROOT_DIRECTORY_ID, "CONTAINS")
     for directory in directories:
@@ -2741,11 +2774,13 @@ def _insert_edges(
                 "lines": sorted(set(lines)),
                 "root_name": root_name,
             },
+            resolution_strategy=_import_resolution_strategy(classification),
         )
 
     javascript_import_edges: dict[tuple[str, str, str, str], list[int]] = {}
     javascript_import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
+    javascript_import_statuses: dict[tuple[str, str, str, str], set[str]] = {}
     for javascript_import in javascript_index.imports:
         if javascript_import.resolved_path is not None:
             target_id = javascript_module_node_id(javascript_import.resolved_path)
@@ -2763,6 +2798,9 @@ def _insert_edges(
             )
             javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
                 javascript_import.specifier
+            )
+            javascript_import_statuses.setdefault(javascript_import_key, set()).add(
+                javascript_import.resolution_status
             )
             continue
         if javascript_import.root_name is None:
@@ -2782,6 +2820,9 @@ def _insert_edges(
         )
         javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
             javascript_import.specifier
+        )
+        javascript_import_statuses.setdefault(javascript_import_key, set()).add(
+            javascript_import.resolution_status
         )
 
     for (source_id, target_id, target_name, classification), lines in sorted(
@@ -2806,6 +2847,14 @@ def _insert_edges(
             target_id,
             "IMPORTS",
             metadata,
+            confidence=_javascript_import_confidence(
+                classification,
+                javascript_import_statuses[(source_id, target_id, target_name, classification)],
+            ),
+            resolution_strategy=_javascript_import_resolution_strategy(
+                classification,
+                javascript_import_statuses[(source_id, target_id, target_name, classification)],
+            ),
         )
 
     call_edges: dict[tuple[str, str, str], list[int]] = {}
@@ -2819,23 +2868,149 @@ def _insert_edges(
             target_id,
             "CALLS",
             {"callee_name": callee_name, "confidence": "high", "lines": sorted(set(lines))},
+            resolution_strategy="same_file_symbol",
         )
 
+    normalized_edges = _normalize_edge_facts(edge_rows)
     connection.executemany(
-        "INSERT INTO edges(id, source_id, target_id, kind, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        """
+        INSERT INTO edges(
+            id,
+            source_id,
+            target_id,
+            kind,
+            confidence,
+            resolution_strategy,
+            evidence_json,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             (
-                _edge_id(kind, source_id, target_id),
-                source_id,
-                target_id,
-                kind,
-                _metadata_json(metadata),
+                _edge_id(edge.kind, edge.source_id, edge.target_id),
+                edge.source_id,
+                edge.target_id,
+                edge.kind,
+                edge.confidence,
+                edge.resolution_strategy,
+                _json_value(edge.evidence),
+                _metadata_json(edge.metadata),
             )
-            for source_id, target_id, kind, metadata in sorted(
-                edge_rows, key=lambda row: (row[0], row[2], row[1])
-            )
+            for edge in normalized_edges
         ),
     )
+
+
+def _normalize_edge_facts(edge_facts: list[_EdgeFact]) -> tuple[_EdgeFact, ...]:
+    grouped: dict[tuple[str, str, str], list[_EdgeFact]] = {}
+    for edge in edge_facts:
+        grouped.setdefault((edge.source_id, edge.target_id, edge.kind), []).append(edge)
+
+    normalized = []
+    for (source_id, target_id, kind), duplicates in grouped.items():
+        normalized.append(
+            _EdgeFact(
+                source_id=source_id,
+                target_id=target_id,
+                kind=kind,
+                metadata=_merge_edge_metadata(edge.metadata for edge in duplicates),
+                confidence=_merge_edge_confidence(edge.confidence for edge in duplicates),
+                resolution_strategy=_merge_resolution_strategy(
+                    edge.resolution_strategy for edge in duplicates
+                ),
+                evidence=_merge_edge_evidence(edge.evidence for edge in duplicates),
+            )
+        )
+    return tuple(sorted(normalized, key=lambda edge: (edge.source_id, edge.kind, edge.target_id)))
+
+
+def _merge_edge_metadata(values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for metadata in values:
+        for key, value in metadata.items():
+            if key not in merged:
+                merged[key] = value
+                continue
+            merged[key] = _merge_metadata_value(merged[key], value)
+    return {key: _sort_json_like(value) for key, value in sorted(merged.items())}
+
+
+def _merge_metadata_value(left: Any, right: Any) -> Any:
+    if left == right:
+        return left
+    if isinstance(left, list) and isinstance(right, list):
+        return _dedupe_json_like([*left, *right])
+    if isinstance(left, list):
+        return _dedupe_json_like([*left, right])
+    if isinstance(right, list):
+        return _dedupe_json_like([left, *right])
+    return _dedupe_json_like([left, right])
+
+
+def _merge_edge_confidence(values: Any) -> str:
+    return max(values, key=lambda value: (CONFIDENCE_RANK.get(str(value), -1), str(value)))
+
+
+def _merge_resolution_strategy(values: Any) -> str:
+    unique = sorted({str(value) for value in values})
+    return unique[0] if len(unique) == 1 else "+".join(unique)
+
+
+def _merge_edge_evidence(values: Any) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for items in values:
+        evidence.extend(items)
+    return _dedupe_json_like(evidence)[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _edge_evidence_from_metadata(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = []
+    if isinstance(metadata.get("line"), int):
+        evidence.append({"kind": "line", "line": metadata["line"]})
+    lines = metadata.get("lines")
+    if isinstance(lines, list):
+        for line in lines:
+            if isinstance(line, int):
+                evidence.append({"kind": "line", "line": line})
+    return _dedupe_json_like(evidence)[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _import_resolution_strategy(classification: str) -> str:
+    if classification == "standard_library":
+        return "standard_library_import"
+    if classification == "third_party":
+        return "external_import"
+    if classification == "local":
+        return "local_import"
+    return "import"
+
+
+def _javascript_import_confidence(classification: str, statuses: set[str]) -> str:
+    if classification == "local_resolved" and "resolved_alias" in statuses:
+        return "medium"
+    return "high"
+
+
+def _javascript_import_resolution_strategy(classification: str, statuses: set[str]) -> str:
+    if classification == "local_resolved":
+        if "resolved_alias" in statuses:
+            return "alias_import"
+        return "local_import"
+    return _import_resolution_strategy(classification)
+
+
+def _dedupe_json_like(values: list[Any]) -> list[Any]:
+    unique = {_json_value(_sort_json_like(value)): _sort_json_like(value) for value in values}
+    return [unique[key] for key in sorted(unique)]
+
+
+def _sort_json_like(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sort_json_like(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_sort_json_like(item) for item in sorted(value, key=lambda item: _json_value(item))]
+    return value
 
 
 def _load_snapshot(root: Path) -> dict[str, Any]:
@@ -2882,7 +3057,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         edges = _rows(
             connection.execute(
                 """
-                SELECT id, source_id, target_id, kind, metadata_json
+                SELECT
+                    id,
+                    source_id,
+                    target_id,
+                    kind,
+                    confidence,
+                    resolution_strategy,
+                    evidence_json,
+                    metadata_json
                 FROM edges
                 ORDER BY source_id, kind, target_id, id
                 """
@@ -3317,7 +3500,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "skills": skills,
             "tagged_comments": documentation_tagged_comments,
         },
-        "edges": _decode_metadata_rows(edges),
+        "edges": _decode_edge_rows(edges),
         "files": files,
         "javascript": {
             "commonjs_assignments": javascript_commonjs_assignments,
@@ -5467,6 +5650,16 @@ def _decode_metadata_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     decoded_rows = []
     for row in rows:
         decoded = dict(row)
+        decoded["metadata"] = json.loads(decoded.pop("metadata_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_edge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["evidence"] = json.loads(decoded.pop("evidence_json"))
         decoded["metadata"] = json.loads(decoded.pop("metadata_json"))
         decoded_rows.append(decoded)
     return decoded_rows
