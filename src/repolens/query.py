@@ -717,6 +717,7 @@ class GraphQueryService:
                     "ambiguous": True,
                     "candidates": list(focused_resolution.candidates),
                     "caps": {"max_files": limit},
+                    "candidate_verification_commands": [],
                     "reading_order": [],
                     "task": task,
                     "tokens": list(tokens),
@@ -736,12 +737,19 @@ class GraphQueryService:
                 )
 
             recommendations = self._reading_order_recommendations(connection, task, tokens)
+            candidate_commands = self._reading_order_candidate_verification_commands(
+                connection,
+                tokens=tokens,
+                recommendations=recommendations,
+                max_commands=limit,
+            )
 
         page = recommendations[:limit]
         data = {
             "ambiguous": False,
             "candidates": [],
             "caps": {"max_files": limit},
+            "candidate_verification_commands": candidate_commands,
             "reading_order": page,
             "task": task,
             "tokens": list(tokens),
@@ -2037,6 +2045,7 @@ class GraphQueryService:
             current["evidence"] = _merge_evidence(current["evidence"], evidence)
             current["confidence"] = _confidence_for_reading_score(int(current["_score"]))
             current["reason"] = _preferred_reading_reason(str(current["reason"]), reason)
+            current["ranking_reason"] = _ranking_reason(str(current["reason"]))
             if _node_reading_priority(node) < _node_reading_priority(current["node"]):
                 current["node"] = node
 
@@ -2118,6 +2127,27 @@ class GraphQueryService:
                 )
         tests.sort(key=lambda item: (-int(item["_score"]), str(item["path"])))
         return _dedupe_reading_items(tests)
+
+    def _reading_order_candidate_verification_commands(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        tokens: tuple[str, ...],
+        recommendations: list[dict[str, Any]],
+        max_commands: int,
+    ) -> list[dict[str, Any]]:
+        if not _task_mentions_config(tokens):
+            return []
+        config_paths = self._config_file_paths(connection)
+        related_paths = tuple(
+            str(item["path"]) for item in recommendations if str(item["path"]) in config_paths
+        )
+        if not related_paths:
+            related_paths = tuple(sorted(config_paths))
+        return self._candidate_verification_commands(
+            connection,
+            related_config_paths=related_paths,
+        )[:max_commands]
 
     def _config_file_paths(self, connection: sqlite3.Connection) -> set[str]:
         return {str(row["path"]) for row in connection.execute("SELECT path FROM config_files")}
@@ -2618,6 +2648,7 @@ def _reading_order_item(
         "node": node,
         "path": path,
         "reason": reason,
+        "ranking_reason": _ranking_reason(reason),
     }
     if source_path is not None:
         item["source_path"] = source_path
@@ -2651,6 +2682,17 @@ def _preferred_reading_reason(current: str, candidate: str) -> str:
         "task_token_match": 3,
     }
     return candidate if priority.get(candidate, 100) < priority.get(current, 100) else current
+
+
+def _ranking_reason(reason: str) -> str:
+    reasons = {
+        "config_matches_task": "Task tokens matched indexed config or command metadata.",
+        "documentation_matches_task": "Task tokens matched indexed documentation context.",
+        "likely_related_test": "Likely related test from graph evidence.",
+        "task_matches_symbols": "Task tokens matched indexed source symbols.",
+        "task_token_match": "Task tokens matched indexed graph metadata.",
+    }
+    return reasons.get(reason, "Ranked from deterministic graph metadata.")
 
 
 def _node_reading_priority(node: dict[str, Any] | None) -> int:
