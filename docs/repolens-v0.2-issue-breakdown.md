@@ -7,6 +7,7 @@ Source documents:
 - `docs/repolens-v0.2-plan.md`
 - `docs/repolens-v0.2-planning-interview-summary.md`
 - `docs/repolens-v0.2-issue-breakdown-feedback.md`
+- `docs/repolens-v0.2-release-tracker.md`
 - `CONTEXT.md`
 - `docs/adr/0001-standardize-mcp-envelope.md`
 - `docs/adr/0002-edge-contract-storage.md`
@@ -26,6 +27,7 @@ Label taxonomy:
 Published tracker:
 
 - #35 RepoLens MCP v0.2 roadmap and release criteria: https://github.com/DGuz317/Local-Coding-Tool/issues/35
+- Local release tracker: `docs/repolens-v0.2-release-tracker.md`
 
 ## Proposed Slices
 
