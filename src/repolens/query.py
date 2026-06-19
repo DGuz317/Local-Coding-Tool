@@ -183,6 +183,7 @@ class _ResolvedNode:
     ambiguous: bool
     confidence: str
     reason: str | None = None
+    resolution_strategy: str | None = None
 
 
 class GraphQueryService:
@@ -426,7 +427,7 @@ class GraphQueryService:
                 prefer_exact_id=node_id is not None,
             )
 
-        if resolved.node is None and not resolved.ambiguous:
+        if resolved.node is None and not resolved.ambiguous and not resolved.candidates:
             return _error_envelope(
                 code="node_not_found",
                 message="No graph node matched the requested reference.",
@@ -443,6 +444,8 @@ class GraphQueryService:
         }
         if resolved.reason is not None:
             data["reason"] = resolved.reason
+        if resolved.resolution_strategy is not None:
+            data["resolution_strategy"] = resolved.resolution_strategy
         return _envelope(
             data=data,
             confidence="low" if resolved.ambiguous else resolved.confidence,
@@ -502,6 +505,10 @@ class GraphQueryService:
                     "neighbors": [],
                     "reference": resolved_reference,
                 }
+                if resolved.reason is not None:
+                    data["reason"] = resolved.reason
+                if resolved.resolution_strategy is not None:
+                    data["resolution_strategy"] = resolved.resolution_strategy
                 return _envelope(
                     data=data,
                     confidence="low",
@@ -1139,6 +1146,7 @@ class GraphQueryService:
                     "evidence": _match_evidence(node, matched_fields),
                     "matched_fields": matched_fields,
                     "node": node,
+                    "resolution_strategy": _resolution_strategy_for_score(score),
                     "score": score,
                 }
             )
@@ -1188,6 +1196,7 @@ class GraphQueryService:
                 candidates=(),
                 ambiguous=False,
                 confidence="high",
+                resolution_strategy="exact_reference",
             )
         if prefer_exact_id:
             return _ResolvedNode(
@@ -1196,6 +1205,7 @@ class GraphQueryService:
                 ambiguous=False,
                 confidence="low",
                 reason="node_id_not_found",
+                resolution_strategy="exact_reference",
             )
 
         normalized_path = self._reference_to_repo_path(reference)
@@ -1218,6 +1228,7 @@ class GraphQueryService:
                     candidates=(),
                     ambiguous=False,
                     confidence="high",
+                    resolution_strategy="exact_reference",
                 )
 
         matches = self._search_matches(connection, reference)
@@ -1228,6 +1239,7 @@ class GraphQueryService:
                 ambiguous=False,
                 confidence="low",
                 reason="not_found",
+                resolution_strategy="structured_metadata_match",
             )
         if _is_ambiguous(matches):
             return _ResolvedNode(
@@ -1236,12 +1248,23 @@ class GraphQueryService:
                 ambiguous=True,
                 confidence="low",
                 reason="ambiguous",
+                resolution_strategy="structured_metadata_match",
+            )
+        if matches[0]["confidence"] == "low":
+            return _ResolvedNode(
+                node=None,
+                candidates=tuple(matches[:5]),
+                ambiguous=False,
+                confidence="low",
+                reason="fuzzy_candidate_only",
+                resolution_strategy="fuzzy_candidate",
             )
         return _ResolvedNode(
             node=matches[0]["node"],
             candidates=(),
             ambiguous=False,
             confidence=matches[0]["confidence"],
+            resolution_strategy="structured_metadata_match",
         )
 
     def _reference_to_repo_path(self, reference: str) -> str | None:
@@ -2805,6 +2828,14 @@ def _confidence_for_score(score: int) -> str:
     return "low"
 
 
+def _resolution_strategy_for_score(score: int) -> str:
+    if score >= _EXACT_MATCH_SCORE:
+        return "exact_reference"
+    if score >= 500:
+        return "structured_metadata_match"
+    return "fuzzy_candidate"
+
+
 def _match_evidence(
     node: dict[str, Any], matched_fields: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -2852,6 +2883,7 @@ def _resolution_payload(resolved: _ResolvedNode) -> dict[str, Any]:
         "confidence": resolved.confidence,
         "node": resolved.node,
         "reason": resolved.reason,
+        "resolution_strategy": resolved.resolution_strategy,
     }
 
 

@@ -85,6 +85,21 @@ def test_mcp_text_search_returns_structured_expected_errors(tmp_path):
     assert result["limits"]["max_results"] == 20
 
 
+def test_mcp_tools_preserve_candidate_only_resolution_metadata(tmp_path):
+    _write_text(tmp_path / "src" / "billing" / "invoice.py", "def total_due():\n    return 1\n")
+    index_repository(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.get_node(query="due missing")
+
+    assert result["ok"] is True
+    assert result["data"]["node"] is None
+    assert result["data"]["reason"] == "fuzzy_candidate_only"
+    assert result["data"]["resolution_strategy"] == "fuzzy_candidate"
+    assert result["data"]["candidates"][0]["node"]["label"] == "total_due"
+    assert result["truncation"] == {"fields": [], "truncated": False}
+
+
 def test_mcp_stdio_smoke_lists_exact_tools_and_calls_status(tmp_path):
     async def run_smoke() -> None:
         server_params = StdioServerParameters(
