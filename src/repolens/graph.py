@@ -49,7 +49,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 9
+GRAPH_SCHEMA_VERSION = 10
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -100,6 +100,10 @@ class GraphStoreError(RuntimeError):
 
 class GraphExportError(RuntimeError):
     """Raised when graph exports cannot be written."""
+
+
+class GraphValidationError(GraphStoreError):
+    """Raised when hard graph invariants fail before artifact replacement."""
 
 
 @dataclass(frozen=True)
@@ -274,6 +278,7 @@ def build_graph_store(
 
         with sqlite3.connect(temp_path) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
+            connection.row_factory = sqlite3.Row
             _create_schema(connection)
             _populate_store(
                 connection,
@@ -282,10 +287,16 @@ def build_graph_store(
                 indexed_at_utc=_utc_now(),
                 file_changes=file_changes,
             )
+            _finalize_graph_metadata(connection)
+            validation = _validate_graph_store(connection)
+            if validation["hard_failures"]:
+                raise GraphValidationError("graph_validation_failed")
             connection.commit()
             _ensure_supported_schema(connection)
 
         os.replace(temp_path, target)
+    except GraphValidationError:
+        raise
     except (OSError, sqlite3.Error) as exc:
         raise GraphStoreError("graph_store_rebuild_failed") from exc
     finally:
@@ -422,7 +433,7 @@ def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
             ),
         )
 
-    warnings = _freshness_warnings(file_changes)
+    warnings = (*_metadata_quality_warnings(stored_metadata), *_freshness_warnings(file_changes))
     return GraphArtifactsStatus(
         status=str(freshness["status"]),
         reason=str(freshness["reason"]),
@@ -933,6 +944,18 @@ def _populate_store(
             GRAPH_SCHEMA_VERSION,
             "completed",
         ),
+    )
+
+
+def _finalize_graph_metadata(connection: sqlite3.Connection) -> None:
+    quality_warnings = _quality_warnings(connection)
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        ("graph_quality_warnings", _json_value(quality_warnings)),
+    )
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        ("canonical_graph_hash", _canonical_graph_hash(connection)),
     )
 
 
@@ -3535,6 +3558,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "changes": _changes_payload(snapshot["file_changes"]),
         "config": snapshot["config"],
         "counts": snapshot["counts"],
@@ -3550,6 +3574,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema": snapshot["schema"],
         "skipped_paths": snapshot["skipped_paths"],
         "nodes": snapshot["nodes"],
+        "validation": _validation_payload(snapshot),
     }
 
 
@@ -3557,6 +3582,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph-lite",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "counts": snapshot["counts"],
         "files": [
             {
@@ -3578,6 +3604,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
+        "validation": _validation_payload(snapshot),
     }
 
 
@@ -3585,6 +3612,7 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph-status",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "changes": _changes_payload(snapshot["file_changes"]),
         "counts": snapshot["counts"],
         "effective_config_hash": snapshot["metadata"].get("effective_config_hash"),
@@ -3599,6 +3627,14 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         },
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
+        "validation": _validation_payload(snapshot),
+    }
+
+
+def _validation_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hard_failures": [],
+        "quality_warnings": _metadata_quality_warnings(snapshot["metadata"]),
     }
 
 
@@ -3878,6 +3914,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         "Analysis root: .",
         f"Indexed at UTC: {run['indexed_at_utc']}",
         f"Schema version: {snapshot['schema']['version']}",
+        f"Canonical graph hash: {snapshot['metadata'].get('canonical_graph_hash', '')}",
         "",
         "## Summary",
         "",
@@ -5250,6 +5287,183 @@ def _ensure_supported_schema(connection: sqlite3.Connection) -> None:
     schema_version = _schema_version(connection)
     if schema_version != str(GRAPH_SCHEMA_VERSION):
         raise GraphStoreError("unsupported_schema_version")
+
+
+def _validate_graph_store(connection: sqlite3.Connection) -> dict[str, list[str]]:
+    hard_failures: list[str] = []
+    metadata = _metadata(connection)
+
+    if metadata.get("schema_name") != GRAPH_SCHEMA_NAME:
+        hard_failures.append("invalid_schema_name")
+    if metadata.get("schema_version") != str(GRAPH_SCHEMA_VERSION):
+        hard_failures.append("invalid_schema_version")
+    if metadata.get("canonical_graph_hash") != _canonical_graph_hash(connection):
+        hard_failures.append("canonical_graph_hash_mismatch")
+
+    for table, expected_count in (("repositories", 1), ("runs", 1)):
+        count = _table_count(connection, table)
+        if count != expected_count:
+            hard_failures.append(f"invalid_{table}_count")
+
+    if _table_count(connection, "nodes") == 0:
+        hard_failures.append("missing_nodes")
+
+    invalid_paths = _invalid_repo_paths(connection)
+    if invalid_paths:
+        hard_failures.append("invalid_repo_relative_paths")
+
+    invalid_edge_contracts = _invalid_edge_contracts(connection)
+    if invalid_edge_contracts:
+        hard_failures.append("invalid_edge_contracts")
+
+    return {"hard_failures": hard_failures, "quality_warnings": _quality_warnings(connection)}
+
+
+def _canonical_graph_hash(connection: sqlite3.Connection) -> str:
+    facts: list[dict[str, object]] = []
+
+    facts.extend(
+        {
+            "kind": "directory",
+            "node_id": row["node_id"],
+            "parent_path": row["parent_path"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT path, node_id, parent_path FROM directories ORDER BY path"
+        )
+    )
+    facts.extend(
+        {
+            "graph_hash": row["graph_hash"],
+            "kind": "file",
+            "language": row["language"],
+            "node_id": row["node_id"],
+            "parser_status": row["parser_status"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT path, node_id, language, parser_status, graph_hash FROM files ORDER BY path"
+        )
+    )
+    facts.extend(
+        {
+            "id": row["id"],
+            "kind": "node",
+            "label": row["label"],
+            "metadata": _stable_graph_value(json.loads(row["metadata_json"])),
+            "node_kind": row["kind"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT id, kind, path, label, metadata_json FROM nodes ORDER BY id"
+        )
+    )
+    facts.extend(
+        {
+            "confidence": row["confidence"],
+            "kind": "edge",
+            "edge_kind": row["kind"],
+            "metadata": _stable_graph_value(json.loads(row["metadata_json"])),
+            "resolution_strategy": row["resolution_strategy"],
+            "source_id": row["source_id"],
+            "target_id": row["target_id"],
+        }
+        for row in connection.execute(
+            """
+            SELECT source_id, target_id, kind, confidence, resolution_strategy, metadata_json
+            FROM edges
+            ORDER BY source_id, kind, target_id
+            """
+        )
+    )
+    return _facts_hash(facts)
+
+
+def _stable_graph_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_graph_value(child)
+            for key, child in sorted(value.items())
+            if key
+            not in {
+                "end_line",
+                "import_ids",
+                "line",
+                "lines",
+                "raw_hash",
+                "size_bytes",
+                "start_line",
+            }
+        }
+    if isinstance(value, list):
+        return [_stable_graph_value(child) for child in value]
+    return value
+
+
+def _quality_warnings(connection: sqlite3.Connection) -> list[str]:
+    warnings: list[str] = []
+    parse_error_count = sum(
+        _table_count(connection, table) for table in ("python_parse_errors", "config_parse_errors")
+    )
+    if parse_error_count:
+        warnings.append(PARSER_ERROR_WARNING)
+    return warnings
+
+
+def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    raw_warnings = metadata.get("graph_quality_warnings")
+    if raw_warnings is None:
+        return []
+    try:
+        warnings = json.loads(raw_warnings)
+    except json.JSONDecodeError:
+        return ["Graph quality warnings metadata is unreadable."]
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings]
+
+
+def _table_count(connection: sqlite3.Connection, table: str) -> int:
+    row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    return int(row[0] if row is not None else 0)
+
+
+def _invalid_repo_paths(connection: sqlite3.Connection) -> list[str]:
+    paths: list[str] = []
+    for table, column in (("directories", "path"), ("files", "path"), ("nodes", "path")):
+        for row in connection.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"):
+            path = str(row[0])
+            if (
+                path.startswith("/")
+                or path == ARTIFACT_DIR_NAME
+                or path.startswith(f"{ARTIFACT_DIR_NAME}/")
+            ):
+                paths.append(path)
+            elif ".." in PurePosixPath(path).parts:
+                paths.append(path)
+    return paths
+
+
+def _invalid_edge_contracts(connection: sqlite3.Connection) -> list[str]:
+    invalid: list[str] = []
+    for row in connection.execute(
+        "SELECT id, confidence, resolution_strategy, evidence_json FROM edges ORDER BY id"
+    ):
+        if str(row["confidence"]) not in CONFIDENCE_RANK:
+            invalid.append(str(row["id"]))
+            continue
+        if not str(row["resolution_strategy"]).strip():
+            invalid.append(str(row["id"]))
+            continue
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except json.JSONDecodeError:
+            invalid.append(str(row["id"]))
+            continue
+        if not isinstance(evidence, list):
+            invalid.append(str(row["id"]))
+    return invalid
 
 
 def _read_graph_freshness_inputs(root: Path) -> tuple[dict[str, str], dict[str, FileState]]:

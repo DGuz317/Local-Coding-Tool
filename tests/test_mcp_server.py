@@ -107,7 +107,7 @@ def test_mcp_stdio_smoke_lists_exact_tools_and_calls_status(tmp_path):
 
 
 def _write_fixture_repo(root) -> None:
-    _write_text(root / "app.py", "alpha\nalpha again\n")
+    _write_text(root / "app.py", "ALPHA = 'alpha'\nSECOND = 'alpha again'\n")
     _write_text(
         root / "pyproject.toml",
         dedent(

@@ -54,7 +54,7 @@ def test_status_reports_existing_graph_artifacts_after_index(tmp_path):
     assert envelope["data"]["fresh"] is True
     assert envelope["data"]["missing_artifacts"] == []
     assert envelope["data"]["recommended_action"] is None
-    assert envelope["data"]["detected_schema_version"] == "9"
+    assert envelope["data"]["detected_schema_version"] == "10"
     assert envelope["data"]["freshness"]["changed_files"] == []
     assert envelope["warnings"] == []
 
@@ -84,6 +84,6 @@ def test_status_reports_unsupported_schema_version_when_detectable(tmp_path):
     assert envelope["data"]["fresh"] is False
     assert envelope["data"]["missing_artifacts"] == []
     assert envelope["data"]["detected_schema_version"] == "999"
-    assert envelope["data"]["supported_schema_version"] == 9
+    assert envelope["data"]["supported_schema_version"] == 10
     assert envelope["data"]["recommended_action"].startswith("repolens index ")
     assert envelope["warnings"] == ["Graph schema version is unsupported. Rebuild required."]

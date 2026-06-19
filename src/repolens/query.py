@@ -793,6 +793,7 @@ class GraphQueryService:
         recommended_action = self._recommended_action()
         base_data: dict[str, Any] = {
             "artifact_dir": ARTIFACT_DIR_NAME,
+            "canonical_graph_hash": None,
             "detected_schema_version": None,
             "fresh": False,
             "missing_artifacts": list(missing_artifacts),
@@ -887,6 +888,7 @@ class GraphQueryService:
                     )
                 )
                 changed_files = self._metadata_file_changes(files)
+                quality_warnings = _metadata_quality_warnings(metadata)
         except sqlite3.Error:
             data = {
                 **base_data,
@@ -911,13 +913,15 @@ class GraphQueryService:
         fresh = not changed_files
         reason = "graph_current" if fresh else "file_metadata_changed"
         status = "available" if fresh else "stale"
-        warnings = (
-            ()
-            if fresh
-            else ("Graph artifacts may be stale; file metadata changed since indexing.",)
-        )
+        warnings = tuple(quality_warnings)
+        if not fresh:
+            warnings = (
+                *warnings,
+                "Graph artifacts may be stale; file metadata changed since indexing.",
+            )
         data = {
             **base_data,
+            "canonical_graph_hash": metadata.get("canonical_graph_hash"),
             "change_counts": change_counts,
             "changed_files": shown_changes,
             "changed_files_truncated": len(changed_files) > max_changed_files,
@@ -2525,6 +2529,19 @@ def _metadata(connection: sqlite3.Connection) -> dict[str, str]:
         str(row["key"]): str(row["value"])
         for row in connection.execute("SELECT key, value FROM metadata")
     }
+
+
+def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    raw_warnings = metadata.get("graph_quality_warnings")
+    if raw_warnings is None:
+        return []
+    try:
+        warnings = json.loads(raw_warnings)
+    except json.JSONDecodeError:
+        return ["Graph quality warnings metadata is unreadable."]
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings]
 
 
 def _single_row_dict(cursor: sqlite3.Cursor) -> dict[str, Any]:
