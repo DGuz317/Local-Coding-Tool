@@ -35,7 +35,9 @@ from repolens.javascript_index import (
 )
 from repolens.python_index import (
     PYTHON_EXTRACTOR_VERSION,
+    PythonImportFact,
     PythonIndex,
+    PythonModuleFact,
     extract_python_index,
     python_package_node_id,
 )
@@ -2769,9 +2771,37 @@ def _insert_edges(
             {"message": config_error.message},
         )
 
+    python_modules_by_name = _python_modules_by_name(python_index)
+    python_modules_by_node_id = {module.node_id: module for module in python_index.modules}
+    python_local_import_edges: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     import_edges: dict[tuple[str, str, str, str], list[int]] = {}
     import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     for python_import in python_index.imports:
+        resolved_module = _resolve_python_local_import(
+            python_import,
+            modules_by_name=python_modules_by_name,
+            modules_by_node_id=python_modules_by_node_id,
+        )
+        if resolved_module is not None:
+            strategy = (
+                "python_relative_local_module"
+                if python_import.level > 0
+                else "python_absolute_local_module"
+            )
+            resolved_key = (
+                python_import.module_node_id,
+                resolved_module.node_id,
+                resolved_module.path,
+                strategy,
+            )
+            python_local_import_edges.setdefault(resolved_key, []).append(
+                {
+                    "id": python_import.id,
+                    "imported_name": python_import.imported_name,
+                    "line": python_import.line,
+                    "module": python_import.module,
+                }
+            )
         if not python_import.root_name:
             continue
         package_id = python_package_node_id(python_import.root_name, python_import.classification)
@@ -2798,6 +2828,34 @@ def _insert_edges(
                 "root_name": root_name,
             },
             resolution_strategy=_import_resolution_strategy(classification),
+        )
+
+    for (source_id, target_id, resolved_path, strategy), facts in sorted(
+        python_local_import_edges.items()
+    ):
+        add_edge(
+            source_id,
+            target_id,
+            "IMPORTS",
+            {
+                "classification": "local_resolved",
+                "import_ids": sorted(fact["id"] for fact in facts),
+                "lines": sorted({fact["line"] for fact in facts}),
+                "resolved_path": resolved_path,
+            },
+            confidence="high",
+            resolution_strategy=strategy,
+            evidence=[
+                {
+                    "import_id": fact["id"],
+                    "imported_name": fact["imported_name"],
+                    "kind": "python_import",
+                    "line": fact["line"],
+                    "module": fact["module"],
+                    "resolved_path": resolved_path,
+                }
+                for fact in sorted(facts, key=lambda item: (item["line"], item["id"]))
+            ],
         )
 
     javascript_import_edges: dict[tuple[str, str, str, str], list[int]] = {}
@@ -3000,13 +3058,90 @@ def _edge_evidence_from_metadata(metadata: dict[str, Any]) -> list[dict[str, Any
 
 
 def _import_resolution_strategy(classification: str) -> str:
-    if classification == "standard_library":
+    if classification in {"standard_library", "stdlib"}:
         return "standard_library_import"
     if classification == "third_party":
         return "external_import"
     if classification == "local":
         return "local_import"
     return "import"
+
+
+def _python_modules_by_name(python_index: PythonIndex) -> dict[str, list[PythonModuleFact]]:
+    modules_by_name: dict[str, list[PythonModuleFact]] = {}
+    for module in python_index.modules:
+        modules_by_name.setdefault(module.module_name, []).append(module)
+    return modules_by_name
+
+
+def _resolve_python_local_import(
+    python_import: PythonImportFact,
+    *,
+    modules_by_name: dict[str, list[PythonModuleFact]],
+    modules_by_node_id: dict[str, PythonModuleFact],
+) -> PythonModuleFact | None:
+    if python_import.classification != "local":
+        return None
+
+    for target_name in _python_import_target_names(python_import, modules_by_node_id):
+        matches = modules_by_name.get(target_name, [])
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+    return None
+
+
+def _python_import_target_names(
+    python_import: PythonImportFact,
+    modules_by_node_id: dict[str, PythonModuleFact],
+) -> tuple[str, ...]:
+    if python_import.kind == "import" and python_import.level == 0:
+        return (python_import.module,)
+
+    if python_import.level > 0:
+        source_module = modules_by_node_id.get(python_import.module_node_id)
+        if source_module is None:
+            return ()
+        base_parts = _python_relative_base_parts(
+            source_module.module_name,
+            source_module.path,
+            python_import.level,
+        )
+        if base_parts is None:
+            return ()
+        module_parts = tuple(part for part in python_import.module.split(".") if part)
+        base_name = ".".join((*base_parts, *module_parts))
+    else:
+        base_name = python_import.module
+
+    candidates: list[str] = []
+    if python_import.imported_name and python_import.imported_name != "*":
+        candidates.append(
+            f"{base_name}.{python_import.imported_name}"
+            if base_name
+            else python_import.imported_name
+        )
+    if base_name:
+        candidates.append(base_name)
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _python_relative_base_parts(
+    module_name: str,
+    path: str,
+    level: int,
+) -> tuple[str, ...] | None:
+    if path == "__init__.py" or path.endswith("/__init__.py"):
+        package_parts = tuple(module_name.split(".")) if module_name != "__init__" else ()
+    else:
+        package_parts = tuple(module_name.split(".")[:-1])
+    ascend = level - 1
+    if ascend > len(package_parts):
+        return None
+    if ascend == 0:
+        return package_parts
+    return package_parts[:-ascend]
 
 
 def _javascript_import_confidence(classification: str, statuses: set[str]) -> str:

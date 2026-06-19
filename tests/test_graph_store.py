@@ -82,6 +82,77 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     ]
 
 
+def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_path):
+    (tmp_path / "src" / "acme").mkdir(parents=True)
+    (tmp_path / "acme").mkdir()
+    (tmp_path / "src" / "acme" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "acme" / "helpers.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "acme" / "models.py").write_text(
+        "class Model:\n    pass\n", encoding="utf-8"
+    )
+    (tmp_path / "src" / "acme" / "ambiguous.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "acme" / "ambiguous.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "src" / "acme" / "service.py").write_text(
+        "import acme.helpers\nfrom .models import Model\nimport acme.ambiguous\nimport requests\n",
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+    export_graph_artifacts(tmp_path)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        import_edges = list(
+            connection.execute(
+                """
+                SELECT target_id, confidence, resolution_strategy, evidence_json, metadata_json
+                FROM edges
+                WHERE source_id = 'python_module:src/acme/service.py'
+                  AND kind = 'IMPORTS'
+                ORDER BY target_id
+                """
+            )
+        )
+
+    module_edges = {edge[0]: edge for edge in import_edges if edge[0].startswith("python_module:")}
+    assert set(module_edges) == {
+        "python_module:src/acme/helpers.py",
+        "python_module:src/acme/models.py",
+    }
+    helpers_edge = module_edges["python_module:src/acme/helpers.py"]
+    models_edge = module_edges["python_module:src/acme/models.py"]
+    assert helpers_edge[1] == "high"
+    assert helpers_edge[2] == "python_absolute_local_module"
+    helpers_evidence = json.loads(helpers_edge[3])
+    assert helpers_evidence[0]["import_id"].startswith("python_import:src/acme/service.py:")
+    assert helpers_evidence == [
+        {
+            "import_id": helpers_evidence[0]["import_id"],
+            "imported_name": None,
+            "kind": "python_import",
+            "line": 1,
+            "module": "acme.helpers",
+            "resolved_path": "src/acme/helpers.py",
+        }
+    ]
+    assert json.loads(helpers_edge[4])["resolved_path"] == "src/acme/helpers.py"
+    assert models_edge[2] == "python_relative_local_module"
+    assert json.loads(models_edge[4])["resolved_path"] == "src/acme/models.py"
+    assert not any(edge[0] == "python_module:src/acme/ambiguous.py" for edge in import_edges)
+    assert not any(edge[0] == "python_module:acme/ambiguous.py" for edge in import_edges)
+    assert not any(
+        edge[0].startswith("python_module:") and "requests" in edge[0] for edge in import_edges
+    )
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    assert any(
+        edge["target_id"] == "python_module:src/acme/models.py"
+        and edge["confidence"] == "high"
+        and edge["resolution_strategy"] == "python_relative_local_module"
+        for edge in graph_json["edges"]
+    )
+
+
 def test_graph_store_rebuild_leaves_existing_database_when_replace_fails(tmp_path, monkeypatch):
     (tmp_path / ".repolens").mkdir()
     (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
