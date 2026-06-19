@@ -1,6 +1,6 @@
 # RepoLens MCP v0.2 Issue Breakdown
 
-Draft status: Final review complete. Approved to become GitHub issue bodies.
+Draft status: Final review complete. Published as GitHub issues #35 through #54.
 
 Source documents:
 
@@ -22,6 +22,10 @@ Label taxonomy:
 - Version: `v0.2`
 - Priority: `P0`, `P1`, `P2`
 - Areas: `area:graph`, `area:resolver`, `area:mcp`, `area:update`, `area:security`, `area:package-workspace`, `area:dogfood`, `area:ci`, `area:docs`
+
+Published tracker:
+
+- #35 RepoLens MCP v0.2 roadmap and release criteria: https://github.com/DGuz317/Local-Coding-Tool/issues/35
 
 ## Proposed Slices
 
