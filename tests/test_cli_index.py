@@ -89,7 +89,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "9"
     assert "effective_config_hash" in metadata
     assert "git_branch" in metadata
     assert "git_commit" in metadata
@@ -545,7 +545,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "9"
     assert (
         "@/components/App",
         None,
@@ -687,7 +687,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "9"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -844,7 +844,7 @@ def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_pat
             connection.execute("SELECT name, description, path FROM skills ORDER BY name")
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "9"
     assert (
         "README.md",
         "readme",
