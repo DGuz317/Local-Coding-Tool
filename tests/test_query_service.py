@@ -123,6 +123,33 @@ def test_ambiguous_node_lookup_returns_candidates_without_choosing(tmp_path):
     assert result["confidence"] == "low"
 
 
+def test_low_confidence_node_lookup_returns_candidate_only_without_resolving(tmp_path):
+    _write_text(tmp_path / "src" / "billing" / "invoice.py", "def total_due():\n    return 1\n")
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    node = service.get_node(query="due missing")
+    neighbors = service.get_neighbors(query="due missing")
+    impact = service.impact_analysis("due missing")
+
+    assert node["ok"] is True
+    assert node["confidence"] == "low"
+    assert node["data"]["node"] is None
+    assert node["data"]["ambiguous"] is False
+    assert node["data"]["reason"] == "fuzzy_candidate_only"
+    assert node["data"]["resolution_strategy"] == "fuzzy_candidate"
+    assert [candidate["node"]["label"] for candidate in node["data"]["candidates"]] == ["total_due"]
+
+    assert neighbors["data"]["center"] is None
+    assert neighbors["data"]["neighbors"] == []
+    assert neighbors["data"]["reason"] == "fuzzy_candidate_only"
+
+    assert impact["data"]["target"] is None
+    assert impact["data"]["direct_affected_files"] == []
+    assert impact["data"]["resolution"]["reason"] == "fuzzy_candidate_only"
+    assert impact["data"]["resolution"]["resolution_strategy"] == "fuzzy_candidate"
+
+
 def test_query_service_reports_stale_warnings_without_reading_source_files(tmp_path, monkeypatch):
     _write_fixture_repo(tmp_path)
     index_repository(tmp_path)

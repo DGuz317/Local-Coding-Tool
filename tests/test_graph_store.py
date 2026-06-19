@@ -121,7 +121,7 @@ def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_pat
     helpers_edge = module_edges["python_module:src/acme/helpers.py"]
     models_edge = module_edges["python_module:src/acme/models.py"]
     assert helpers_edge[1] == "high"
-    assert helpers_edge[2] == "python_absolute_local_module"
+    assert helpers_edge[2] == "local_import"
     helpers_evidence = json.loads(helpers_edge[3])
     assert helpers_evidence[0]["import_id"].startswith("python_import:src/acme/service.py:")
     assert helpers_evidence == [
@@ -135,7 +135,7 @@ def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_pat
         }
     ]
     assert json.loads(helpers_edge[4])["resolved_path"] == "src/acme/helpers.py"
-    assert models_edge[2] == "python_relative_local_module"
+    assert models_edge[2] == "local_import"
     assert json.loads(models_edge[4])["resolved_path"] == "src/acme/models.py"
     assert not any(edge[0] == "python_module:src/acme/ambiguous.py" for edge in import_edges)
     assert not any(edge[0] == "python_module:acme/ambiguous.py" for edge in import_edges)
@@ -147,7 +147,7 @@ def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_pat
     assert any(
         edge["target_id"] == "python_module:src/acme/models.py"
         and edge["confidence"] == "high"
-        and edge["resolution_strategy"] == "python_relative_local_module"
+        and edge["resolution_strategy"] == "local_import"
         for edge in graph_json["edges"]
     )
 
@@ -180,13 +180,49 @@ def test_javascript_relative_import_edges_store_strategy_and_bounded_evidence(tm
 
     assert edge[0] == "javascript_module:src/lib/format.ts"
     assert edge[1] == "high"
-    assert edge[2] == "relative_import"
+    assert edge[2] == "local_import"
     evidence = json.loads(edge[3])
     assert sorted(item["line"] for item in evidence) == [1, 2]
     assert {item["specifier"] for item in evidence} == {"../lib/format"}
     assert all(item["kind"] == "javascript_import" for item in evidence)
     assert all(item["resolution_status"] == "resolved_relative" for item in evidence)
     assert json.loads(edge[4])["resolved_path"] == "src/lib/format.ts"
+
+
+def test_javascript_alias_import_edges_use_canonical_strategy(tmp_path):
+    (tmp_path / "src" / "shared").mkdir(parents=True)
+    (tmp_path / "tsconfig.json").write_text(
+        '{"compilerOptions":{"paths":{"@/*":["src/*"]}}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "shared" / "format.ts").write_text(
+        "export const format = () => 'ok';\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "main.ts").write_text(
+        "import { format } from '@/shared/format';\n",
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        edge = connection.execute(
+            """
+            SELECT target_id, confidence, resolution_strategy, evidence_json, metadata_json
+            FROM edges
+            WHERE source_id = 'javascript_module:src/main.ts'
+              AND kind = 'IMPORTS'
+            """
+        ).fetchone()
+
+    assert edge[0] == "javascript_module:src/shared/format.ts"
+    assert edge[1] == "medium"
+    assert edge[2] == "path_alias_import"
+    evidence = json.loads(edge[3])
+    assert evidence[0]["resolution_status"] == "resolved_alias"
+    assert json.loads(edge[4])["resolved_path"] == "src/shared/format.ts"
 
 
 def test_graph_store_rebuild_leaves_existing_database_when_replace_fails(tmp_path, monkeypatch):

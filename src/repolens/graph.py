@@ -2783,11 +2783,7 @@ def _insert_edges(
             modules_by_node_id=python_modules_by_node_id,
         )
         if resolved_module is not None:
-            strategy = (
-                "python_relative_local_module"
-                if python_import.level > 0
-                else "python_absolute_local_module"
-            )
+            strategy = "local_import"
             resolved_key = (
                 python_import.module_node_id,
                 resolved_module.node_id,
@@ -3081,13 +3077,13 @@ def _edge_evidence_from_metadata(metadata: dict[str, Any]) -> list[dict[str, Any
 
 
 def _import_resolution_strategy(classification: str) -> str:
-    if classification in {"standard_library", "stdlib"}:
+    if classification in {"node_builtin", "standard_library", "stdlib"}:
         return "standard_library_import"
     if classification == "third_party":
         return "external_import"
-    if classification == "local":
+    if classification in {"local", "local_resolved"}:
         return "local_import"
-    return "import"
+    return "direct"
 
 
 def _python_modules_by_name(python_index: PythonIndex) -> dict[str, list[PythonModuleFact]]:
@@ -3177,9 +3173,9 @@ def _javascript_import_resolution_strategy(classification: str, statuses: set[st
     if classification == "local_resolved":
         strategies = []
         if "resolved_alias" in statuses:
-            strategies.append("alias_import")
+            strategies.append("path_alias_import")
         if "resolved_relative" in statuses:
-            strategies.append("relative_import")
+            strategies.append("local_import")
         return "+".join(sorted(strategies)) if strategies else "local_import"
     return _import_resolution_strategy(classification)
 
