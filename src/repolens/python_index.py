@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from repolens.scanner import ScannedFile
 
-PYTHON_EXTRACTOR_VERSION = "issue-6-python-structure-v1"
+PYTHON_EXTRACTOR_VERSION = "issue-38-python-local-import-resolution-v1"
 
 TAG_NAMES = frozenset(
     {
