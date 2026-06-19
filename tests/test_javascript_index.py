@@ -75,6 +75,64 @@ def test_javascript_index_extracts_imports_and_classifies_packages(tmp_path):
     assert "not-real" not in {item.specifier for item in javascript_index.imports}
 
 
+def test_javascript_index_resolves_relative_imports_with_extension_and_index_probing(tmp_path):
+    _write_text(tmp_path / "src" / "lib" / "format.ts", "export const format = () => 'ok';\n")
+    _write_text(tmp_path / "src" / "ui" / "index.tsx", "export const Ui = () => null;\n")
+    _write_text(tmp_path / "src" / "exact.js", "module.exports = {};\n")
+    _write_text(
+        tmp_path / "src" / "app" / "main.ts",
+        dedent(
+            """
+            import { format } from "../lib/format";
+            import { Ui } from "../ui";
+            const exact = require("../exact.js");
+            const dynamic = import("../lib/format");
+            """
+        ).lstrip(),
+    )
+
+    scan = scan_repository(tmp_path)
+    javascript_index = extract_javascript_index(tmp_path, scan.files)
+
+    imports = {(item.kind, item.specifier): item for item in javascript_index.imports}
+    assert imports[("named_import", "../lib/format")].classification == "local_resolved"
+    assert imports[("named_import", "../lib/format")].root_name is None
+    assert imports[("named_import", "../lib/format")].resolved_path == "src/lib/format.ts"
+    assert imports[("named_import", "../lib/format")].resolution_status == "resolved_relative"
+    assert imports[("named_import", "../ui")].resolved_path == "src/ui/index.tsx"
+    assert imports[("require", "../exact.js")].resolved_path == "src/exact.js"
+    assert imports[("dynamic_import", "../lib/format")].resolved_path == "src/lib/format.ts"
+
+
+def test_javascript_index_leaves_ambiguous_and_unresolved_relative_imports_unresolved(tmp_path):
+    _write_text(tmp_path / "src" / "lib" / "ambiguous.ts", "export const value = 1;\n")
+    _write_text(tmp_path / "src" / "lib" / "ambiguous.tsx", "export const value = 1;\n")
+    _write_text(
+        tmp_path / "src" / "app" / "main.ts",
+        dedent(
+            """
+            import ambiguous from "../lib/ambiguous";
+            import missing from "../lib/missing";
+            import absolute from "/src/lib/ambiguous";
+            import packageName from "next/image";
+            """
+        ).lstrip(),
+    )
+
+    scan = scan_repository(tmp_path)
+    javascript_index = extract_javascript_index(tmp_path, scan.files)
+
+    imports = {item.specifier: item for item in javascript_index.imports}
+    assert imports["../lib/ambiguous"].classification == "local_unresolved"
+    assert imports["../lib/ambiguous"].resolved_path is None
+    assert imports["../lib/ambiguous"].resolution_status == "unresolved_ambiguous_relative"
+    assert imports["../lib/missing"].classification == "local_unresolved"
+    assert imports["../lib/missing"].resolution_status == "unresolved_missing_relative"
+    assert imports["/src/lib/ambiguous"].classification == "local_unresolved"
+    assert imports["/src/lib/ambiguous"].resolution_status == "unresolved_unsupported_absolute"
+    assert imports["next/image"].classification == "third_party"
+
+
 def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_path):
     _write_text(
         tmp_path / "src" / "app.tsx",

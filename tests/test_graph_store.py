@@ -61,10 +61,11 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     )
     assert edge[4] == "high"
     assert edge[5] == "external_import"
-    assert json.loads(edge[6]) == [
-        {"kind": "line", "line": 1},
-        {"kind": "line", "line": 2},
-    ]
+    evidence = json.loads(edge[6])
+    assert sorted(item["line"] for item in evidence) == [1, 2]
+    assert {item["specifier"] for item in evidence} == {"react"}
+    assert all(item["kind"] == "javascript_import" for item in evidence)
+    assert all(item["resolution_status"] == "external" for item in evidence)
     assert json.loads(edge[7])["lines"] == [1, 2]
 
     graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
@@ -76,10 +77,8 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     )
     assert exported_edge["confidence"] == "high"
     assert exported_edge["resolution_strategy"] == "external_import"
-    assert exported_edge["evidence"] == [
-        {"kind": "line", "line": 1},
-        {"kind": "line", "line": 2},
-    ]
+    assert sorted(item["line"] for item in exported_edge["evidence"]) == [1, 2]
+    assert {item["specifier"] for item in exported_edge["evidence"]} == {"react"}
 
 
 def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_path):
@@ -151,6 +150,43 @@ def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_pat
         and edge["resolution_strategy"] == "python_relative_local_module"
         for edge in graph_json["edges"]
     )
+
+
+def test_javascript_relative_import_edges_store_strategy_and_bounded_evidence(tmp_path):
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "lib").mkdir(parents=True)
+    (tmp_path / "src" / "lib" / "format.ts").write_text(
+        "export const format = () => 'ok';\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "app" / "main.ts").write_text(
+        "import { format } from '../lib/format';\nconst again = require('../lib/format');\n",
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+    export_graph_artifacts(tmp_path)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        edge = connection.execute(
+            """
+            SELECT target_id, confidence, resolution_strategy, evidence_json, metadata_json
+            FROM edges
+            WHERE source_id = 'javascript_module:src/app/main.ts'
+              AND kind = 'IMPORTS'
+            """
+        ).fetchone()
+
+    assert edge[0] == "javascript_module:src/lib/format.ts"
+    assert edge[1] == "high"
+    assert edge[2] == "relative_import"
+    evidence = json.loads(edge[3])
+    assert sorted(item["line"] for item in evidence) == [1, 2]
+    assert {item["specifier"] for item in evidence} == {"../lib/format"}
+    assert all(item["kind"] == "javascript_import" for item in evidence)
+    assert all(item["resolution_status"] == "resolved_relative" for item in evidence)
+    assert json.loads(edge[4])["resolved_path"] == "src/lib/format.ts"
 
 
 def test_graph_store_rebuild_leaves_existing_database_when_replace_fails(tmp_path, monkeypatch):
