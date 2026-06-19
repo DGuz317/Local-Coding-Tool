@@ -50,7 +50,8 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "9"
+    assert metadata["schema_version"] == "10"
+    assert len(metadata["canonical_graph_hash"]) == 64
     assert {"confidence", "resolution_strategy", "evidence_json"} <= edge_columns
     assert len(import_edges) == 1
 
