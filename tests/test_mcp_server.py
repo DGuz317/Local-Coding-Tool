@@ -7,6 +7,7 @@ from textwrap import dedent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from mcp_stdio_support import assert_no_stdout
 from repolens.indexer import index_repository
 from repolens.mcp_server import MCP_TOOL_NAMES, RepoLensMcpTools
 
@@ -26,7 +27,7 @@ def test_mcp_tools_return_missing_graph_envelopes_before_indexing(tmp_path, caps
     assert summary["truncation"] == {"fields": [], "truncated": False}
     assert report["error"]["code"] == "missing_graph_artifacts"
     assert search["error"]["code"] == "missing_graph_artifacts"
-    assert capsys.readouterr().out == ""
+    assert_no_stdout(capsys)
 
 
 def test_mcp_tools_wrap_success_with_freshness_limits_and_truncation(tmp_path):
