@@ -15,8 +15,11 @@ from repolens.graph import (
     GraphArtifactsStatus,
     GraphExportError,
     GraphStoreError,
+    SelectiveUpdatePlan,
     inspect_graph_artifacts,
+    plan_selective_update,
     rebuild_graph_artifacts,
+    replace_graph_artifacts_selectively,
 )
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanError, ScanResult, scan_repository
 
@@ -62,12 +65,15 @@ class UpdateResult:
     previous_status: GraphArtifactsStatus
     mode: str
     initialized: bool
+    plan: SelectiveUpdatePlan | None = None
 
     def to_cli_data(self) -> dict[str, object]:
         data = self.index.to_cli_data()
         data["freshness"] = self.previous_status.freshness or {}
         data["initialized"] = self.initialized
         data["mode"] = self.mode
+        if self.plan is not None:
+            data["selective_update"] = self.plan.to_cli_data()
         data["previous_reason"] = self.previous_status.reason
         data["previous_status"] = self.previous_status.status
         return data
@@ -116,14 +122,33 @@ def update_repository(repo_path: Path | str) -> UpdateResult:
 
     previous_status = inspect_graph_artifacts(root)
     initialized = previous_status.reason == "missing_graph_artifacts"
+    _bootstrap_artifact_dir(root)
+    try:
+        scan = scan_repository(root)
+    except ScanError as exc:
+        raise RepoLensIndexError(str(exc)) from exc
+    _write_scan_artifact(root, scan)
+
+    plan = plan_selective_update(previous_status, scan)
     changes = () if initialized else previous_status.file_changes
-    index = index_repository(root, file_changes=changes)
+    try:
+        if plan.safe:
+            replace_graph_artifacts_selectively(root, scan, plan, file_changes=changes)
+            mode = "selective"
+        else:
+            rebuild_graph_artifacts(root, scan, file_changes=changes)
+            mode = "initialized" if initialized else "full_rebuild"
+    except (GraphStoreError, GraphExportError) as exc:
+        raise RepoLensIndexError(str(exc)) from exc
+
+    index = IndexResult(root=root, scan=scan)
     return UpdateResult(
         root=root,
         index=index,
         previous_status=previous_status,
-        mode="initialized" if initialized else "updated",
+        mode=mode,
         initialized=initialized,
+        plan=plan,
     )
 
 

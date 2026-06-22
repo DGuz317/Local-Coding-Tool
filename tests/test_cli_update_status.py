@@ -118,9 +118,12 @@ def test_update_bootstraps_missing_graph_and_records_latest_changes(tmp_path):
 
     assert second_result.exit_code == 0
     second_envelope = json.loads(second_result.output)
-    assert second_envelope["data"]["mode"] == "updated"
+    assert second_envelope["data"]["mode"] == "selective"
     assert second_envelope["data"]["initialized"] is False
     assert second_envelope["data"]["freshness"]["change_counts"]["structural_change"] == 1
+    assert second_envelope["data"]["selective_update"]["safe"] is True
+    assert second_envelope["data"]["selective_update"]["reparse_paths"] == ["app.py"]
+    assert second_envelope["data"]["selective_update"]["stale_cleanup_paths"] == []
 
     graph_status = json.loads(
         (tmp_path / ".repolens" / "graph-status.json").read_text(encoding="utf-8")
@@ -161,7 +164,78 @@ def test_update_warns_about_parser_errors_without_failing(tmp_path):
     assert result.exit_code == 0
     envelope = json.loads(result.output)
     assert envelope["data"]["freshness"]["change_counts"]["parse_error"] == 1
+    assert envelope["data"]["selective_update"]["parse_error_paths"] == ["broken.py"]
+    assert envelope["data"]["selective_update"]["stale_cleanup_paths"] == ["broken.py"]
     assert envelope["warnings"] == ["Parser errors detected in the live graph overlay."]
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        symbol_count = connection.execute(
+            "SELECT COUNT(*) FROM python_symbols WHERE path = 'broken.py'"
+        ).fetchone()[0]
+        parse_error_count = connection.execute(
+            "SELECT COUNT(*) FROM python_parse_errors WHERE path = 'broken.py'"
+        ).fetchone()[0]
+
+    assert symbol_count == 0
+    assert parse_error_count == 1
+
+
+def test_update_plan_classifies_new_deleted_skipped_and_reused_files(tmp_path):
+    _write_text(tmp_path / "changed.py", "def old():\n    return 1\n")
+    _write_text(tmp_path / "deleted.py", "def gone():\n    return 1\n")
+    _write_text(tmp_path / "same.py", "def same():\n    return 1\n")
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    _write_text(tmp_path / "changed.py", "def new():\n    return 1\n")
+    (tmp_path / "deleted.py").unlink()
+    _write_text(tmp_path / "new.py", "def created():\n    return 1\n")
+    _write_text(tmp_path / ".env", "TOKEN=secret\n")
+
+    result = runner.invoke(app, ["update", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    plan = json.loads(result.output)["data"]["selective_update"]
+    assert plan["safe"] is True
+    assert plan["changed_paths"] == ["changed.py", "deleted.py", "new.py"]
+    assert plan["new_paths"] == ["new.py"]
+    assert plan["deleted_paths"] == ["deleted.py"]
+    assert plan["reused_paths"] == ["same.py"]
+    assert plan["reparse_paths"] == ["changed.py", "new.py"]
+    assert plan["stale_cleanup_paths"] == ["deleted.py"]
+    assert plan["skipped_paths"] == [".env"]
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        deleted_file_count = connection.execute(
+            "SELECT COUNT(*) FROM files WHERE path = 'deleted.py'"
+        ).fetchone()[0]
+        deleted_symbol_count = connection.execute(
+            "SELECT COUNT(*) FROM python_symbols WHERE path = 'deleted.py'"
+        ).fetchone()[0]
+
+    assert deleted_file_count == 0
+    assert deleted_symbol_count == 0
+
+
+def test_update_falls_back_to_full_rebuild_when_selective_update_is_unsafe(tmp_path):
+    _write_text(tmp_path / "app.py", "def app():\n    return 1\n")
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        connection.execute("UPDATE metadata SET value = '0' WHERE key = 'schema_version'")
+
+    result = runner.invoke(app, ["update", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert envelope["data"]["mode"] == "full_rebuild"
+    assert envelope["data"]["selective_update"]["safe"] is False
+    assert envelope["data"]["selective_update"]["reason"] == "unsupported_schema_version"
+
+    status_result = runner.invoke(app, ["status", str(tmp_path), "--json"])
+    assert status_result.exit_code == 0
+    assert json.loads(status_result.output)["data"]["fresh"] is True
 
 
 def test_status_detects_git_metadata_changes(tmp_path):

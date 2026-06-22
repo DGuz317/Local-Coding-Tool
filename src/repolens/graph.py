@@ -209,6 +209,40 @@ class FileChange:
 
 
 @dataclass(frozen=True)
+class SelectiveUpdatePlan:
+    """File-level update plan derived from a safe freshness inspection."""
+
+    mode: str
+    safe: bool
+    reason: str
+    changed_paths: tuple[str, ...]
+    new_paths: tuple[str, ...]
+    deleted_paths: tuple[str, ...]
+    parse_error_paths: tuple[str, ...]
+    skipped_paths: tuple[str, ...]
+    reused_paths: tuple[str, ...]
+    reparse_paths: tuple[str, ...]
+    stale_cleanup_paths: tuple[str, ...]
+    cross_file_edge_recompute_paths: tuple[str, ...]
+
+    def to_cli_data(self) -> dict[str, object]:
+        return {
+            "changed_paths": list(self.changed_paths),
+            "cross_file_edge_recompute_paths": list(self.cross_file_edge_recompute_paths),
+            "deleted_paths": list(self.deleted_paths),
+            "mode": self.mode,
+            "new_paths": list(self.new_paths),
+            "parse_error_paths": list(self.parse_error_paths),
+            "reason": self.reason,
+            "reparse_paths": list(self.reparse_paths),
+            "reused_paths": list(self.reused_paths),
+            "safe": self.safe,
+            "skipped_paths": list(self.skipped_paths),
+            "stale_cleanup_paths": list(self.stale_cleanup_paths),
+        }
+
+
+@dataclass(frozen=True)
 class _ExtractedIndexes:
     python: PythonIndex
     javascript: JavaScriptIndex
@@ -255,6 +289,95 @@ def rebuild_graph_artifacts(
     """Rebuild the graph store and exports from one safe discovery result."""
     build_graph_store(root, scan, file_changes=file_changes)
     return export_graph_artifacts(root)
+
+
+def plan_selective_update(
+    status: GraphArtifactsStatus,
+    scan: ScanResult,
+) -> SelectiveUpdatePlan:
+    """Plan a safe file-level update from current freshness information."""
+    skipped_paths = tuple(
+        sorted(skipped.path for skipped in scan.skipped if skipped.path != ARTIFACT_DIR_NAME)
+    )
+    if status.reason == "missing_graph_artifacts":
+        return SelectiveUpdatePlan(
+            mode="initialized",
+            safe=False,
+            reason="missing_graph_artifacts",
+            changed_paths=(),
+            new_paths=(),
+            deleted_paths=(),
+            parse_error_paths=(),
+            skipped_paths=skipped_paths,
+            reused_paths=(),
+            reparse_paths=tuple(sorted(file.path for file in scan.files)),
+            stale_cleanup_paths=(),
+            cross_file_edge_recompute_paths=tuple(sorted(file.path for file in scan.files)),
+        )
+    if status.status == "rebuild_required" or status.freshness is None:
+        return SelectiveUpdatePlan(
+            mode="full_rebuild",
+            safe=False,
+            reason=status.reason,
+            changed_paths=(),
+            new_paths=(),
+            deleted_paths=(),
+            parse_error_paths=(),
+            skipped_paths=skipped_paths,
+            reused_paths=(),
+            reparse_paths=tuple(sorted(file.path for file in scan.files)),
+            stale_cleanup_paths=(),
+            cross_file_edge_recompute_paths=tuple(sorted(file.path for file in scan.files)),
+        )
+
+    changes_by_type: dict[str, list[str]] = {change_type: [] for change_type in CHANGE_TYPES}
+    for change in status.file_changes:
+        changes_by_type.setdefault(change.change_type, []).append(change.path)
+
+    changed_paths = tuple(
+        sorted(change.path for change in status.file_changes if change.change_type != "no_change")
+    )
+    new_paths = tuple(sorted(changes_by_type.get("new", ())))
+    deleted_paths = tuple(sorted(changes_by_type.get("deleted", ())))
+    parse_error_paths = tuple(sorted(changes_by_type.get("parse_error", ())))
+    stale_cleanup_paths = tuple(sorted((*deleted_paths, *parse_error_paths)))
+    reparse_paths = tuple(sorted(path for path in changed_paths if path not in set(deleted_paths)))
+    reused_paths = tuple(sorted(changes_by_type.get("no_change", ())))
+
+    edge_recompute_paths = set(reparse_paths)
+    edge_recompute_paths.update(deleted_paths)
+    for change in status.file_changes:
+        signals = change.secondary_signals
+        if signals.get("dependency_changed") or signals.get("graph_changed"):
+            edge_recompute_paths.add(change.path)
+
+    return SelectiveUpdatePlan(
+        mode="selective",
+        safe=True,
+        reason="fresh" if not changed_paths else "file_changes_detected",
+        changed_paths=changed_paths,
+        new_paths=new_paths,
+        deleted_paths=deleted_paths,
+        parse_error_paths=parse_error_paths,
+        skipped_paths=skipped_paths,
+        reused_paths=reused_paths,
+        reparse_paths=reparse_paths,
+        stale_cleanup_paths=stale_cleanup_paths,
+        cross_file_edge_recompute_paths=tuple(sorted(edge_recompute_paths)),
+    )
+
+
+def replace_graph_artifacts_selectively(
+    root: Path,
+    scan: ScanResult,
+    plan: SelectiveUpdatePlan,
+    *,
+    file_changes: tuple[FileChange, ...] = (),
+) -> tuple[str, ...]:
+    """Replace graph artifacts through the validated selective update path."""
+    if not plan.safe:
+        raise GraphStoreError("selective_update_not_safe")
+    return rebuild_graph_artifacts(root, scan, file_changes=file_changes)
 
 
 def build_graph_store(
