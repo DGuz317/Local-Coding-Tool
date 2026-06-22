@@ -10,6 +10,7 @@ from mcp.client.stdio import stdio_client
 from mcp_stdio_support import assert_no_stdout
 from repolens.indexer import index_repository
 from repolens.mcp_server import MCP_TOOL_NAMES, RepoLensMcpTools
+from repolens.scanner import DEFAULT_MAX_FILE_SIZE_BYTES
 
 
 def test_mcp_tools_return_missing_graph_envelopes_before_indexing(tmp_path, capsys):
@@ -118,6 +119,62 @@ def test_mcp_text_search_returns_structured_expected_errors(tmp_path):
     }
     assert result["data"] == {}
     assert result["limits"]["max_results"] == 20
+
+
+def test_mcp_text_search_returns_capped_redacted_previews_with_explicit_limits(tmp_path):
+    full_line = f"{'a' * 120} API_TOKEN=super-secret needle {'b' * 220}"
+    _write_text(tmp_path / "app.py", f"{full_line}\nneedle second\nneedle third\n")
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.search_text("needle", max_results=2)
+
+    matches = result["data"]["matches"]
+
+    assert result["ok"] is True
+    assert result["limits"] == {
+        "max_results": 2,
+        "preview_chars": 160,
+        "max_file_size_bytes": DEFAULT_MAX_FILE_SIZE_BYTES,
+    }
+    assert result["pagination"] == {
+        "limit": 2,
+        "offset": 0,
+        "returned": 2,
+        "total": 3,
+        "truncated": True,
+    }
+    assert result["truncation"] == {"fields": ["data", "pagination"], "truncated": True}
+    assert result["data"]["truncated"] is True
+    assert len(matches) == 2
+    assert len(matches[0]["preview"]) <= result["limits"]["preview_chars"]
+    assert matches[0]["preview_truncated_before"] is True
+    assert matches[0]["preview_truncated_after"] is True
+    assert full_line not in str(result)
+    assert "super-secret" not in str(result)
+    assert "API_TOKEN=<redacted>" in matches[0]["preview"]
+
+
+def test_mcp_text_search_does_not_read_oversized_files(tmp_path):
+    oversized = f"needle {'x' * DEFAULT_MAX_FILE_SIZE_BYTES}"
+    _write_text(tmp_path / "large.py", oversized)
+    _write_text(tmp_path / "small.py", "needle small\n")
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.search_text("needle")
+
+    paths = {match["path"] for match in result["data"]["matches"]}
+
+    assert result["ok"] is True
+    assert paths == {"small.py"}
+    assert result["data"]["total_matches"] == 1
+    assert result["data"]["skipped_paths"] == 1
+    assert result["limits"]["max_file_size_bytes"] == DEFAULT_MAX_FILE_SIZE_BYTES
+
+
+def test_mcp_surface_has_no_source_file_read_tool_behavior():
+    forbidden_terms = ("read_file", "read_source", "get_file", "source_file", "cat")
+
+    assert all(term not in MCP_TOOL_NAMES for term in forbidden_terms)
 
 
 def test_mcp_tools_preserve_candidate_only_resolution_metadata(tmp_path):

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from repolens.redaction import redact_text
 from repolens.scanner import ScanError, ScanResult, scan_repository
 
 SEARCH_DEFAULT_MAX_RESULTS = 20
@@ -173,4 +174,7 @@ def _build_match(
 
 
 def _sanitize_preview(preview: str) -> str:
-    return "".join(char if 32 <= ord(char) < 127 or ord(char) >= 160 else " " for char in preview)
+    sanitized = "".join(
+        char if 32 <= ord(char) < 127 or ord(char) >= 160 else " " for char in preview
+    )
+    return redact_text(sanitized)
