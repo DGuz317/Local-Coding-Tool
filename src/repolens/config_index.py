@@ -24,6 +24,7 @@ PYTHON_REQUIREMENTS_PATTERN = re.compile(
 )
 GITHUB_WORKFLOW_PREFIX = ".github/workflows/"
 TASKFILE_NAMES = frozenset({"taskfile.yml", "taskfile.yaml"})
+WORKSPACE_CONFIG_NAMES = frozenset({"pnpm-workspace.yaml", "pnpm-workspace.yml"})
 MAKEFILE_NAMES = frozenset({"gnumakefile", "makefile"})
 DOCKERFILE_NAMES = frozenset({"dockerfile"})
 PRE_COMMIT_CONFIG_NAMES = frozenset({".pre-commit-config.yaml", ".pre-commit-config.yml"})
@@ -108,6 +109,18 @@ class ConfigPackageRootFact:
 
 
 @dataclass(frozen=True)
+class ConfigWorkspaceFact:
+    """A workspace boundary declared by explicit safe configuration evidence."""
+
+    id: str
+    ecosystem: str
+    path: str
+    source_path: str
+    pattern: str
+    evidence_kind: str
+
+
+@dataclass(frozen=True)
 class ConfigLockfileFact:
     """A lockfile detected by filename without deep dependency graph parsing."""
 
@@ -130,6 +143,9 @@ class ConfigCommandFact:
     purpose: str
     not_run: bool
     auto_run_recommended: bool
+    group_path: str
+    group_kind: str
+    group_source_path: str
 
 
 @dataclass(frozen=True)
@@ -162,6 +178,7 @@ class ConfigIndex:
     package_managers: tuple[ConfigPackageManagerFact, ...]
     packages: tuple[ConfigPackageFact, ...]
     package_roots: tuple[ConfigPackageRootFact, ...]
+    workspaces: tuple[ConfigWorkspaceFact, ...]
     lockfiles: tuple[ConfigLockfileFact, ...]
     commands: tuple[ConfigCommandFact, ...]
     entrypoints: tuple[ConfigEntrypointFact, ...]
@@ -180,6 +197,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
     package_managers: dict[str, ConfigPackageManagerFact] = {}
     packages: dict[str, ConfigPackageFact] = {}
     package_roots: dict[str, ConfigPackageRootFact] = {}
+    workspaces: dict[str, ConfigWorkspaceFact] = {}
     lockfiles: dict[str, ConfigLockfileFact] = {}
     commands: dict[str, ConfigCommandFact] = {}
     entrypoints: dict[str, ConfigEntrypointFact] = {}
@@ -249,6 +267,27 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
         )
         package_roots[fact.id] = fact
 
+    def add_workspace(
+        ecosystem: str,
+        path: str,
+        source_path: str,
+        pattern: str,
+        evidence_kind: str,
+    ) -> None:
+        normalized_path = path.strip().rstrip("/") or "."
+        normalized_pattern = pattern.strip().rstrip("/") or "."
+        if not normalized_path:
+            return
+        fact = ConfigWorkspaceFact(
+            id=config_workspace_node_id(ecosystem, normalized_path, source_path, evidence_kind),
+            ecosystem=ecosystem,
+            path=normalized_path,
+            source_path=source_path,
+            pattern=normalized_pattern,
+            evidence_kind=evidence_kind,
+        )
+        workspaces[fact.id] = fact
+
     def add_lockfile(path: str, manager: str, file_format: str, ecosystem: str) -> None:
         fact = ConfigLockfileFact(
             id=config_lockfile_node_id(path),
@@ -271,6 +310,9 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
             purpose=_classify_command_purpose(name, sanitized),
             not_run=True,
             auto_run_recommended=False,
+            group_path=_file_directory(source_path),
+            group_kind="config_directory",
+            group_source_path=source_path,
         )
         commands[fact.id] = fact
 
@@ -348,7 +390,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
                 add_parse_error(path, parsed.error_message or "parse_error")
                 continue
 
-            if path == "pyproject.toml" and isinstance(parsed.value, dict):
+            if PurePosixPath(path).name == "pyproject.toml" and isinstance(parsed.value, dict):
                 _extract_pyproject_facts(
                     parsed.value,
                     path,
@@ -356,6 +398,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
                     add_package_manager,
                     add_package,
                     add_package_root,
+                    add_workspace,
                     add_entrypoint,
                 )
             elif PurePosixPath(path).name == "setup.cfg" and isinstance(
@@ -386,12 +429,16 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
                 _extract_package_json_facts(
                     parsed.value,
                     path,
+                    file_paths,
                     add_package_manager,
                     add_package,
                     add_package_root,
+                    add_workspace,
                     add_command,
                     add_entrypoint,
                 )
+            elif PurePosixPath(path).name.lower() in WORKSPACE_CONFIG_NAMES:
+                _extract_pnpm_workspace_facts(source, path, add_workspace)
             elif config_kind == "dockerfile":
                 _extract_dockerfile_facts(source, path, add_entrypoint)
             elif config_kind == "makefile":
@@ -408,6 +455,10 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
             path,
             add_entrypoint,
         )
+
+    grouped_commands = _commands_grouped_by_nearest_root(
+        tuple(commands.values()), tuple(package_roots.values())
+    )
 
     return ConfigIndex(
         config_files=tuple(sorted(config_files.values(), key=lambda fact: fact.path)),
@@ -432,9 +483,15 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
         package_roots=tuple(
             sorted(package_roots.values(), key=lambda fact: (fact.ecosystem, fact.path, fact.name))
         ),
+        workspaces=tuple(
+            sorted(
+                workspaces.values(),
+                key=lambda fact: (fact.ecosystem, fact.path, fact.source_path, fact.pattern),
+            )
+        ),
         lockfiles=tuple(sorted(lockfiles.values(), key=lambda fact: fact.path)),
         commands=tuple(
-            sorted(commands.values(), key=lambda fact: (fact.path, fact.source, fact.name))
+            sorted(grouped_commands, key=lambda fact: (fact.path, fact.source, fact.name))
         ),
         entrypoints=tuple(
             sorted(entrypoints.values(), key=lambda fact: (fact.path, fact.kind, fact.name))
@@ -483,6 +540,15 @@ def config_package_root_node_id(name: str, ecosystem: str, path: str) -> str:
     return f"config_package_root:{ecosystem}:{name}:{path}"
 
 
+def config_workspace_node_id(
+    ecosystem: str,
+    path: str,
+    source_path: str,
+    evidence_kind: str,
+) -> str:
+    return f"config_workspace:{ecosystem}:{path}:{_stable_suffix(source_path, evidence_kind)}"
+
+
 def config_lockfile_node_id(path: str) -> str:
     return f"config_lockfile:{path}"
 
@@ -520,6 +586,8 @@ def _config_kind(path: str) -> str | None:
         return "pre_commit"
     if lower_name in TASKFILE_NAMES:
         return "taskfile"
+    if lower_name in WORKSPACE_CONFIG_NAMES:
+        return "workspace_config"
     if lower_path.startswith(GITHUB_WORKFLOW_PREFIX) and suffix in {".yaml", ".yml"}:
         return "github_actions"
     if suffix in CONFIG_EXTENSIONS:
@@ -534,6 +602,8 @@ def _config_format(path: str, config_kind: str) -> str:
         return "dockerfile"
     if config_kind == "makefile":
         return "makefile"
+    if config_kind == "workspace_config":
+        return "yaml"
     if _is_requirements_file(path):
         return "requirements"
     if lower_name == "setup.cfg":
@@ -716,17 +786,21 @@ def _extract_pyproject_facts(
     add_package_manager,
     add_package,
     add_package_root,
+    add_workspace,
     add_entrypoint,
 ) -> None:
     add_package_manager("pip", "python", path, "pyproject")
-    if "uv.lock" in file_paths:
-        add_package_manager("uv", "python", "uv.lock", "lockfile")
+    uv_lock_path = _sibling_path(path, "uv.lock")
+    if uv_lock_path in file_paths:
+        add_package_manager("uv", "python", uv_lock_path, "lockfile")
     if (
-        "poetry.lock" in file_paths
+        _sibling_path(path, "poetry.lock") in file_paths
         or isinstance(data.get("tool"), dict)
         and "poetry" in data["tool"]
     ):
         add_package_manager("poetry", "python", path, "pyproject")
+
+    _extract_pyproject_workspace_facts(data, path, add_workspace)
 
     build_system = data.get("build-system")
     if isinstance(build_system, dict):
@@ -753,7 +827,7 @@ def _extract_pyproject_facts(
     version = _string_value(project.get("version"))
     if name is not None:
         add_package(name, "python", "local", path, "project", version)
-        for package_root in _python_package_roots(name, file_paths):
+        for package_root in _python_package_roots(name, file_paths, path):
             add_package_root(name, "python", package_root, path)
 
     for dependency in _string_sequence(project.get("dependencies")):
@@ -801,7 +875,7 @@ def _extract_poetry_project_facts(
     version = _string_value(poetry_project.get("version"))
     if name is not None:
         add_package(name, "python", "local", path, "tool.poetry", version)
-        for package_root in _python_package_roots(name, file_paths):
+        for package_root in _python_package_roots(name, file_paths, path):
             add_package_root(name, "python", package_root, path)
     dependencies = poetry_project.get("dependencies")
     if isinstance(dependencies, dict):
@@ -833,7 +907,7 @@ def _extract_setup_cfg_facts(
     name = parser.get("metadata", "name", fallback=None)
     if name:
         add_package(name, "python", "local", path, "metadata", None)
-        for package_root in _python_package_roots(name, file_paths):
+        for package_root in _python_package_roots(name, file_paths, path):
             add_package_root(name, "python", package_root, path)
     install_requires = parser.get("options", "install_requires", fallback="")
     for requirement in install_requires.splitlines():
@@ -868,7 +942,7 @@ def _extract_setup_py_facts(
     name = _ast_string(keywords.get("name"))
     if name is not None:
         add_package(name, "python", "local", path, "setup", None)
-        for package_root in _python_package_roots(name, file_paths):
+        for package_root in _python_package_roots(name, file_paths, path):
             add_package_root(name, "python", package_root, path)
     for requirement in _ast_string_sequence(keywords.get("install_requires")):
         package_name = _requirement_name(requirement)
@@ -886,12 +960,44 @@ def _extract_requirements_facts(source: str, path: str, add_package_manager, add
             add_package(package_name, "python", "external", path, "requirements", raw_line.strip())
 
 
+def _extract_pyproject_workspace_facts(data: dict[str, Any], path: str, add_workspace) -> None:
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return
+    uv = tool.get("uv")
+    if isinstance(uv, dict):
+        workspace = uv.get("workspace")
+        if isinstance(workspace, dict):
+            for pattern in _string_sequence(workspace.get("members")):
+                add_workspace(
+                    "python",
+                    _workspace_pattern_path(path, pattern),
+                    path,
+                    pattern,
+                    "tool.uv.workspace",
+                )
+    pdm = tool.get("pdm")
+    if isinstance(pdm, dict):
+        workspace = pdm.get("workspace")
+        if isinstance(workspace, dict):
+            for pattern in _string_sequence(workspace.get("packages")):
+                add_workspace(
+                    "python",
+                    _workspace_pattern_path(path, pattern),
+                    path,
+                    pattern,
+                    "tool.pdm.workspace",
+                )
+
+
 def _extract_package_json_facts(
     data: dict[str, Any],
     path: str,
+    file_paths: frozenset[str],
     add_package_manager,
     add_package,
     add_package_root,
+    add_workspace,
     add_command,
     add_entrypoint,
 ) -> None:
@@ -899,7 +1005,8 @@ def _extract_package_json_facts(
     if package_manager is not None:
         add_package_manager(package_manager.split("@", 1)[0], "javascript", path, "packageManager")
     else:
-        add_package_manager("npm", "javascript", path, "package.json")
+        lockfile_manager = _javascript_lockfile_manager_for_package(path, file_paths)
+        add_package_manager(lockfile_manager or "npm", "javascript", path, "package.json")
 
     package_name = _string_value(data.get("name"))
     version = _string_value(data.get("version"))
@@ -907,6 +1014,8 @@ def _extract_package_json_facts(
     if package_name is not None:
         add_package(package_name, "javascript", "local", path, "package", version)
         add_package_root(package_name, "javascript", package_root, path)
+
+    _extract_package_json_workspace_facts(data, path, add_workspace)
 
     for dependency_type in (
         "dependencies",
@@ -946,6 +1055,30 @@ def _extract_package_json_facts(
     exports = data.get("exports")
     if isinstance(exports, str):
         add_entrypoint(path, "package_export", "exports", exports, "package.exports")
+
+
+def _extract_package_json_workspace_facts(data: dict[str, Any], path: str, add_workspace) -> None:
+    workspaces = data.get("workspaces")
+    patterns: tuple[str, ...] = ()
+    if isinstance(workspaces, dict):
+        patterns = _string_sequence(workspaces.get("packages"))
+    else:
+        patterns = _string_sequence(workspaces)
+    for pattern in patterns:
+        add_workspace(
+            "javascript",
+            _workspace_pattern_path(path, pattern),
+            path,
+            pattern,
+            "package.workspaces",
+        )
+
+
+def _extract_pnpm_workspace_facts(source: str, path: str, add_workspace) -> None:
+    for pattern in _yaml_string_list(source, "packages"):
+        add_workspace(
+            "javascript", _workspace_pattern_path(path, pattern), path, pattern, "pnpm-workspace"
+        )
 
 
 def _extract_dockerfile_facts(source: str, path: str, add_entrypoint) -> None:
@@ -1180,9 +1313,111 @@ def _taskfile_tasks(source: str) -> tuple[str, ...]:
     return tuple(sorted(set(tasks)))
 
 
-def _python_package_roots(name: str, file_paths: frozenset[str]) -> tuple[str, ...]:
+def _yaml_string_list(source: str, key: str) -> tuple[str, ...]:
+    values: list[str] = []
+    lines = source.splitlines()
+    in_list = False
+    parent_indent = 0
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current_indent = _indent(raw_line)
+        if not in_list:
+            match = re.match(rf"{re.escape(key)}\s*:\s*(?P<value>.*)$", stripped)
+            if match is None:
+                continue
+            inline = match.group("value").strip()
+            if inline.startswith("[") and inline.endswith("]"):
+                for item in inline.strip("[]").split(","):
+                    value = item.strip().strip("\"'")
+                    if value:
+                        values.append(value)
+                continue
+            in_list = True
+            parent_indent = current_indent
+            continue
+        if current_indent <= parent_indent:
+            in_list = False
+            continue
+        if stripped.startswith("-"):
+            value = stripped[1:].strip().strip("\"'")
+            if value:
+                values.append(value)
+    return tuple(values)
+
+
+def _javascript_lockfile_manager_for_package(
+    package_path: str,
+    file_paths: frozenset[str],
+) -> str | None:
+    directory = _file_directory(package_path)
+    for filename, manager in (
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lock", "bun"),
+        ("bun.lockb", "bun"),
+        ("package-lock.json", "npm"),
+        ("npm-shrinkwrap.json", "npm"),
+    ):
+        if _join_posix(directory, filename) in file_paths:
+            return manager
+    return None
+
+
+def _commands_grouped_by_nearest_root(
+    commands: tuple[ConfigCommandFact, ...],
+    package_roots: tuple[ConfigPackageRootFact, ...],
+) -> tuple[ConfigCommandFact, ...]:
+    grouped = []
+    for command in commands:
+        nearest_root = _nearest_package_root(command.path, package_roots)
+        if nearest_root is None:
+            grouped.append(command)
+            continue
+        grouped.append(
+            ConfigCommandFact(
+                id=command.id,
+                path=command.path,
+                source=command.source,
+                name=command.name,
+                command=command.command,
+                purpose=command.purpose,
+                not_run=command.not_run,
+                auto_run_recommended=command.auto_run_recommended,
+                group_path=nearest_root.path,
+                group_kind="package_root",
+                group_source_path=nearest_root.source_path,
+            )
+        )
+    return tuple(grouped)
+
+
+def _nearest_package_root(
+    path: str,
+    package_roots: tuple[ConfigPackageRootFact, ...],
+) -> ConfigPackageRootFact | None:
+    candidates = [root for root in package_roots if _path_is_under(path, root.path)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda root: len(() if root.path == "." else root.path.split("/")))
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    return root == "." or path == root or path.startswith(f"{root}/")
+
+
+def _python_package_roots(
+    name: str,
+    file_paths: frozenset[str],
+    source_path: str,
+) -> tuple[str, ...]:
     module_name = name.replace("-", "_").replace(".", "/")
-    candidates = (f"src/{module_name}", module_name)
+    base = _file_directory(source_path)
+    candidates = (
+        _join_posix(base, "src", module_name),
+        _join_posix(base, module_name),
+    )
     roots = []
     for candidate in candidates:
         if f"{candidate}/__init__.py" in file_paths or f"{candidate}/__main__.py" in file_paths:
@@ -1407,6 +1642,22 @@ def _indent(line: str) -> int:
 def _file_directory(path: str) -> str:
     parent = PurePosixPath(path).parent.as_posix()
     return "." if parent == "." else parent
+
+
+def _sibling_path(path: str, filename: str) -> str:
+    return _join_posix(_file_directory(path), filename)
+
+
+def _workspace_pattern_path(source_path: str, pattern: str) -> str:
+    normalized = pattern.strip().strip("\"'").rstrip("/")
+    if not normalized:
+        return _file_directory(source_path)
+    return _join_posix(_file_directory(source_path), normalized)
+
+
+def _join_posix(*parts: str) -> str:
+    cleaned = [part.strip("/") for part in parts if part and part != "."]
+    return "/".join(cleaned) if cleaned else "."
 
 
 def _stable_suffix(*parts: str) -> str:

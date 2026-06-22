@@ -1019,6 +1019,7 @@ class GraphQueryService:
             "config_commands",
             "config_entrypoints",
             "config_files",
+            "config_workspaces",
             "directories",
             "edges",
             "files",
@@ -1082,9 +1083,20 @@ class GraphQueryService:
         rows = _rows_to_dicts(
             connection.execute(
                 """
-                SELECT id, path, source, name, command, purpose, not_run, auto_run_recommended
+                SELECT
+                    id,
+                    path,
+                    source,
+                    name,
+                    command,
+                    purpose,
+                    not_run,
+                    auto_run_recommended,
+                    group_path,
+                    group_kind,
+                    group_source_path
                 FROM config_commands
-                ORDER BY purpose, source, path, name
+                ORDER BY purpose, group_path, source, path, name
                 """
             )
         )
@@ -1972,9 +1984,20 @@ class GraphQueryService:
         rows = _rows_to_dicts(
             connection.execute(
                 """
-                SELECT id, path, source, name, command, purpose, not_run, auto_run_recommended
+                SELECT
+                    id,
+                    path,
+                    source,
+                    name,
+                    command,
+                    purpose,
+                    not_run,
+                    auto_run_recommended,
+                    group_path,
+                    group_kind,
+                    group_source_path
                 FROM config_commands
-                ORDER BY purpose, path, source, name
+                ORDER BY purpose, group_path, path, source, name
                 """
             )
         )
@@ -2868,6 +2891,9 @@ def _command_payload(row: dict[str, Any]) -> dict[str, Any]:
         "command": row["command"],
         "confidence": "high",
         "id": row["id"],
+        "group_kind": row["group_kind"],
+        "group_path": row["group_path"],
+        "group_source_path": row["group_source_path"],
         "name": row["name"],
         "not_run": bool(row["not_run"]),
         "path": row["path"],

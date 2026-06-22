@@ -53,7 +53,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 11
+GRAPH_SCHEMA_VERSION = 12
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -803,6 +803,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE
         ) WITHOUT ROWID;
 
+        CREATE TABLE config_workspaces (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            ecosystem TEXT NOT NULL,
+            path TEXT NOT NULL,
+            source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            pattern TEXT NOT NULL,
+            evidence_kind TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE config_lockfiles (
             id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
             path TEXT NOT NULL UNIQUE REFERENCES files(path) ON DELETE CASCADE,
@@ -819,7 +828,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             command TEXT NOT NULL,
             purpose TEXT NOT NULL,
             not_run INTEGER NOT NULL,
-            auto_run_recommended INTEGER NOT NULL
+            auto_run_recommended INTEGER NOT NULL,
+            group_path TEXT NOT NULL,
+            group_kind TEXT NOT NULL,
+            group_source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE
         ) WITHOUT ROWID;
 
         CREATE TABLE config_entrypoints (
@@ -1372,6 +1384,17 @@ def _file_signatures_by_path(
                 "path": package_root.path,
             },
         )
+    for workspace in extracted.config.workspaces:
+        add_graph(
+            workspace.source_path,
+            "config_workspace",
+            {
+                "ecosystem": workspace.ecosystem,
+                "evidence_kind": workspace.evidence_kind,
+                "path": workspace.path,
+                "pattern": workspace.pattern,
+            },
+        )
     for lockfile in extracted.config.lockfiles:
         add_graph(
             lockfile.path,
@@ -1393,6 +1416,9 @@ def _file_signatures_by_path(
                 "not_run": command.not_run,
                 "purpose": command.purpose,
                 "source": command.source,
+                "group_kind": command.group_kind,
+                "group_path": command.group_path,
+                "group_source_path": command.group_source_path,
             },
         )
     for entrypoint in extracted.config.entrypoints:
@@ -1749,6 +1775,26 @@ def _insert_nodes(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (
             (
+                workspace.id,
+                "WorkspaceBoundary",
+                workspace.path,
+                workspace.path,
+                _metadata_json(
+                    {
+                        "ecosystem": workspace.ecosystem,
+                        "evidence_kind": workspace.evidence_kind,
+                        "pattern": workspace.pattern,
+                        "source_path": workspace.source_path,
+                    }
+                ),
+            )
+            for workspace in config_index.workspaces
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
                 lockfile.id,
                 "Lockfile",
                 lockfile.path,
@@ -1779,6 +1825,9 @@ def _insert_nodes(
                         "not_run": command.not_run,
                         "purpose": command.purpose,
                         "source": command.source,
+                        "group_kind": command.group_kind,
+                        "group_path": command.group_path,
+                        "group_source_path": command.group_source_path,
                     }
                 ),
             )
@@ -2387,6 +2436,23 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
     )
     connection.executemany(
         """
+        INSERT INTO config_workspaces(id, ecosystem, path, source_path, pattern, evidence_kind)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                workspace.id,
+                workspace.ecosystem,
+                workspace.path,
+                workspace.source_path,
+                workspace.pattern,
+                workspace.evidence_kind,
+            )
+            for workspace in config_index.workspaces
+        ),
+    )
+    connection.executemany(
+        """
         INSERT INTO config_lockfiles(id, path, manager, format, ecosystem)
         VALUES (?, ?, ?, ?, ?)
         """,
@@ -2411,9 +2477,12 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
             command,
             purpose,
             not_run,
-            auto_run_recommended
+            auto_run_recommended,
+            group_path,
+            group_kind,
+            group_source_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2425,6 +2494,9 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
                 command.purpose,
                 int(command.not_run),
                 int(command.auto_run_recommended),
+                command.group_path,
+                command.group_kind,
+                command.group_source_path,
             )
             for command in config_index.commands
         ),
@@ -2862,6 +2934,18 @@ def _insert_edges(
             "DECLARES_PACKAGE_ROOT",
             {"ecosystem": package_root.ecosystem, "path": package_root.path},
         )
+    for workspace in config_index.workspaces:
+        add_edge(
+            config_source_node_id(workspace.source_path),
+            workspace.id,
+            "DECLARES_WORKSPACE",
+            {
+                "ecosystem": workspace.ecosystem,
+                "evidence_kind": workspace.evidence_kind,
+                "path": workspace.path,
+                "pattern": workspace.pattern,
+            },
+        )
     for lockfile in config_index.lockfiles:
         add_edge(
             config_source_node_id(lockfile.path),
@@ -2876,6 +2960,9 @@ def _insert_edges(
             "DECLARES_COMMAND",
             {
                 "auto_run_recommended": command.auto_run_recommended,
+                "group_kind": command.group_kind,
+                "group_path": command.group_path,
+                "group_source_path": command.group_source_path,
                 "not_run": command.not_run,
                 "purpose": command.purpose,
                 "source": command.source,
@@ -3759,6 +3846,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        config_workspaces = _rows(
+            connection.execute(
+                """
+                SELECT id, ecosystem, path, source_path, pattern, evidence_kind
+                FROM config_workspaces
+                ORDER BY ecosystem, path, source_path, pattern
+                """
+            )
+        )
         config_lockfiles = _rows(
             connection.execute(
                 """
@@ -3780,9 +3876,12 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                         command,
                         purpose,
                         not_run,
-                        auto_run_recommended
+                        auto_run_recommended,
+                        group_path,
+                        group_kind,
+                        group_source_path
                     FROM config_commands
-                    ORDER BY path, source, name
+                    ORDER BY group_path, path, source, name
                     """
                 )
             )
@@ -3907,6 +4006,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "config_lockfiles": len(config_lockfiles),
         "config_package_managers": len(config_package_managers),
         "config_package_roots": len(config_package_roots),
+        "config_workspaces": len(config_workspaces),
         "config_packages": len(config_packages),
         "config_parse_errors": len(config_parse_errors),
         "documentation_files": len(documentation_files),
@@ -3946,6 +4046,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "lockfiles": config_lockfiles,
             "package_managers": config_package_managers,
             "package_roots": config_package_roots,
+            "workspaces": config_workspaces,
             "packages": config_packages,
             "parse_errors": config_parse_errors,
         },
@@ -4087,6 +4188,9 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "path": command["path"],
                 "purpose": command["purpose"],
                 "source": command["source"],
+                "group_kind": command["group_kind"],
+                "group_path": command["group_path"],
+                "group_source_path": command["group_source_path"],
             }
             for command in config["commands"]
         ],
@@ -4114,6 +4218,7 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "lockfiles": config["lockfiles"],
         "package_managers": config["package_managers"],
         "package_roots": config["package_roots"],
+        "workspaces": config["workspaces"],
         "packages": [
             {
                 "classification": package["classification"],
