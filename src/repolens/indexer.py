@@ -21,6 +21,7 @@ from repolens.graph import (
     rebuild_graph_artifacts,
     replace_graph_artifacts_selectively,
 )
+from repolens.parser_backends import ParserBackendOption
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanError, ScanResult, scan_repository
 
 SCAN_ARTIFACT_PATH = f"{ARTIFACT_DIR_NAME}/scan.json"
@@ -83,6 +84,7 @@ def index_repository(
     repo_path: Path | str,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> IndexResult:
     """Run the safe discovery index path for ``repo_path`` and write bootstrap artifacts."""
     try:
@@ -102,13 +104,19 @@ def index_repository(
         raise RepoLensIndexError(str(exc)) from exc
     _write_scan_artifact(root, scan)
     try:
-        rebuild_graph_artifacts(root, scan, file_changes=file_changes)
+        rebuild_graph_artifacts(
+            root, scan, file_changes=file_changes, parser_backend=parser_backend
+        )
     except (GraphStoreError, GraphExportError) as exc:
         raise RepoLensIndexError(str(exc)) from exc
     return IndexResult(root=root, scan=scan)
 
 
-def update_repository(repo_path: Path | str) -> UpdateResult:
+def update_repository(
+    repo_path: Path | str,
+    *,
+    parser_backend: ParserBackendOption = "stable",
+) -> UpdateResult:
     """Update an existing graph, or initialize one when artifacts are missing."""
     try:
         root = Path(repo_path).resolve(strict=True)
@@ -133,10 +141,16 @@ def update_repository(repo_path: Path | str) -> UpdateResult:
     changes = () if initialized else previous_status.file_changes
     try:
         if plan.safe:
-            replace_graph_artifacts_selectively(root, scan, plan, file_changes=changes)
+            replace_graph_artifacts_selectively(
+                root,
+                scan,
+                plan,
+                file_changes=changes,
+                parser_backend=parser_backend,
+            )
             mode = "selective"
         else:
-            rebuild_graph_artifacts(root, scan, file_changes=changes)
+            rebuild_graph_artifacts(root, scan, file_changes=changes, parser_backend=parser_backend)
             mode = "initialized" if initialized else "full_rebuild"
     except (GraphStoreError, GraphExportError) as exc:
         raise RepoLensIndexError(str(exc)) from exc
