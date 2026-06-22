@@ -180,6 +180,49 @@ def test_update_warns_about_parser_errors_without_failing(tmp_path):
     assert parse_error_count == 1
 
 
+def test_update_removes_stale_config_facts_when_config_becomes_unparseable(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        r"""
+        {
+          "name": "web-app",
+          "dependencies": {"react": "^19.0.0"},
+          "scripts": {"test": "vitest --run"}
+        }
+        """,
+    )
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    _write_text(tmp_path / "package.json", "{not-json\n")
+    result = runner.invoke(app, ["update", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert envelope["data"]["freshness"]["change_counts"]["parse_error"] == 1
+    assert envelope["data"]["selective_update"]["parse_error_paths"] == ["package.json"]
+    assert envelope["data"]["selective_update"]["stale_cleanup_paths"] == ["package.json"]
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        config_status = connection.execute(
+            "SELECT parser_status FROM config_files WHERE path = 'package.json'"
+        ).fetchone()
+        package_count = connection.execute(
+            "SELECT COUNT(*) FROM config_packages WHERE source_path = 'package.json'"
+        ).fetchone()[0]
+        command_count = connection.execute(
+            "SELECT COUNT(*) FROM config_commands WHERE path = 'package.json'"
+        ).fetchone()[0]
+        parse_error_count = connection.execute(
+            "SELECT COUNT(*) FROM config_parse_errors WHERE path = 'package.json'"
+        ).fetchone()[0]
+
+    assert config_status == ("parse_error",)
+    assert package_count == 0
+    assert command_count == 0
+    assert parse_error_count == 1
+
+
 def test_update_plan_classifies_new_deleted_skipped_and_reused_files(tmp_path):
     _write_text(tmp_path / "changed.py", "def old():\n    return 1\n")
     _write_text(tmp_path / "deleted.py", "def gone():\n    return 1\n")
@@ -293,6 +336,14 @@ def test_status_requires_rebuild_for_extractor_or_config_hash_changes(tmp_path):
     assert config_envelope["data"]["status"] == "rebuild_required"
     assert config_envelope["data"]["reason"] == "effective_config_changed"
     assert config_envelope["data"]["freshness"]["full_reparse_required"] is True
+
+    update_result = runner.invoke(app, ["update", str(tmp_path), "--json"])
+
+    assert update_result.exit_code == 0
+    update_envelope = json.loads(update_result.output)
+    assert update_envelope["data"]["mode"] == "full_rebuild"
+    assert update_envelope["data"]["selective_update"]["safe"] is False
+    assert update_envelope["data"]["selective_update"]["reason"] == "effective_config_changed"
 
 
 def _write_text(path, content: str) -> None:
