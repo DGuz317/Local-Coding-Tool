@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from repolens.benchmark import RepoLensBenchmarkError, run_update_benchmark
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
 from repolens.mcp_server import run_mcp_server
@@ -100,6 +101,91 @@ def index(
         raise typer.Exit(1)
     for graph_export in graph_exports:
         typer.echo(f"- {graph_export}")
+
+
+@app.command()
+def benchmark_update(
+    fixture_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--fixture-path",
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+            help="Empty directory where the generated benchmark fixture should be created.",
+        ),
+    ] = None,
+    file_count: Annotated[
+        int,
+        typer.Option("--file-count", min=1, help="Number of generated Python modules."),
+    ] = 200,
+    changed_file_count: Annotated[
+        int,
+        typer.Option(
+            "--changed-file-count", min=1, help="Number of modules changed before update."
+        ),
+    ] = 1,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Generate a fixture and report relative update speedup evidence."""
+    try:
+        result = run_update_benchmark(
+            fixture_path=fixture_path,
+            file_count=file_count,
+            changed_file_count=changed_file_count,
+        )
+    except (RepoLensBenchmarkError, RepoLensIndexError) as exc:
+        error = str(exc) or exc.__class__.__name__
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "data": {},
+                        "error": {"message": error},
+                        "limits": {},
+                        "ok": False,
+                        "warnings": [],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            typer.echo(f"Benchmark failed: {error}", err=True)
+        raise typer.Exit(1) from exc
+
+    data = result.to_cli_data()
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "data": data,
+                    "limits": {"fixed_wall_clock_claim": False},
+                    "ok": True,
+                    "warnings": [],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    speedup = data["relative_speedup"]
+    if not isinstance(speedup, dict):
+        raise typer.Exit(1)
+    factor = speedup.get("factor")
+    factor_text = "unavailable" if factor is None else f"{factor:.2f}x"
+    typer.echo("RepoLens update benchmark")
+    typer.echo(f"Fixture path: {data['fixture_path']}")
+    typer.echo(f"Generated files: {data['file_count']}")
+    typer.echo(f"Changed files: {data['changed_file_count']}")
+    typer.echo(f"Selective update seconds: {data['selective_update_seconds']:.6f}")
+    typer.echo(f"Full rebuild seconds: {data['full_rebuild_seconds']:.6f}")
+    typer.echo(f"Relative speedup evidence: {factor_text}")
+    typer.echo("No fixed wall-clock claim is made.")
 
 
 @app.command()
