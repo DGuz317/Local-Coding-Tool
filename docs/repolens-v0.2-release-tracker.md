@@ -37,7 +37,7 @@ GitHub umbrella tracker: #35
 - [ ] #47 Add Selective Update cleanup tests and generated benchmark fixture
 - [ ] #48 Add shared Redaction Policy and scanner/security fixtures
 - [ ] #49 Add MCP No Whole-Source Disclosure and raw text safety tests
-- [ ] #52 Add Dogfooding Reports and regression fixture process
+- [x] #52 Add Dogfooding Reports and regression fixture process
 - [ ] #53 Add minimal CI and isolated install smoke
 - [ ] #54 Add v0.2 user docs, assistant docs, release checklist, and known limitations
 

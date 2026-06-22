@@ -83,6 +83,13 @@ Use an MCP client to list tools and call at least `graph_status` and `repo_summa
 - Confirm OpenCode can list the RepoLens tools.
 - Ask the assistant to call `graph_status` before relying on graph context.
 
+## Dogfooding Reports
+
+- Follow `docs/dogfood/README.md` for v0.2 dogfooding reports and fixture policy.
+- Commit dated reports under `docs/dogfood/`.
+- Commit only distilled regression fixtures under `tests/fixtures/dogfood/`; do not commit `.repolens/` artifacts or vendored third-party repository snapshots.
+- v0.2 release remains blocked on minimal CI passing before release, even when dogfooding reports are complete.
+
 ## Scope Guard
 
 Do not add these as part of v0.1 release prep unless a maintainer opens a separate issue:

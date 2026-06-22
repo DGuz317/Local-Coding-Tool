@@ -52,3 +52,51 @@ def test_readme_covers_release_readiness_topics() -> None:
     )
     for phrase in required_phrases:
         assert phrase in readme
+
+
+def test_dogfood_reports_define_process_and_release_blocker() -> None:
+    process = (ROOT / "docs" / "dogfood" / "README.md").read_text(encoding="utf-8")
+    report = (ROOT / "docs" / "dogfood" / "2026-06-22-v0.2-dogfood.md").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+
+    for required in (
+        "RepoLens on itself",
+        "local Python repository",
+        "local JS/TS repository",
+        "mixed docs/config repository",
+        "Do not commit `.repolens/`",
+        "distilled fixture",
+    ):
+        assert required in process
+
+    for required in (
+        "False Positives",
+        "False Negatives",
+        "Known Limitations",
+        "Actionable Regressions And Fixtures",
+        "v0.2 release remains blocked on minimal CI passing",
+    ):
+        assert required in report
+
+    assert "docs/dogfood/README.md" in readiness
+    assert "v0.2 release remains blocked on minimal CI passing" in readiness
+
+
+def test_dogfood_distilled_fixtures_are_committed_sources_only() -> None:
+    fixture_root = ROOT / "tests" / "fixtures" / "dogfood"
+
+    expected_fixture_files = (
+        fixture_root / "python-local-imports" / "src" / "dogpkg" / "service.py",
+        fixture_root / "js-ts-workspace" / "packages" / "app" / "src" / "index.ts",
+        fixture_root / "mixed-docs-config" / "AGENTS.md",
+    )
+
+    for fixture_file in expected_fixture_files:
+        assert fixture_file.is_file()
+
+    assert "@dog/lib" in (
+        fixture_root / "js-ts-workspace" / "packages" / "app" / "src" / "index.ts"
+    ).read_text(encoding="utf-8")
+    assert "config/service.yaml" in (fixture_root / "mixed-docs-config" / "AGENTS.md").read_text(
+        encoding="utf-8"
+    )
