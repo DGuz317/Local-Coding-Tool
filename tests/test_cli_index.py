@@ -91,7 +91,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "11"
+    assert metadata["schema_version"] == "12"
     assert len(metadata["canonical_graph_hash"]) == 64
     assert json.loads(metadata["graph_quality_warnings"]) == []
     assert "effective_config_hash" in metadata
@@ -554,7 +554,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "11"
+    assert metadata["schema_version"] == "12"
     assert (
         "@/components/App",
         None,
@@ -683,6 +683,15 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
                 """
             )
         )
+        command_groups = list(
+            connection.execute(
+                """
+                SELECT name, group_path, group_kind, group_source_path
+                FROM config_commands
+                ORDER BY name
+                """
+            )
+        )
         entrypoints = list(
             connection.execute(
                 """
@@ -696,7 +705,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "11"
+    assert metadata["schema_version"] == "12"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -721,6 +730,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
         and "123456" not in command
         for source, name, purpose, command, _, auto_run_recommended in commands
     )
+    assert ("test", ".", "package_root", "package.json") in command_groups
     assert ("python_console_script", "acme", "acme.cli:main") in entrypoints
     assert (
         "python_main_guard",
@@ -853,7 +863,7 @@ def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_pat
             connection.execute("SELECT name, description, path FROM skills ORDER BY name")
         )
 
-    assert metadata["schema_version"] == "11"
+    assert metadata["schema_version"] == "12"
     assert (
         "README.md",
         "readme",

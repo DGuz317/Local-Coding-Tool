@@ -302,6 +302,94 @@ def test_config_index_records_malformed_configs_nonfatally_and_sanitizes_metadat
     assert "should-not-be-exported" not in str(metadata["service.yaml"])
 
 
+def test_config_index_groups_monorepo_commands_by_nearest_explicit_package_root(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "workspace-root",
+              "packageManager": "pnpm@9.0.0",
+              "workspaces": ["packages/*"],
+              "scripts": {"test": "pnpm -r test"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "pnpm-workspace.yaml", "packages:\n  - packages/*\n")
+    _write_text(
+        tmp_path / "packages" / "api" / "package.json",
+        '{"name":"@acme/api","scripts":{"test":"vitest --run"}}\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "api" / "Makefile",
+        "lint:\n\teslint .\n",
+    )
+    _write_text(
+        tmp_path / "packages" / "worker" / "pyproject.toml",
+        dedent(
+            """
+            [project]
+            name = "acme-worker"
+            version = "0.1.0"
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "packages" / "worker" / "src" / "acme_worker" / "__init__.py", "")
+    _write_text(tmp_path / "packages" / "docs" / "src" / "index.ts", "export {}\n")
+
+    config_index = extract_config_index(tmp_path, scan_repository(tmp_path).files)
+
+    roots = {(root.ecosystem, root.name, root.path) for root in config_index.package_roots}
+    assert ("javascript", "workspace-root", ".") in roots
+    assert ("javascript", "@acme/api", "packages/api") in roots
+    assert ("python", "acme-worker", "packages/worker/src/acme_worker") in roots
+    assert not any(root.path == "packages/docs" for root in config_index.package_roots)
+
+    workspaces = {
+        (workspace.ecosystem, workspace.path, workspace.pattern, workspace.source_path)
+        for workspace in config_index.workspaces
+    }
+    assert ("javascript", "packages/*", "packages/*", "package.json") in workspaces
+    assert ("javascript", "packages/*", "packages/*", "pnpm-workspace.yaml") in workspaces
+
+    commands = {(command.path, command.name): command for command in config_index.commands}
+    assert commands[("package.json", "test")].group_path == "."
+    assert commands[("package.json", "test")].group_kind == "package_root"
+    assert commands[("packages/api/package.json", "test")].group_path == "packages/api"
+    assert commands[("packages/api/Makefile", "lint")].group_path == "packages/api"
+    assert (
+        commands[("packages/api/Makefile", "lint")].group_source_path == "packages/api/package.json"
+    )
+
+
+def test_config_index_detects_common_nested_package_manager_evidence(tmp_path):
+    _write_text(
+        tmp_path / "apps" / "web" / "package.json",
+        '{"name":"web","scripts":{"test":"npm test"}}\n',
+    )
+    _write_text(tmp_path / "apps" / "web" / "yarn.lock", "# lock\n")
+    _write_text(
+        tmp_path / "services" / "api" / "pyproject.toml",
+        '[project]\nname = "api"\nversion = "0.1.0"\n',
+    )
+    _write_text(tmp_path / "services" / "api" / "uv.lock", "version = 1\n")
+    _write_text(tmp_path / "services" / "api" / "api" / "__init__.py", "")
+
+    config_index = extract_config_index(tmp_path, scan_repository(tmp_path).files)
+
+    managers = {
+        (manager.ecosystem, manager.name, manager.source_path, manager.evidence_kind)
+        for manager in config_index.package_managers
+    }
+    assert ("javascript", "yarn", "apps/web/yarn.lock", "lockfile") in managers
+    assert ("python", "uv", "services/api/uv.lock", "lockfile") in managers
+
+    roots = {(root.ecosystem, root.name, root.path) for root in config_index.package_roots}
+    assert ("javascript", "web", "apps/web") in roots
+    assert ("python", "api", "services/api/api") in roots
+
+
 def _write_text(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
