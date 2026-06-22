@@ -1,5 +1,6 @@
 {
   // Documentation-only OpenCode MCP example. Keep active config outside this repo.
+  // Replace paths and numeric user/group IDs before use.
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "repolens": {
@@ -12,13 +13,15 @@
         "--network",
         "none",
         "--user",
-        "$(id -u):$(id -g)",
+        "1000:1000",
         "-v",
-        "$PWD:/workspace",
+        "/absolute/path/to/repo:/workspace",
         "repolens:latest",
         "mcp",
         "/workspace"
-      ]
+      ],
+      "enabled": true,
+      "timeout": 10000
     }
   }
 }

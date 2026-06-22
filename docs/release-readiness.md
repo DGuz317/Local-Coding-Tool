@@ -1,6 +1,6 @@
-# RepoLens MCP v0.1 Release Readiness
+# RepoLens MCP v0.2 Release Readiness
 
-This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry.
+This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
 
 ## Human Checkpoint
 
@@ -8,9 +8,10 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 
 - Project and distribution name: `repolens` / RepoLens MCP.
 - License wording and whether a license file should be added before release.
-- PyPI publishing remains deferred for v0.1.
-- Docker registry publishing remains deferred for v0.1.
+- PyPI publishing remains deferred for v0.2.
+- Docker registry publishing remains deferred for v0.2.
 - Final README positioning and whether the README should target users, contributors, or both.
+- Known limitations in `docs/known-limitations.md` reflect dogfooding outcomes and are acceptable for release.
 
 ## Local Verification Gate
 
@@ -29,7 +30,7 @@ Build and install the package in an isolated environment:
 
 ```bash
 uv build
-uv tool install --force dist/repolens-0.1.0-py3-none-any.whl
+uv tool install --force dist/*.whl
 repolens --help
 repolens status .
 uv tool uninstall repolens
@@ -39,7 +40,7 @@ Alternative `pipx` smoke if `pipx` is available:
 
 ```bash
 uv build
-pipx install --force dist/repolens-0.1.0-py3-none-any.whl
+pipx install --force dist/*.whl
 repolens --help
 pipx uninstall repolens
 ```
@@ -92,7 +93,7 @@ Use an MCP client to list tools and call at least `graph_status` and `repo_summa
 
 ## Scope Guard
 
-Do not add these as part of v0.1 release prep unless a maintainer opens a separate issue:
+Do not add these as part of v0.2 release prep unless a maintainer opens a separate issue:
 
 - PyPI publishing.
 - Docker registry publishing.
