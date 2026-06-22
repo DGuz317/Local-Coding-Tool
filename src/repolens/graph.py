@@ -42,6 +42,7 @@ from repolens.python_index import (
     extract_python_index,
     python_package_node_id,
 )
+from repolens.redaction import redact_command, redact_payload
 from repolens.scanner import (
     ARTIFACT_DIR_NAME,
     DEFAULT_MAX_FILE_SIZE_BYTES,
@@ -2420,7 +2421,7 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
                 command.path,
                 command.source,
                 command.name,
-                command.command,
+                redact_command(command.command),
                 command.purpose,
                 int(command.not_run),
                 int(command.auto_run_recommended),
@@ -6444,7 +6445,9 @@ def _directory_sort_key(path: str) -> tuple[int, str]:
 
 
 def _metadata_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        redact_payload(value), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
 
 
 def _json_value(value: Any) -> str:

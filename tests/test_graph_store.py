@@ -225,6 +225,26 @@ def test_javascript_alias_import_edges_use_canonical_strategy(tmp_path):
     assert json.loads(edge[4])["resolved_path"] == "src/shared/format.ts"
 
 
+def test_graph_store_exports_redacted_config_metadata_and_commands(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name":"token-tools","scripts":{"test":"TOKEN=abc vitest --token xyz"},'
+        '"token":"should-not-leak","dependencies":{"secret-sauce":"^1.0.0"}}\n',
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+    export_graph_artifacts(tmp_path)
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    output = json.dumps(graph_json, sort_keys=True)
+
+    assert "should-not-leak" not in output
+    assert "TOKEN=<redacted> vitest --token <redacted>" in output
+    assert "token-tools" in output
+    assert "secret-sauce" in output
+
+
 def test_graph_store_rebuild_leaves_existing_database_when_replace_fails(tmp_path, monkeypatch):
     (tmp_path / ".repolens").mkdir()
     (tmp_path / "app.py").write_text("print('ok')\n", encoding="utf-8")

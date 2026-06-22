@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.redaction import REDACTED_VALUE, is_secret_key, redact_command
 from repolens.scanner import ScannedFile
 
 CONFIG_EXTRACTOR_VERSION = "issue-8-config-command-package-entrypoints-v1"
@@ -43,27 +44,6 @@ SAFE_SCALAR_METADATA_KEYS = frozenset(
         "type",
         "version",
     }
-)
-SECRET_KEY_TOKENS = (
-    "api_key",
-    "apikey",
-    "auth",
-    "credential",
-    "password",
-    "passwd",
-    "private_key",
-    "secret",
-    "token",
-)
-COMMAND_SECRET_OPTIONS = (
-    "api-key",
-    "apikey",
-    "auth",
-    "otp",
-    "password",
-    "passwd",
-    "secret",
-    "token",
 )
 LOCKFILE_BY_NAME = {
     "bun.lock": ("bun", "lock", "javascript"),
@@ -281,7 +261,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
         add_package_manager(manager, ecosystem, path, "lockfile")
 
     def add_command(source_path: str, source: str, name: str, command: str) -> None:
-        sanitized = _sanitize_command(command)
+        sanitized = redact_command(command)
         fact = ConfigCommandFact(
             id=config_command_node_id(source_path, source, name),
             path=source_path,
@@ -302,7 +282,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
         evidence: str,
         line: int | None = None,
     ) -> None:
-        sanitized_target = _sanitize_command(target) if kind == "package_script" else target
+        sanitized_target = redact_command(target) if kind == "package_script" else target
         fact = ConfigEntrypointFact(
             id=config_entrypoint_node_id(source_path, kind, name, sanitized_target),
             path=source_path,
@@ -1016,7 +996,7 @@ def _extract_source_entrypoints(root: Path, path: str, add_entrypoint) -> None:
         return
     lines = source.splitlines()
     if lines and lines[0].startswith("#!") and _is_entrypoint_shebang(lines[0]):
-        add_entrypoint(path, "shebang", path, path, _sanitize_command(lines[0][2:].strip()), 1)
+        add_entrypoint(path, "shebang", path, path, redact_command(lines[0][2:].strip()), 1)
     if suffix in PYTHON_SOURCE_SUFFIXES:
         for line_number, line in enumerate(lines, start=1):
             if _is_python_main_guard(line):
@@ -1064,12 +1044,12 @@ def _is_requirements_file(path: str) -> bool:
 
 def _metadata_from_mapping(value: dict[Any, Any]) -> dict[str, object]:
     top_level_types = {
-        str(key): "redacted" if _is_secret_key(str(key)) else _value_type(child)
+        str(key): REDACTED_VALUE if is_secret_key(str(key)) else _value_type(child)
         for key, child in value.items()
     }
     metadata: dict[str, object] = {"top_level_types": dict(sorted(top_level_types.items()))}
     for key in sorted(SAFE_SCALAR_METADATA_KEYS):
-        if key not in value or _is_secret_key(key):
+        if key not in value or is_secret_key(key):
             continue
         scalar = _safe_scalar(value[key])
         if scalar is not None:
@@ -1094,8 +1074,8 @@ def _yaml_top_level(source: str) -> dict[str, str]:
             raise ValueError("invalid_yaml")
         key = match.group("key")
         value = match.group("value").strip()
-        if _is_secret_key(key):
-            result[key] = "redacted"
+        if is_secret_key(key):
+            result[key] = REDACTED_VALUE
         elif value:
             result[key] = (
                 "sequence"
@@ -1321,30 +1301,6 @@ def _value_type(value: object) -> str:
     if value is None:
         return "null"
     return "scalar"
-
-
-def _is_secret_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return any(token in normalized for token in SECRET_KEY_TOKENS)
-
-
-def _sanitize_command(command: str) -> str:
-    sanitized = command.strip()
-    sanitized = re.sub(
-        r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH|PRIVATE_KEY)[A-Z0-9_]*)=([^\s]+)",
-        r"\1=<redacted>",
-        sanitized,
-    )
-    option_pattern = "|".join(re.escape(option) for option in COMMAND_SECRET_OPTIONS)
-    sanitized = re.sub(
-        rf"(?i)(--(?:{option_pattern})(?:=|\s+))([^\s]+)",
-        lambda match: f"{match.group(1)}<redacted>",
-        sanitized,
-    )
-    sanitized = re.sub(r"\s+", " ", sanitized).strip()
-    if len(sanitized) > 240:
-        return f"{sanitized[:237]}..."
-    return sanitized
 
 
 def _classify_command_purpose(name: str, command: str) -> str:
