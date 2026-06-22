@@ -10,6 +10,7 @@ from typing import Any
 REDACTED_VALUE = "redacted"
 REDACTED_COMMAND_VALUE = "<redacted>"
 MAX_REDACTED_COMMAND_CHARS = 240
+_SECRET_TEXT_VALUE = "<redacted>"
 
 SECRET_FILE_NAMES = frozenset(
     {
@@ -96,6 +97,24 @@ def redact_command(command: str) -> str:
     if len(sanitized) > MAX_REDACTED_COMMAND_CHARS:
         return f"{sanitized[: MAX_REDACTED_COMMAND_CHARS - 3]}..."
     return sanitized
+
+
+def redact_text(text: str) -> str:
+    """Redact obvious inline secret assignments from source-adjacent text previews."""
+    key_token_pattern = (
+        r"[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTH|PRIVATE[_-]?KEY)"
+        r"[A-Z0-9_.-]*"
+    )
+    sanitized = re.sub(
+        rf"(?i)(\b{key_token_pattern}\b\s*=\s*)([^\s,;]+)",
+        rf"\1{_SECRET_TEXT_VALUE}",
+        text,
+    )
+    return re.sub(
+        rf"(?i)([\"']?\b{key_token_pattern}\b[\"']?\s*:\s*)([\"'])([^\"']+)([\"'])",
+        rf"\1\2{_SECRET_TEXT_VALUE}\4",
+        sanitized,
+    )
 
 
 def redact_payload(value: Any, *, parent_key: str | None = None) -> Any:

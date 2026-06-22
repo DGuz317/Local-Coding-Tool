@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repolens.redaction import redact_command, redact_payload
+from repolens.redaction import redact_command, redact_payload, redact_text
 
 
 def test_redaction_policy_redacts_secret_metadata_and_commands_but_preserves_useful_names():
@@ -38,3 +38,16 @@ def test_redact_command_handles_equals_and_space_secret_options():
     assert "abc" not in redacted
     assert "123" not in redacted
     assert "hunter2" not in redacted
+
+
+def test_redact_text_redacts_secret_like_assignments_without_redacting_names():
+    text = 'const API_TOKEN="abc123"; payload = {"private_key": "key-body"}; TokenBucket ok'
+
+    redacted = redact_text(text)
+
+    assert redacted == (
+        'const API_TOKEN=<redacted>; payload = {"private_key": "<redacted>"}; TokenBucket ok'
+    )
+    assert "abc123" not in redacted
+    assert "key-body" not in redacted
+    assert "TokenBucket" in redacted
