@@ -18,28 +18,29 @@ from repolens.config_index import (
     CONFIG_EXTRACTOR_VERSION,
     ConfigIndex,
     config_file_node_id,
-    extract_config_index,
 )
 from repolens.documentation_index import (
     DOCUMENTATION_EXTRACTOR_VERSION,
     DocumentationIndex,
     documentation_file_node_id,
-    extract_documentation_index,
 )
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     JAVASCRIPT_SOURCE_SUFFIXES,
     JavaScriptIndex,
-    extract_javascript_index,
     javascript_module_node_id,
     javascript_package_node_id,
+)
+from repolens.parser_backends import (
+    ParserBackendOption,
+    ParserIndexes,
+    extract_with_parser_backend,
 )
 from repolens.python_index import (
     PYTHON_EXTRACTOR_VERSION,
     PythonImportFact,
     PythonIndex,
     PythonModuleFact,
-    extract_python_index,
     python_package_node_id,
 )
 from repolens.redaction import redact_command, redact_payload
@@ -243,13 +244,7 @@ class SelectiveUpdatePlan:
         }
 
 
-@dataclass(frozen=True)
-class _ExtractedIndexes:
-    python: PythonIndex
-    javascript: JavaScriptIndex
-    config: ConfigIndex
-    documentation: DocumentationIndex
-    parser_status_by_path: dict[str, str]
+_ExtractedIndexes = ParserIndexes
 
 
 @dataclass(frozen=True)
@@ -286,9 +281,10 @@ def rebuild_graph_artifacts(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> tuple[str, ...]:
     """Rebuild the graph store and exports from one safe discovery result."""
-    build_graph_store(root, scan, file_changes=file_changes)
+    build_graph_store(root, scan, file_changes=file_changes, parser_backend=parser_backend)
     return export_graph_artifacts(root)
 
 
@@ -374,11 +370,17 @@ def replace_graph_artifacts_selectively(
     plan: SelectiveUpdatePlan,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> tuple[str, ...]:
     """Replace graph artifacts through the validated selective update path."""
     if not plan.safe:
         raise GraphStoreError("selective_update_not_safe")
-    return rebuild_graph_artifacts(root, scan, file_changes=file_changes)
+    return rebuild_graph_artifacts(
+        root,
+        scan,
+        file_changes=file_changes,
+        parser_backend=parser_backend,
+    )
 
 
 def build_graph_store(
@@ -386,6 +388,7 @@ def build_graph_store(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> Path:
     """Build ``graph.sqlite`` in a temporary file and replace it after success."""
     artifact_dir = root / ARTIFACT_DIR_NAME
@@ -413,6 +416,7 @@ def build_graph_store(
                 scan,
                 indexed_at_utc=_utc_now(),
                 file_changes=file_changes,
+                parser_backend=parser_backend,
             )
             _finalize_graph_metadata(connection)
             validation = _validate_graph_store(connection)
@@ -947,11 +951,12 @@ def _populate_store(
     *,
     indexed_at_utc: str,
     file_changes: tuple[FileChange, ...],
+    parser_backend: ParserBackendOption = "stable",
 ) -> None:
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
-    extracted = _extract_indexes(root, files)
+    extracted = _extract_indexes(root, files, parser_backend=parser_backend)
     file_states_by_path = _file_states_by_path(
         root,
         files,
@@ -1098,24 +1103,13 @@ def _finalize_graph_metadata(connection: sqlite3.Connection) -> None:
     )
 
 
-def _extract_indexes(root: Path, files: tuple[ScannedFile, ...]) -> _ExtractedIndexes:
-    python_index = extract_python_index(root, files)
-    javascript_index = extract_javascript_index(root, files)
-    config_index = extract_config_index(root, files)
-    documentation_index = extract_documentation_index(root, files)
-    parser_status_by_path = {
-        **python_index.parser_status_by_path,
-        **javascript_index.parser_status_by_path,
-        **config_index.parser_status_by_path,
-        **documentation_index.parser_status_by_path,
-    }
-    return _ExtractedIndexes(
-        python=python_index,
-        javascript=javascript_index,
-        config=config_index,
-        documentation=documentation_index,
-        parser_status_by_path=parser_status_by_path,
-    )
+def _extract_indexes(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+    *,
+    parser_backend: ParserBackendOption = "stable",
+) -> _ExtractedIndexes:
+    return extract_with_parser_backend(root, files, parser_backend=parser_backend)
 
 
 def _file_states_by_path(

@@ -46,10 +46,17 @@ def index(
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
     ] = False,
+    parser_backend: Annotated[
+        str,
+        typer.Option(
+            "--parser-backend",
+            help="Parser backend to use: stable or experimental.",
+        ),
+    ] = "stable",
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
-        result = index_repository(repo_path)
+        result = index_repository(repo_path, parser_backend=parser_backend)
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
@@ -237,10 +244,17 @@ def update(
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
     ] = False,
+    parser_backend: Annotated[
+        str,
+        typer.Option(
+            "--parser-backend",
+            help="Parser backend to use: stable or experimental.",
+        ),
+    ] = "stable",
 ) -> None:
     """Update RepoLens artifacts using live file change classification."""
     try:
-        result = update_repository(repo_path)
+        result = update_repository(repo_path, parser_backend=parser_backend)
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
