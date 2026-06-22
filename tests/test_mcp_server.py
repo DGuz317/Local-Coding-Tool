@@ -15,18 +15,37 @@ from repolens.mcp_server import MCP_TOOL_NAMES, RepoLensMcpTools
 def test_mcp_tools_return_missing_graph_envelopes_before_indexing(tmp_path, capsys):
     tools = RepoLensMcpTools(tmp_path)
 
-    summary = tools.repo_summary()
-    report = tools.get_graph_report()
-    search = tools.search_graph("anything")
+    results = {
+        "repo_summary": tools.repo_summary(),
+        "graph_status": tools.graph_status(),
+        "get_graph_report": tools.get_graph_report(),
+        "search_graph": tools.search_graph("anything"),
+        "get_node": tools.get_node(query="anything"),
+        "get_neighbors": tools.get_neighbors(query="anything"),
+        "shortest_path": tools.shortest_path("source", "target"),
+        "impact_analysis": tools.impact_analysis("anything"),
+        "suggest_reading_order": tools.suggest_reading_order("anything"),
+        "list_entrypoints": tools.list_entrypoints(),
+    }
 
-    assert summary["ok"] is False
-    assert summary["error"]["code"] == "missing_graph_artifacts"
-    assert summary["error"]["recommended_action"].startswith("repolens index ")
-    assert summary["data"] == {}
-    assert summary["freshness"]["fresh"] is False
-    assert summary["truncation"] == {"fields": [], "truncated": False}
-    assert report["error"]["code"] == "missing_graph_artifacts"
-    assert search["error"]["code"] == "missing_graph_artifacts"
+    for result in results.values():
+        assert set(result) >= {
+            "confidence",
+            "data",
+            "error",
+            "evidence",
+            "freshness",
+            "limits",
+            "ok",
+            "truncation",
+            "warnings",
+        }
+        assert result["ok"] is False
+        assert result["error"]["code"] == "missing_graph_artifacts"
+        assert result["error"]["recommended_action"].startswith("repolens index ")
+        assert result["data"] == {}
+        assert result["freshness"]["fresh"] is False
+        assert result["truncation"] == {"fields": [], "truncated": False}
     assert_no_stdout(capsys)
 
 
@@ -56,6 +75,21 @@ def test_mcp_tools_wrap_success_with_freshness_limits_and_truncation(tmp_path):
     assert text["pagination"]["truncated"] is True
     assert text["truncation"] == {"fields": ["data", "pagination"], "truncated": True}
     assert text["limits"]["max_results"] == 1
+
+
+def test_mcp_graph_tools_include_stale_freshness_metadata(tmp_path):
+    _write_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_text(tmp_path / "app.py", "alpha changed\n")
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.search_graph("app")
+
+    assert result["ok"] is True
+    assert result["freshness"] == {"fresh": False, "status": "stale"}
+    assert result["warnings"] == [
+        "Graph artifacts may be stale; file metadata changed since indexing."
+    ]
 
 
 def test_mcp_status_uses_short_ttl_cache(tmp_path):

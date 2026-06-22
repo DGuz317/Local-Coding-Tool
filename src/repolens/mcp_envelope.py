@@ -9,13 +9,16 @@ from typing import Any
 MCP_MAX_EVIDENCE_ITEMS = 12
 MCP_MAX_WARNING_ITEMS = 8
 MCP_RESPONSE_MAX_BYTES = 512_000
+MCP_GRAPH_UNAVAILABLE_CODES = frozenset(
+    {
+        "graph_store_is_symlink",
+        "graph_store_unreadable",
+        "missing_graph_artifacts",
+        "unsupported_schema_version",
+    }
+)
 
-_GRAPH_UNAVAILABLE_CODES = {
-    "graph_store_is_symlink",
-    "graph_store_unreadable",
-    "missing_graph_artifacts",
-    "unsupported_schema_version",
-}
+_STALE_GRAPH_WARNING = "Graph artifacts may be stale; file metadata changed since indexing."
 
 
 def mcp_success(
@@ -96,7 +99,7 @@ def mcp_graph_unavailable_error(
         "status": status,
     }
     return mcp_error(
-        code=code if code in _GRAPH_UNAVAILABLE_CODES else "graph_unavailable",
+        code=code if code in MCP_GRAPH_UNAVAILABLE_CODES else "graph_unavailable",
         message=_graph_unavailable_message(code),
         details=details,
         limits=limits,
@@ -171,8 +174,17 @@ def freshness_from_envelope(envelope: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(data, Mapping) and ("fresh" in data or "status" in data):
         return {"fresh": data.get("fresh"), "status": data.get("status", "unknown")}
     error = envelope.get("error")
-    if isinstance(error, Mapping) and error.get("code") in _GRAPH_UNAVAILABLE_CODES:
+    if isinstance(error, Mapping) and error.get("code") in MCP_GRAPH_UNAVAILABLE_CODES:
         return {"fresh": False, "status": error.get("status", "missing")}
+    warnings = envelope.get("warnings")
+    if isinstance(warnings, Sequence) and not isinstance(warnings, (str, bytes)):
+        if _STALE_GRAPH_WARNING in {str(warning) for warning in warnings}:
+            return {"fresh": False, "status": "stale"}
+    evidence = envelope.get("evidence")
+    if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes)):
+        for item in evidence:
+            if isinstance(item, Mapping) and item.get("source") == "sqlite_metadata":
+                return {"fresh": True, "status": "available"}
     return {"fresh": None, "status": "unknown"}
 
 
