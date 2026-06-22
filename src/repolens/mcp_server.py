@@ -9,10 +9,13 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from repolens.mcp_envelope import (
+    MCP_GRAPH_UNAVAILABLE_CODES,
     mcp_error,
     mcp_from_query_envelope,
     mcp_graph_unavailable_error,
+    mcp_success,
     pagination_metadata,
+    truncation_from_payload,
 )
 from repolens.query import GraphQueryService
 from repolens.text_search import (
@@ -119,21 +122,20 @@ class RepoLensMcpTools:
 
         data = result.to_cli_data()
         limits["max_file_size_bytes"] = result.scan.max_file_size_bytes
-        return self._mcp_envelope(
-            {
-                "confidence": "high",
-                "data": data,
-                "evidence": [{"source": "scanner_approved_files", "tool": "search_text"}],
-                "limits": limits,
-                "ok": True,
-                "pagination": pagination_metadata(
-                    limit=result.max_results,
-                    offset=0,
-                    returned=len(result.matches),
-                    total=result.total_matches,
-                ),
-                "warnings": list(result.warnings),
-            }
+        pagination = pagination_metadata(
+            limit=result.max_results,
+            offset=0,
+            returned=len(result.matches),
+            total=result.total_matches,
+        )
+        return mcp_success(
+            data=data,
+            confidence="high",
+            evidence=[{"source": "scanner_approved_files", "tool": "search_text"}],
+            limits=limits,
+            pagination=pagination,
+            truncation=truncation_from_payload(data, pagination),
+            warnings=list(result.warnings),
         )
 
     def get_node(
@@ -215,7 +217,7 @@ class RepoLensMcpTools:
 
     def _missing_status_as_error(self, envelope: dict[str, Any]) -> dict[str, Any]:
         data = envelope.get("data")
-        if not isinstance(data, dict) or data.get("reason") != "missing_graph_artifacts":
+        if not isinstance(data, dict) or data.get("reason") not in MCP_GRAPH_UNAVAILABLE_CODES:
             return envelope
         result = dict(envelope)
         result["ok"] = False
