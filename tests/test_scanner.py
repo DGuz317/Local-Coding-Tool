@@ -86,6 +86,43 @@ def test_scanner_rejects_repolens_as_analysis_root(tmp_path):
         scan_repository(artifact_root)
 
 
+def test_scanner_skips_secret_paths_before_parsing_but_keeps_non_secret_names(tmp_path):
+    _write_text(tmp_path / ".env.production", "TOKEN=secret\n")
+    _write_text(tmp_path / ".aws" / "credentials", "secret\n")
+    _write_text(tmp_path / "config" / "private-key.yaml", "value: secret\n")
+    _write_text(tmp_path / "secrets" / "settings.toml", "token = 'secret'\n")
+    _write_text(tmp_path / "src" / "secret_sauce.py", "class TokenBucket: pass\n")
+    _write_text(tmp_path / "docs" / "token-rotation.md", "# useful non-secret docs\n")
+
+    result = scan_repository(tmp_path)
+
+    assert {file.path for file in result.files} == {
+        "docs/token-rotation.md",
+        "src/secret_sauce.py",
+    }
+    skipped = {path.path: path.reason for path in result.skipped}
+    assert skipped == {
+        ".aws/credentials": "secret_path",
+        ".env.production": "secret_path",
+        "config/private-key.yaml": "secret_path",
+        "secrets": "secret_path",
+    }
+
+
+def test_scanner_records_containment_for_paths_that_escape_analysis_root(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    _write_text(tmp_path / "app.py", "print('ok')\n")
+    _write_text(outside, "outside\n")
+    _create_symlink(outside, tmp_path / "outside-link.txt")
+
+    result = scan_repository(tmp_path)
+
+    assert {file.path for file in result.files} == {"app.py"}
+    assert {path.path: path.reason for path in result.skipped} == {
+        "outside-link.txt": "symlink_escapes_root"
+    }
+
+
 def _write_text(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")

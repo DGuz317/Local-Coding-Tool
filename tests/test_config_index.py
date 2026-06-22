@@ -106,7 +106,7 @@ def test_config_index_extracts_javascript_manifests_lockfiles_commands_and_entry
               "dependencies": {"react": "^19.0.0"},
               "devDependencies": {"vitest": "^3.0.0"},
               "scripts": {
-                "test": "vitest --run --token super-secret",
+                "test": "VITE_TOKEN=abc vitest --run --token super-secret",
                 "lint": "eslint .",
                 "deploy": "npm publish --otp 123456",
                 "start": "vite --host 0.0.0.0"
@@ -142,6 +142,7 @@ def test_config_index_extracts_javascript_manifests_lockfiles_commands_and_entry
     assert commands["test"].purpose == "test"
     assert commands["test"].not_run is True
     assert "super-secret" not in commands["test"].command
+    assert "abc" not in commands["test"].command
     assert "<redacted>" in commands["test"].command
     assert commands["deploy"].purpose == "deploy"
     assert commands["deploy"].auto_run_recommended is False
@@ -154,6 +155,38 @@ def test_config_index_extracts_javascript_manifests_lockfiles_commands_and_entry
     assert ("package_bin", "web-app", "./bin/cli.js") in entrypoints
     assert ("package_main", "main", "dist/index.js") in entrypoints
     assert ("package_script", "start", "vite --host 0.0.0.0") in entrypoints
+
+
+def test_config_index_redacts_commands_and_metadata_without_losing_useful_facts(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "token-tools",
+              "version": "1.0.0",
+              "dependencies": {"secret-sauce": "^1.2.3"},
+              "scripts": {
+                "test": "AUTH_TOKEN=abc vitest --api-key xyz",
+                "start": "vite --host 127.0.0.1"
+              },
+              "token": "should-not-leak"
+            }
+            """
+        ).lstrip(),
+    )
+
+    config_index = extract_config_index(tmp_path, scan_repository(tmp_path).files)
+
+    packages = {(package.name, package.classification) for package in config_index.packages}
+    assert ("token-tools", "local") in packages
+    assert ("secret-sauce", "external") in packages
+    commands = {command.name: command.command for command in config_index.commands}
+    assert commands["test"] == "AUTH_TOKEN=<redacted> vitest --api-key <redacted>"
+    assert commands["start"] == "vite --host 127.0.0.1"
+    assert "should-not-leak" not in str(config_index.config_files)
+    metadata = {config.path: config.metadata for config in config_index.config_files}
+    assert metadata["package.json"]["top_level_types"]["token"] == "redacted"
 
 
 def test_config_index_extracts_docker_make_ci_precommit_and_task_commands(tmp_path):

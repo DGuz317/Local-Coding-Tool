@@ -6,6 +6,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from repolens.redaction import redact_payload
+
 MCP_MAX_EVIDENCE_ITEMS = 12
 MCP_MAX_WARNING_ITEMS = 8
 MCP_RESPONSE_MAX_BYTES = 512_000
@@ -117,7 +119,7 @@ def mcp_from_query_envelope(
     max_response_bytes: int = MCP_RESPONSE_MAX_BYTES,
 ) -> dict[str, Any]:
     """Normalize a query-service envelope into the public MCP envelope contract."""
-    result = dict(envelope)
+    result = redact_payload(dict(envelope))
     data = result.get("data")
     pagination = result.get("pagination")
     freshness = freshness_from_envelope(result)
@@ -192,7 +194,7 @@ def cap_mcp_response(
     envelope: Mapping[str, Any], *, max_response_bytes: int = MCP_RESPONSE_MAX_BYTES
 ) -> dict[str, Any]:
     """Ensure an MCP response cannot grow beyond the configured JSON byte cap."""
-    result = dict(envelope)
+    result = redact_payload(dict(envelope))
     if _json_size(result) <= max_response_bytes:
         return result
 
@@ -243,16 +245,16 @@ def _base_envelope(
 ) -> dict[str, Any]:
     envelope: dict[str, Any] = {
         "confidence": confidence,
-        "data": data,
-        "evidence": _bounded_evidence(evidence),
+        "data": redact_payload(data),
+        "evidence": redact_payload(_bounded_evidence(evidence)),
         "freshness": dict(freshness or {"fresh": None, "status": "unknown"}),
-        "limits": dict(limits or {}),
+        "limits": redact_payload(dict(limits or {})),
         "ok": ok,
         "truncation": dict(truncation or truncation_metadata()),
         "warnings": _bounded_warnings(warnings),
     }
     if error is not None:
-        envelope["error"] = dict(error)
+        envelope["error"] = redact_payload(dict(error))
     return envelope
 
 

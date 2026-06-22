@@ -135,6 +135,37 @@ def test_mcp_tools_preserve_candidate_only_resolution_metadata(tmp_path):
     assert result["truncation"] == {"fields": [], "truncated": False}
 
 
+def test_mcp_envelope_redacts_secret_like_metadata_at_output_boundary(tmp_path):
+    tools = RepoLensMcpTools(tmp_path)
+    envelope = {
+        "ok": True,
+        "data": {
+            "node": {
+                "label": "TokenBucket",
+                "metadata": {
+                    "token": "should-not-leak",
+                    "package": "secret-sauce",
+                    "command": "TOKEN=abc npm test --token xyz",
+                },
+            }
+        },
+        "evidence": [{"source": "fixture", "api-key": "should-not-leak"}],
+        "warnings": [],
+        "limits": {},
+    }
+
+    result = tools._mcp_envelope(envelope)
+
+    assert result["data"]["node"]["label"] == "TokenBucket"
+    assert result["data"]["node"]["metadata"]["package"] == "secret-sauce"
+    assert result["data"]["node"]["metadata"]["token"] == "redacted"
+    assert result["data"]["node"]["metadata"]["command"] == (
+        "TOKEN=<redacted> npm test --token <redacted>"
+    )
+    assert result["evidence"][0]["api-key"] == "redacted"
+    assert "should-not-leak" not in str(result)
+
+
 def test_mcp_stdio_smoke_lists_exact_tools_and_calls_status(tmp_path):
     async def run_smoke() -> None:
         server_params = StdioServerParameters(
