@@ -1,0 +1,6 @@
+service:
+  name: dogfood-docs-config
+  owner: local-fixture
+commands:
+  verify: make verify
+  deploy: make deploy
