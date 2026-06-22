@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from repolens.scanner import ScannedFile
 
-JAVASCRIPT_EXTRACTOR_VERSION = "issue-7c-typescript-alias-resolution-v1"
+JAVASCRIPT_EXTRACTOR_VERSION = "issue-39-js-ts-relative-import-resolution-v1"
 
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
@@ -743,7 +743,7 @@ def _import_fact(
     alias_rules: tuple[_TypeScriptAliasRule, ...],
     javascript_paths: frozenset[str],
 ) -> JavaScriptImportFact:
-    resolution = _resolve_import_specifier(specifier, alias_rules, javascript_paths)
+    resolution = _resolve_import_specifier(path, specifier, alias_rules, javascript_paths)
     key = "|".join((path, kind, specifier, str(line)))
     id_counts[key] += 1
     suffix = "" if id_counts[key] == 1 else f"#{id_counts[key]}"
@@ -762,12 +762,16 @@ def _import_fact(
 
 
 def _resolve_import_specifier(
+    source_path: str,
     specifier: str,
     alias_rules: tuple[_TypeScriptAliasRule, ...],
     javascript_paths: frozenset[str],
 ) -> _ImportResolution:
-    if specifier.startswith((".", "/")):
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_local")
+    if specifier.startswith("/"):
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_unsupported_absolute")
+
+    if specifier.startswith("."):
+        return _resolve_relative_specifier(source_path, specifier, javascript_paths)
 
     alias_resolution = _resolve_alias_specifier(specifier, alias_rules, javascript_paths)
     if alias_resolution is not None:
@@ -778,6 +782,31 @@ def _resolve_import_specifier(
         return _ImportResolution(node_builtin, "node_builtin", None, "external")
 
     return _ImportResolution(_package_root(specifier), "third_party", None, "external")
+
+
+def _resolve_relative_specifier(
+    source_path: str,
+    specifier: str,
+    javascript_paths: frozenset[str],
+) -> _ImportResolution:
+    source_dir = PurePosixPath(source_path).parent.as_posix()
+    if source_dir == ".":
+        source_dir = ""
+    base_path = _normalize_repo_path(source_dir, specifier)
+    if base_path is None:
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_outside_root")
+
+    candidate_paths = _module_path_candidates(base_path, javascript_paths)
+    if len(candidate_paths) == 1:
+        return _ImportResolution(
+            None,
+            "local_resolved",
+            next(iter(candidate_paths)),
+            "resolved_relative",
+        )
+    if len(candidate_paths) > 1:
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_relative")
+    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_relative")
 
 
 def _resolve_alias_specifier(

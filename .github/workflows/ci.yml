@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feature/repolens-v0.2
+
+jobs:
+  release-gate:
+    name: Release Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run Ruff check
+        run: uv run ruff check .
+
+      - name: Run Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Run mypy
+        run: uv run mypy src/repolens
+
+      - name: Run pytest
+        run: uv run pytest
+
+      - name: Build package
+        run: uv build
+
+      - name: Run isolated install smoke
+        shell: bash
+        run: |
+          smoke_dir="$(mktemp -d)"
+          uv venv "$smoke_dir/.venv"
+          source "$smoke_dir/.venv/bin/activate"
+          uv pip install dist/*.whl
+          repolens --help
+
+          cp -R tests/fixtures/dogfood/python-local-imports "$smoke_dir/python-local-imports"
+          repolens index "$smoke_dir/python-local-imports"

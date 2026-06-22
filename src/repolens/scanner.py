@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from repolens.redaction import is_secret_path
+
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_048_576
 BINARY_SNIFF_BYTES = 8192
 
@@ -113,29 +115,6 @@ BINARY_MEDIA_ARCHIVE_SUFFIXES = frozenset(
 
 GENERATED_FILE_SUFFIXES = frozenset({".map"})
 GENERATED_FILE_NAME_SUFFIXES = (".bundle.js", ".min.css", ".min.js")
-
-SECRET_FILE_NAMES = frozenset(
-    {
-        ".env",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-        "credentials",
-        "credentials.json",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "id_rsa",
-        "known_hosts",
-        "secrets.json",
-    }
-)
-SECRET_SUFFIXES = frozenset({".jks", ".key", ".kdbx", ".keystore", ".p12", ".pem", ".pfx"})
-SECRET_CONFIG_SUFFIXES = frozenset(
-    {"", ".cfg", ".conf", ".env", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml"}
-)
-SECRET_NAME_TOKENS = ("credential", "password", "passwd", "private-key", "private_key", "secret")
-SECRET_DIRECTORY_NAMES = frozenset({".secrets", "secrets"})
 
 
 class ScanError(ValueError):
@@ -263,7 +242,7 @@ def scan_repository(
                 record_skip(path, "repolens_artifact_dir")
                 continue
 
-            if _is_secret_path(rel_path):
+            if is_secret_path(rel_path):
                 record_skip(path, "secret_path")
                 continue
 
@@ -425,21 +404,6 @@ def _matches_directory_pattern(local_path: str, pattern: str, path_pattern: bool
     if path_pattern:
         return local_path == pattern or local_path.startswith(f"{pattern}/")
     return any(fnmatch.fnmatchcase(part, pattern) for part in local_path.split("/"))
-
-
-def _is_secret_path(rel_path: str) -> bool:
-    parts = tuple(part.lower() for part in rel_path.split("/"))
-    name = parts[-1]
-    suffix = Path(name).suffix.lower()
-    stem = Path(name).stem.lower()
-
-    if name in SECRET_FILE_NAMES or name.startswith(".env."):
-        return True
-    if suffix in SECRET_SUFFIXES:
-        return True
-    if any(part in SECRET_DIRECTORY_NAMES for part in parts[:-1]):
-        return True
-    return suffix in SECRET_CONFIG_SUFFIXES and any(token in stem for token in SECRET_NAME_TOKENS)
 
 
 def _is_generated_artifact_file(rel_path: str) -> bool:

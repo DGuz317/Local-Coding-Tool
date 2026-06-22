@@ -8,6 +8,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from repolens.mcp_envelope import (
+    MCP_GRAPH_UNAVAILABLE_CODES,
+    mcp_error,
+    mcp_from_query_envelope,
+    mcp_graph_unavailable_error,
+    mcp_success,
+    pagination_metadata,
+    truncation_from_payload,
+)
 from repolens.query import GraphQueryService
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
@@ -105,7 +114,7 @@ class RepoLensMcpTools:
                 max_results=limits["max_results"],
             )
         except RepoLensSearchError as exc:
-            return _mcp_error(
+            return mcp_error(
                 code=str(exc) or exc.__class__.__name__,
                 message="Raw text search could not be completed.",
                 limits=limits,
@@ -113,22 +122,20 @@ class RepoLensMcpTools:
 
         data = result.to_cli_data()
         limits["max_file_size_bytes"] = result.scan.max_file_size_bytes
-        return self._mcp_envelope(
-            {
-                "confidence": "high",
-                "data": data,
-                "evidence": [{"source": "scanner_approved_files", "tool": "search_text"}],
-                "limits": limits,
-                "ok": True,
-                "pagination": {
-                    "limit": result.max_results,
-                    "offset": 0,
-                    "returned": len(result.matches),
-                    "total": result.total_matches,
-                    "truncated": result.truncated,
-                },
-                "warnings": list(result.warnings),
-            }
+        pagination = pagination_metadata(
+            limit=result.max_results,
+            offset=0,
+            returned=len(result.matches),
+            total=result.total_matches,
+        )
+        return mcp_success(
+            data=data,
+            confidence="high",
+            evidence=[{"source": "scanner_approved_files", "tool": "search_text"}],
+            limits=limits,
+            pagination=pagination,
+            truncation=truncation_from_payload(data, pagination),
+            warnings=list(result.warnings),
         )
 
     def get_node(
@@ -202,39 +209,29 @@ class RepoLensMcpTools:
     def _mcp_envelope(
         self, envelope: dict[str, Any], *, cached: bool | None = None
     ) -> dict[str, Any]:
-        result = dict(envelope)
-        data = result.get("data")
-        pagination = result.get("pagination")
-        freshness = _freshness_from_envelope(result)
-        truncation = _truncation_from_payload(data, pagination)
-
-        result.setdefault("data", {})
-        result.setdefault("limits", {})
-        result.setdefault("warnings", [])
-        result.setdefault("ok", False)
-        result["freshness"] = freshness
-        result["truncation"] = truncation
-        if cached is not None:
-            result["freshness"]["status_cache"] = {
-                "cached": cached,
-                "ttl_seconds": self.status_ttl_seconds,
-            }
-        return result
+        return mcp_from_query_envelope(
+            envelope,
+            cached=cached,
+            status_ttl_seconds=self.status_ttl_seconds,
+        )
 
     def _missing_status_as_error(self, envelope: dict[str, Any]) -> dict[str, Any]:
         data = envelope.get("data")
-        if not isinstance(data, dict) or data.get("reason") != "missing_graph_artifacts":
+        if not isinstance(data, dict) or data.get("reason") not in MCP_GRAPH_UNAVAILABLE_CODES:
             return envelope
         result = dict(envelope)
         result["ok"] = False
         result["data"] = {}
-        result["error"] = {
-            "code": "missing_graph_artifacts",
-            "message": "RepoLens graph artifacts are missing. Run repolens index for this repository.",
-            "missing_artifacts": data.get("missing_artifacts", []),
-            "recommended_action": data.get("recommended_action"),
-            "status": data.get("status"),
-        }
+        graph_error = mcp_graph_unavailable_error(
+            code="missing_graph_artifacts",
+            missing_artifacts=data.get("missing_artifacts", []),
+            recommended_action=data.get("recommended_action"),
+            status=data.get("status"),
+            limits=result.get("limits", {}),
+            warnings=result.get("warnings", []),
+            evidence=result.get("evidence", []),
+        )
+        result["error"] = graph_error["error"]
         return result
 
 
@@ -337,51 +334,3 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
 def run_mcp_server(repo_path: Path | str) -> None:
     """Run RepoLens MCP over stdio without writing application output to stdout."""
     create_mcp_server(repo_path).run(transport="stdio")
-
-
-def _freshness_from_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
-    data = envelope.get("data")
-    if not isinstance(data, dict):
-        return {"fresh": None, "status": "unknown"}
-    if "fresh" in data or "status" in data:
-        return {
-            "fresh": data.get("fresh"),
-            "status": data.get("status", "unknown"),
-        }
-    error = envelope.get("error")
-    if isinstance(error, dict) and error.get("code") == "missing_graph_artifacts":
-        return {"fresh": False, "status": error.get("status", "missing")}
-    return {"fresh": None, "status": "unknown"}
-
-
-def _truncation_from_payload(data: Any, pagination: Any) -> dict[str, Any]:
-    truncated = False
-    fields: list[str] = []
-    if isinstance(pagination, dict) and pagination.get("truncated") is True:
-        truncated = True
-        fields.append("pagination")
-    if isinstance(data, dict):
-        data_truncated = data.get("truncated")
-        if isinstance(data_truncated, bool):
-            truncated = truncated or data_truncated
-            if data_truncated:
-                fields.append("data")
-        elif isinstance(data_truncated, dict):
-            truncated_fields = [key for key, value in data_truncated.items() if value]
-            truncated = truncated or bool(truncated_fields)
-            fields.extend(truncated_fields)
-    return {"fields": sorted(set(fields)), "truncated": truncated}
-
-
-def _mcp_error(*, code: str, message: str, limits: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "confidence": "none",
-        "data": {},
-        "error": {"code": code, "message": message},
-        "evidence": [],
-        "freshness": {"fresh": None, "status": "unknown"},
-        "limits": limits,
-        "ok": False,
-        "truncation": {"fields": [], "truncated": False},
-        "warnings": [],
-    }

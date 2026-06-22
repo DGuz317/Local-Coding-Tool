@@ -123,6 +123,33 @@ def test_ambiguous_node_lookup_returns_candidates_without_choosing(tmp_path):
     assert result["confidence"] == "low"
 
 
+def test_low_confidence_node_lookup_returns_candidate_only_without_resolving(tmp_path):
+    _write_text(tmp_path / "src" / "billing" / "invoice.py", "def total_due():\n    return 1\n")
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    node = service.get_node(query="due missing")
+    neighbors = service.get_neighbors(query="due missing")
+    impact = service.impact_analysis("due missing")
+
+    assert node["ok"] is True
+    assert node["confidence"] == "low"
+    assert node["data"]["node"] is None
+    assert node["data"]["ambiguous"] is False
+    assert node["data"]["reason"] == "fuzzy_candidate_only"
+    assert node["data"]["resolution_strategy"] == "fuzzy_candidate"
+    assert [candidate["node"]["label"] for candidate in node["data"]["candidates"]] == ["total_due"]
+
+    assert neighbors["data"]["center"] is None
+    assert neighbors["data"]["neighbors"] == []
+    assert neighbors["data"]["reason"] == "fuzzy_candidate_only"
+
+    assert impact["data"]["target"] is None
+    assert impact["data"]["direct_affected_files"] == []
+    assert impact["data"]["resolution"]["reason"] == "fuzzy_candidate_only"
+    assert impact["data"]["resolution"]["resolution_strategy"] == "fuzzy_candidate"
+
+
 def test_query_service_reports_stale_warnings_without_reading_source_files(tmp_path, monkeypatch):
     _write_fixture_repo(tmp_path)
     index_repository(tmp_path)
@@ -177,20 +204,32 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
     index_repository(tmp_path)
     service = GraphQueryService(tmp_path)
 
-    result = service.impact_analysis("src/auth/login.ts", max_results=2)
+    result = service.impact_analysis("src/auth/login.ts", max_results=3)
 
     assert result["ok"] is True
     assert result["confidence"] == "high"
     assert result["data"]["ambiguous"] is False
-    assert result["limits"] == {"max_depth": 2, "max_results": 2}
-    assert result["data"]["caps"] == {"depth": 1, "max_results": 2}
+    assert result["limits"] == {"max_depth": 2, "max_results": 3}
+    assert result["data"]["caps"] == {"depth": 1, "max_results": 3}
+    assert result["data"]["impact_groups"]["likely_tests"]["label"] == "Related tests"
+    assert result["data"]["impact_groups"]["likely_tests"]["items"][0]["path"] == (
+        "tests/login.test.ts"
+    )
+    assert result["data"]["impact_groups"]["related_docs"]["truncated"] is False
+    assert result["data"]["rollups"]["counts"]["likely_tests"] == 1
+    assert result["data"]["rollups"]["counts"]["related_docs"] == 1
+    assert result["data"]["rollups"]["truncated_groups"] == []
+
+    limited = service.impact_analysis("src/auth/login.ts", max_results=1)
+    assert limited["data"]["impact_groups"]["direct_affected_files"]["truncated"] is True
+    assert "direct_affected_files" in limited["data"]["rollups"]["truncated_groups"]
 
     direct_paths = [item["path"] for item in result["data"]["direct_affected_files"]]
     assert direct_paths == ["src/auth/login.ts", "src/auth/router.ts"]
 
     likely_paths = [item["path"] for item in result["data"]["likely_affected_files"]]
-    assert likely_paths == ["tests/login.test.ts", "README.md"]
-    assert result["data"]["truncated"]["likely_affected_files"] is True
+    assert likely_paths == ["tests/login.test.ts", "README.md", "package.json"]
+    assert result["data"]["truncated"]["likely_affected_files"] is False
 
     assert [item["path"] for item in result["data"]["dependencies"]] == ["src/auth/policy.ts"]
     assert [item["path"] for item in result["data"]["dependents"]] == [
@@ -198,7 +237,7 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
         "tests/login.test.ts",
     ]
     assert result["data"]["likely_tests"][0]["path"] == "tests/login.test.ts"
-    assert result["data"]["likely_tests"][0]["reason"] == "imports_target"
+    assert result["data"]["likely_tests"][0]["reason"] == "direct_import_related_test"
     assert result["data"]["related_docs"][0]["path"] == "README.md"
     assert result["data"]["related_configs"][0]["path"] == "package.json"
     assert result["data"]["risk_comments"][0] == {
@@ -212,9 +251,40 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
     assert [command["name"] for command in result["data"]["candidate_verification_commands"]] == [
         "lint",
         "test",
+        "typecheck",
     ]
     assert all(command["not_run"] for command in result["data"]["candidate_verification_commands"])
     assert result["evidence"][-1] == {"source": "graph_metadata", "tool": "impact_analysis"}
+
+
+def test_impact_analysis_target_expansion_does_not_walk_to_parent_or_siblings(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    result = service.impact_analysis("validateLogin", max_results=10)
+
+    assert result["ok"] is True
+    assert result["data"]["target"]["label"] == "validateLogin"
+    assert result["data"]["dependencies"] == []
+    assert result["data"]["dependents"] == []
+    assert result["data"]["direct_affected_files"] == [
+        {
+            "confidence": "high",
+            "evidence": [
+                {
+                    "node_id": result["data"]["target"]["id"],
+                    "source": "target_resolution",
+                }
+            ],
+            "node": result["data"]["target"],
+            "path": "src/auth/login.ts",
+            "reason": "target_file",
+        }
+    ]
+    assert result["data"]["likely_tests"] == []
+    assert result["data"]["related_docs"] == []
+    assert [item["path"] for item in result["data"]["related_configs"]] == ["package.json"]
 
 
 def test_reading_order_uses_task_tokens_tests_caps_and_contextual_configs(tmp_path):
@@ -237,14 +307,52 @@ def test_reading_order_uses_task_tokens_tests_caps_and_contextual_configs(tmp_pa
         "README.md",
     ]
     assert result["data"]["reading_order"][0]["reason"] == "task_matches_symbols"
+    assert result["data"]["reading_order"][0]["ranking_reason"] == (
+        "Task tokens matched indexed source symbols."
+    )
     assert result["data"]["reading_order"][1]["reason"] == "likely_related_test"
+    assert result["data"]["reading_order"][1]["ranking_reason"] == (
+        "Likely related test from graph evidence."
+    )
     assert "package.json" not in [item["path"] for item in result["data"]["reading_order"]]
+    assert result["data"]["candidate_verification_commands"] == []
     assert result["data"]["reading_order"][0]["evidence"]
 
-    config_result = service.suggest_reading_order("fix package test command", max_files=3)
+    config_result = service.suggest_reading_order("fix package test command", max_files=1)
 
     assert config_result["data"]["reading_order"][0]["path"] == "package.json"
     assert config_result["data"]["reading_order"][0]["reason"] == "config_matches_task"
+    assert config_result["data"]["reading_order"][0]["ranking_reason"] == (
+        "Task tokens matched indexed config or command metadata."
+    )
+    assert len(config_result["data"]["reading_order"]) == 1
+    assert [
+        command["name"] for command in config_result["data"]["candidate_verification_commands"]
+    ] == [
+        "lint",
+    ]
+    assert config_result["data"]["candidate_verification_commands"][0]["not_run"] is True
+    assert (
+        config_result["data"]["candidate_verification_commands"][0]["auto_run_recommended"] is False
+    )
+
+
+def test_reading_order_command_context_is_sanitized_filtered_and_bounded(tmp_path):
+    _write_impact_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    service = GraphQueryService(tmp_path)
+
+    result = service.suggest_reading_order("fix package typecheck command", max_files=5)
+
+    commands = result["data"]["candidate_verification_commands"]
+    assert [command["name"] for command in commands] == ["lint", "test", "typecheck"]
+    assert "publish" not in [command["name"] for command in commands]
+    assert all(command["not_run"] for command in commands)
+    assert all(command["auto_run_recommended"] is False for command in commands)
+    assert commands[2]["command"] == "API_KEY=<redacted> tsc --token <redacted>"
+
+    limited = service.suggest_reading_order("fix package typecheck command", max_files=2)
+    assert len(limited["data"]["candidate_verification_commands"]) == 2
 
 
 def test_impact_analysis_and_reading_order_return_ambiguous_candidates(tmp_path):
@@ -360,7 +468,8 @@ def _write_impact_fixture_repo(root) -> None:
               "scripts": {
                 "lint": "eslint .",
                 "publish": "npm publish",
-                "test": "vitest run tests/login.test.ts"
+                "test": "vitest run tests/login.test.ts",
+                "typecheck": "API_KEY=secret tsc --token supersecret"
               }
             }
             """

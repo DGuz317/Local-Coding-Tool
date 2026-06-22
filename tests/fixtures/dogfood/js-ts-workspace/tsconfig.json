@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@dog/lib": ["packages/lib/src/index.ts"]
+    }
+  },
+  "references": [
+    { "path": "./packages/app" },
+    { "path": "./packages/lib" }
+  ]
+}

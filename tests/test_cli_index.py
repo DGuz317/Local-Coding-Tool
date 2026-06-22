@@ -4,10 +4,12 @@ import json
 import sqlite3
 from textwrap import dedent
 
+import pytest
 from typer.testing import CliRunner
 
+import repolens.graph as graph
 from repolens.cli import app
-from repolens.indexer import ARTIFACT_GITIGNORE_CONTENT
+from repolens.indexer import ARTIFACT_GITIGNORE_CONTENT, RepoLensIndexError, index_repository
 
 runner = CliRunner()
 
@@ -89,7 +91,9 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "12"
+    assert len(metadata["canonical_graph_hash"]) == 64
+    assert json.loads(metadata["graph_quality_warnings"]) == []
     assert "effective_config_hash" in metadata
     assert "git_branch" in metadata
     assert "git_commit" in metadata
@@ -284,11 +288,16 @@ def test_index_records_python_syntax_errors_nonfatally_and_removes_stale_facts(t
 
     graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
     graph_lite = json.loads((tmp_path / ".repolens" / "graph-lite.json").read_text())
+    graph_status = json.loads((tmp_path / ".repolens" / "graph-status.json").read_text())
     report = (tmp_path / ".repolens" / "graph-report.md").read_text(encoding="utf-8")
     graph_index = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
 
     assert graph_json["python"]["parse_errors"][0]["path"] == "broken.py"
     assert graph_lite["python"]["parse_errors"][0]["message"] == "invalid syntax"
+    assert graph_status["validation"] == {
+        "hard_failures": [],
+        "quality_warnings": ["Parser errors detected in the live graph overlay."],
+    }
     assert "parse_error" in report
     assert "broken.py" in graph_index
 
@@ -545,7 +554,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "12"
     assert (
         "@/components/App",
         None,
@@ -674,6 +683,15 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
                 """
             )
         )
+        command_groups = list(
+            connection.execute(
+                """
+                SELECT name, group_path, group_kind, group_source_path
+                FROM config_commands
+                ORDER BY name
+                """
+            )
+        )
         entrypoints = list(
             connection.execute(
                 """
@@ -687,7 +705,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "12"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -712,6 +730,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
         and "123456" not in command
         for source, name, purpose, command, _, auto_run_recommended in commands
     )
+    assert ("test", ".", "package_root", "package.json") in command_groups
     assert ("python_console_script", "acme", "acme.cli:main") in entrypoints
     assert (
         "python_main_guard",
@@ -844,7 +863,7 @@ def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_pat
             connection.execute("SELECT name, description, path FROM skills ORDER BY name")
         )
 
-    assert metadata["schema_version"] == "8"
+    assert metadata["schema_version"] == "12"
     assert (
         "README.md",
         "readme",
@@ -928,6 +947,73 @@ def test_graph_exports_do_not_mirror_source_code(tmp_path):
         assert javascript_source_body not in artifact_text, artifact
 
 
+def test_canonical_graph_hash_and_symbol_ids_survive_line_shifts(tmp_path):
+    _write_text(
+        tmp_path / "app.py",
+        dedent(
+            """
+            import os
+
+            def run():
+                return os.getcwd()
+            """
+        ).lstrip(),
+    )
+    first_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert first_result.exit_code == 0
+    first_hash = _metadata_value(tmp_path, "canonical_graph_hash")
+    first_ids = _node_ids(tmp_path)
+
+    _write_text(
+        tmp_path / "app.py",
+        dedent(
+            """
+
+
+            import os
+
+            def run():
+                return os.getcwd()
+            """
+        ).lstrip(),
+    )
+    second_result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert second_result.exit_code == 0
+    assert _metadata_value(tmp_path, "canonical_graph_hash") == first_hash
+    assert _node_ids(tmp_path) == first_ids
+
+
+def test_whitespace_only_edits_do_not_perturb_structural_graph_identity(tmp_path):
+    _write_text(tmp_path / "app.py", "def run():\n    return 1\n")
+    first_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert first_result.exit_code == 0
+    first_hash = _metadata_value(tmp_path, "canonical_graph_hash")
+
+    _write_text(tmp_path / "app.py", "def run():  \n    return 1\t\n\n")
+    second_result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert second_result.exit_code == 0
+    assert _metadata_value(tmp_path, "canonical_graph_hash") == first_hash
+
+
+def test_validation_failure_does_not_replace_existing_graph_store(tmp_path, monkeypatch):
+    _write_text(tmp_path / "app.py", "print('ok')\n")
+    index_repository(tmp_path)
+    graph_store = tmp_path / ".repolens" / "graph.sqlite"
+    original_store = graph_store.read_bytes()
+    original_hash = _metadata_value(tmp_path, "canonical_graph_hash")
+    calls = iter(["0" * 64, "1" * 64])
+
+    monkeypatch.setattr(graph, "_canonical_graph_hash", lambda connection: next(calls))
+
+    with pytest.raises(RepoLensIndexError, match="graph_validation_failed"):
+        index_repository(tmp_path)
+
+    assert graph_store.read_bytes() == original_store
+    assert _metadata_value(tmp_path, "canonical_graph_hash") == original_hash
+
+
 def test_index_honors_gitignore_and_only_creates_repolens_for_git_root(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
@@ -1002,6 +1088,18 @@ def _without_volatile_markdown_fields(path):
         "Indexed at UTC: <volatile>" if line.startswith("Indexed at UTC:") else line
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def _metadata_value(repo_path, key):
+    with sqlite3.connect(repo_path / ".repolens" / "graph.sqlite") as connection:
+        row = connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _node_ids(repo_path):
+    with sqlite3.connect(repo_path / ".repolens" / "graph.sqlite") as connection:
+        return [row[0] for row in connection.execute("SELECT id FROM nodes ORDER BY id")]
 
 
 def _write_text(path, content: str) -> None:

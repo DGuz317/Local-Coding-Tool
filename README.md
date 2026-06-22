@@ -2,11 +2,11 @@
 
 RepoLens MCP is a local-first repository intelligence backend for AI coding assistants. It indexes a repository into deterministic `.repolens/` graph artifacts and exposes read-only stdio MCP tools so assistants can understand repo structure before opening source files.
 
-RepoLens v0.1 is local, deterministic, and offline-capable during normal indexing and MCP serving. It does not require AI models, embeddings, telemetry, hosted services, a browser UI, or runtime network calls.
+RepoLens v0.2 is a reliability-hardening release over v0.1. It remains local, deterministic, and offline-capable during normal indexing and MCP serving. It does not require AI models, embeddings, telemetry, hosted services, a browser UI, or runtime network calls.
 
 ## Quickstart
 
-Install from a local checkout while v0.1 publishing is deferred:
+Install from a local checkout while package publishing is deferred:
 
 ```bash
 uv tool install .
@@ -34,6 +34,8 @@ The implemented CLI commands are:
 - `repolens search <repo-path> <query>`: search scanner-approved live text with capped previews.
 - `repolens mcp <repo-path>`: start the read-only stdio MCP server.
 
+For assistant setup and examples, see `docs/assistant-usage-guide.md` and `docs/mcp-tool-examples.md`.
+
 ## Native Install
 
 When installing from a local checkout, prefer `uv tool`:
@@ -54,15 +56,15 @@ For package-build smoke testing before release:
 
 ```bash
 uv build
-uv tool install --force dist/repolens-0.1.0-py3-none-any.whl
+uv tool install --force dist/*.whl
 repolens --help
 ```
 
-PyPI publishing is deferred for v0.1, so install commands intentionally point at a local checkout or built wheel.
+PyPI publishing is deferred for v0.2, so install commands intentionally point at a local checkout or built wheel.
 
 ## Docker Usage
 
-Build the local image with the required v0.1 tag:
+Build the local image:
 
 ```bash
 docker build -t repolens:latest .
@@ -119,13 +121,15 @@ Then start the stdio MCP server:
 repolens mcp /path/to/repo
 ```
 
-The v0.1 MCP server is read-only. It does not update graphs, modify files, execute shell commands, or expose a full-source file read tool. Available tools are `repo_summary`, `graph_status`, `get_graph_report`, `search_graph`, `search_text`, `get_node`, `get_neighbors`, `shortest_path`, `impact_analysis`, `suggest_reading_order`, and `list_entrypoints`.
+The v0.2 MCP server is read-only. It does not update graphs, modify files, execute shell commands, or expose a full-source file read tool. Available tools are `repo_summary`, `graph_status`, `get_graph_report`, `search_graph`, `search_text`, `get_node`, `get_neighbors`, `shortest_path`, `impact_analysis`, `suggest_reading_order`, and `list_entrypoints`.
+
+Focused tool-call examples live in `docs/mcp-tool-examples.md`.
 
 **Note**: `repolens mcp <repo-path>` is intended to be launched by an MCP client. It is not an interactive command. Running it manually should block silently while waiting for JSON-RPC messages on stdin.
 
 ### OpenCode Example
 
-An OpenCode MCP example is provided at `docs/opencode-mcp.example.jsonc`. It is intentionally documentation only and is not active repo configuration.
+An OpenCode MCP example is provided at `docs/opencode-mcp.example.jsonc`. It is intentionally documentation only and is not active repo configuration. See `docs/assistant-usage-guide.md` for assistant prompts and operating guidance.
 
 For local contributor development from this repository, create `opencode.json` in the repository root:
 
@@ -209,7 +213,7 @@ The `repolens mcp` command is a stdio MCP server, not an interactive CLI. It sho
 
 ## Security Behavior
 
-RepoLens v0.1 is designed to be safe by default:
+RepoLens v0.2 is designed to be safe by default:
 
 - The provided path is the analysis root; RepoLens does not silently expand to a broader Git root.
 - Scanner and MCP behavior stay inside the provided analysis root.
@@ -222,7 +226,7 @@ RepoLens v0.1 is designed to be safe by default:
 - Deploy or publish-like commands are not recommended for automatic execution.
 - MCP tools are read-only and return bounded responses with freshness, warning, limit, and truncation metadata.
 
-Content secret scanning is out of scope for v0.1. Do not intentionally place secrets in source files and assume generated artifacts are private repo metadata.
+Content secret scanning is limited and conservative. Do not intentionally place secrets in source files and assume generated artifacts are private repo metadata. See `docs/security-and-artifact-privacy.md` for the release-facing safety and privacy guidance.
 
 ## Artifact Privacy
 
@@ -230,9 +234,11 @@ RepoLens writes generated artifacts under `.repolens/` in the analyzed repositor
 
 Treat `.repolens/` as local cache output, not source. Do not commit, publish, upload, or share it unless you have reviewed the contents and are comfortable exposing repository metadata. The artifact directory includes its own ignore behavior when generated, and this repository also excludes `.repolens/` from Docker build context.
 
+Troubleshooting guidance lives in `docs/troubleshooting.md`. Known limitations from v0.2 dogfooding live in `docs/known-limitations.md`.
+
 ## Configuration Samples
 
-RepoLens v0.1 does not require a project config file. The effective scan policy is the built-in local-first policy: path containment, `.gitignore`, default excludes, size caps, binary detection, generated-file hints, and secret path patterns.
+RepoLens v0.2 does not require a project config file. The effective scan policy is the built-in local-first policy: path containment, `.gitignore`, default excludes, size caps, binary detection, generated-file hints, and secret path patterns.
 
 Minimal command configuration is just the target path:
 
@@ -259,7 +265,7 @@ Before editing, call impact_analysis for the file, symbol, or package you plan t
 
 ## Release Readiness
 
-Manual dogfooding and release-prep smoke guidance lives in `docs/release-readiness.md`. The short gate is:
+Manual dogfooding and release-prep smoke guidance lives in `docs/release-readiness.md`. The release checklist lives in `docs/release-checklist.md`. The short gate is:
 
 ```bash
 uv run pytest
@@ -276,21 +282,23 @@ Before treating final release-facing docs as complete, a human maintainer must c
 
 - Project and distribution name.
 - License wording and whether to add a license file.
-- PyPI publishing remains deferred for v0.1.
-- Docker registry publishing remains deferred for v0.1.
+- PyPI publishing remains deferred for v0.2.
+- Docker registry publishing remains deferred for v0.2.
 - Final README positioning.
 
 Current docs use `repolens` / RepoLens MCP, mark publishing as deferred, and avoid final legal/license claims.
 
 ## Roadmap
 
-v0.1 promises:
+v0.2 promises:
 
 - Local CLI indexing, update, status, report, raw text search, and read-only stdio MCP serving.
 - Deterministic `.repolens/` graph store and exports.
-- Python, JavaScript, TypeScript, config, command, package, Markdown, comments, docs, and agent guidance indexing within the implemented v0.1 scope.
+- Python, JavaScript, TypeScript, config, command, package, Markdown, comments, docs, and agent guidance indexing within the implemented local-first scope.
 - Incremental staleness classification, structured graph queries, impact analysis, and reading-order queries.
 - Docker support, native install guidance, assistant configuration examples, and release-readiness docs.
+- Standardized MCP envelopes, explicit freshness/truncation/limit metadata, and no whole-source disclosure through MCP tools.
+- Deterministic local-resolution improvements, related-test context, impact grouping, reading-order context, selective update hardening, and redaction/scanner safety improvements within the v0.2 scope.
 
 Deferred features:
 
@@ -303,4 +311,3 @@ Deferred features:
 - Runtime package registry lookups during indexing.
 - Deep semantic call graphs, full TypeScript compiler resolution, Tree-sitter parsing, and Node-based parsers.
 - Dependabot/dependency update automation and contributor pre-commit hook setup.
-

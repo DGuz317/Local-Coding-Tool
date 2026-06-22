@@ -1,0 +1,8 @@
+{
+  "name": "@dog/lib",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

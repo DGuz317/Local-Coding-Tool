@@ -1,12 +1,13 @@
 # RepoLens MCP v0.2 Issue Breakdown
 
-Draft status: Final review complete. Approved to become GitHub issue bodies.
+Draft status: Final review complete. Published as GitHub issues #35 through #54.
 
 Source documents:
 
 - `docs/repolens-v0.2-plan.md`
 - `docs/repolens-v0.2-planning-interview-summary.md`
 - `docs/repolens-v0.2-issue-breakdown-feedback.md`
+- `docs/repolens-v0.2-release-tracker.md`
 - `CONTEXT.md`
 - `docs/adr/0001-standardize-mcp-envelope.md`
 - `docs/adr/0002-edge-contract-storage.md`
@@ -22,6 +23,11 @@ Label taxonomy:
 - Version: `v0.2`
 - Priority: `P0`, `P1`, `P2`
 - Areas: `area:graph`, `area:resolver`, `area:mcp`, `area:update`, `area:security`, `area:package-workspace`, `area:dogfood`, `area:ci`, `area:docs`
+
+Published tracker:
+
+- #35 RepoLens MCP v0.2 roadmap and release criteria: https://github.com/DGuz317/Local-Coding-Tool/issues/35
+- Local release tracker: `docs/repolens-v0.2-release-tracker.md`
 
 ## Proposed Slices
 

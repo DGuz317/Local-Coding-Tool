@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from collections import Counter
@@ -17,28 +18,32 @@ from repolens.config_index import (
     CONFIG_EXTRACTOR_VERSION,
     ConfigIndex,
     config_file_node_id,
-    extract_config_index,
 )
 from repolens.documentation_index import (
     DOCUMENTATION_EXTRACTOR_VERSION,
     DocumentationIndex,
     documentation_file_node_id,
-    extract_documentation_index,
 )
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     JAVASCRIPT_SOURCE_SUFFIXES,
     JavaScriptIndex,
-    extract_javascript_index,
     javascript_module_node_id,
     javascript_package_node_id,
 )
+from repolens.parser_backends import (
+    ParserBackendOption,
+    ParserIndexes,
+    extract_with_parser_backend,
+)
 from repolens.python_index import (
     PYTHON_EXTRACTOR_VERSION,
+    PythonImportFact,
     PythonIndex,
-    extract_python_index,
+    PythonModuleFact,
     python_package_node_id,
 )
+from repolens.redaction import redact_command, redact_payload
 from repolens.scanner import (
     ARTIFACT_DIR_NAME,
     DEFAULT_MAX_FILE_SIZE_BYTES,
@@ -49,7 +54,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 8
+GRAPH_SCHEMA_VERSION = 12
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -90,6 +95,8 @@ HASH_FIELDS = (
     "line_range",
 )
 PARSER_ERROR_WARNING = "Parser errors detected in the live graph overlay."
+MAX_EDGE_EVIDENCE_ITEMS = 20
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 class GraphStoreError(RuntimeError):
@@ -98,6 +105,10 @@ class GraphStoreError(RuntimeError):
 
 class GraphExportError(RuntimeError):
     """Raised when graph exports cannot be written."""
+
+
+class GraphValidationError(GraphStoreError):
+    """Raised when hard graph invariants fail before artifact replacement."""
 
 
 @dataclass(frozen=True)
@@ -200,12 +211,40 @@ class FileChange:
 
 
 @dataclass(frozen=True)
-class _ExtractedIndexes:
-    python: PythonIndex
-    javascript: JavaScriptIndex
-    config: ConfigIndex
-    documentation: DocumentationIndex
-    parser_status_by_path: dict[str, str]
+class SelectiveUpdatePlan:
+    """File-level update plan derived from a safe freshness inspection."""
+
+    mode: str
+    safe: bool
+    reason: str
+    changed_paths: tuple[str, ...]
+    new_paths: tuple[str, ...]
+    deleted_paths: tuple[str, ...]
+    parse_error_paths: tuple[str, ...]
+    skipped_paths: tuple[str, ...]
+    reused_paths: tuple[str, ...]
+    reparse_paths: tuple[str, ...]
+    stale_cleanup_paths: tuple[str, ...]
+    cross_file_edge_recompute_paths: tuple[str, ...]
+
+    def to_cli_data(self) -> dict[str, object]:
+        return {
+            "changed_paths": list(self.changed_paths),
+            "cross_file_edge_recompute_paths": list(self.cross_file_edge_recompute_paths),
+            "deleted_paths": list(self.deleted_paths),
+            "mode": self.mode,
+            "new_paths": list(self.new_paths),
+            "parse_error_paths": list(self.parse_error_paths),
+            "reason": self.reason,
+            "reparse_paths": list(self.reparse_paths),
+            "reused_paths": list(self.reused_paths),
+            "safe": self.safe,
+            "skipped_paths": list(self.skipped_paths),
+            "stale_cleanup_paths": list(self.stale_cleanup_paths),
+        }
+
+
+_ExtractedIndexes = ParserIndexes
 
 
 @dataclass(frozen=True)
@@ -226,15 +265,122 @@ class _GitMetadata:
         return {"branch": self.branch, "commit": self.commit, "detected": self.detected}
 
 
+@dataclass(frozen=True)
+class _EdgeFact:
+    source_id: str
+    target_id: str
+    kind: str
+    metadata: dict[str, Any]
+    confidence: str
+    resolution_strategy: str
+    evidence: list[dict[str, Any]]
+
+
 def rebuild_graph_artifacts(
     root: Path,
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> tuple[str, ...]:
     """Rebuild the graph store and exports from one safe discovery result."""
-    build_graph_store(root, scan, file_changes=file_changes)
+    build_graph_store(root, scan, file_changes=file_changes, parser_backend=parser_backend)
     return export_graph_artifacts(root)
+
+
+def plan_selective_update(
+    status: GraphArtifactsStatus,
+    scan: ScanResult,
+) -> SelectiveUpdatePlan:
+    """Plan a safe file-level update from current freshness information."""
+    skipped_paths = tuple(
+        sorted(skipped.path for skipped in scan.skipped if skipped.path != ARTIFACT_DIR_NAME)
+    )
+    if status.reason == "missing_graph_artifacts":
+        return SelectiveUpdatePlan(
+            mode="initialized",
+            safe=False,
+            reason="missing_graph_artifacts",
+            changed_paths=(),
+            new_paths=(),
+            deleted_paths=(),
+            parse_error_paths=(),
+            skipped_paths=skipped_paths,
+            reused_paths=(),
+            reparse_paths=tuple(sorted(file.path for file in scan.files)),
+            stale_cleanup_paths=(),
+            cross_file_edge_recompute_paths=tuple(sorted(file.path for file in scan.files)),
+        )
+    if status.status == "rebuild_required" or status.freshness is None:
+        return SelectiveUpdatePlan(
+            mode="full_rebuild",
+            safe=False,
+            reason=status.reason,
+            changed_paths=(),
+            new_paths=(),
+            deleted_paths=(),
+            parse_error_paths=(),
+            skipped_paths=skipped_paths,
+            reused_paths=(),
+            reparse_paths=tuple(sorted(file.path for file in scan.files)),
+            stale_cleanup_paths=(),
+            cross_file_edge_recompute_paths=tuple(sorted(file.path for file in scan.files)),
+        )
+
+    changes_by_type: dict[str, list[str]] = {change_type: [] for change_type in CHANGE_TYPES}
+    for change in status.file_changes:
+        changes_by_type.setdefault(change.change_type, []).append(change.path)
+
+    changed_paths = tuple(
+        sorted(change.path for change in status.file_changes if change.change_type != "no_change")
+    )
+    new_paths = tuple(sorted(changes_by_type.get("new", ())))
+    deleted_paths = tuple(sorted(changes_by_type.get("deleted", ())))
+    parse_error_paths = tuple(sorted(changes_by_type.get("parse_error", ())))
+    stale_cleanup_paths = tuple(sorted((*deleted_paths, *parse_error_paths)))
+    reparse_paths = tuple(sorted(path for path in changed_paths if path not in set(deleted_paths)))
+    reused_paths = tuple(sorted(changes_by_type.get("no_change", ())))
+
+    edge_recompute_paths = set(reparse_paths)
+    edge_recompute_paths.update(deleted_paths)
+    for change in status.file_changes:
+        signals = change.secondary_signals
+        if signals.get("dependency_changed") or signals.get("graph_changed"):
+            edge_recompute_paths.add(change.path)
+
+    return SelectiveUpdatePlan(
+        mode="selective",
+        safe=True,
+        reason="fresh" if not changed_paths else "file_changes_detected",
+        changed_paths=changed_paths,
+        new_paths=new_paths,
+        deleted_paths=deleted_paths,
+        parse_error_paths=parse_error_paths,
+        skipped_paths=skipped_paths,
+        reused_paths=reused_paths,
+        reparse_paths=reparse_paths,
+        stale_cleanup_paths=stale_cleanup_paths,
+        cross_file_edge_recompute_paths=tuple(sorted(edge_recompute_paths)),
+    )
+
+
+def replace_graph_artifacts_selectively(
+    root: Path,
+    scan: ScanResult,
+    plan: SelectiveUpdatePlan,
+    *,
+    file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
+) -> tuple[str, ...]:
+    """Replace graph artifacts through the validated selective update path."""
+    if not plan.safe:
+        raise GraphStoreError("selective_update_not_safe")
+    return rebuild_graph_artifacts(
+        root,
+        scan,
+        file_changes=file_changes,
+        parser_backend=parser_backend,
+    )
 
 
 def build_graph_store(
@@ -242,6 +388,7 @@ def build_graph_store(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
+    parser_backend: ParserBackendOption = "stable",
 ) -> Path:
     """Build ``graph.sqlite`` in a temporary file and replace it after success."""
     artifact_dir = root / ARTIFACT_DIR_NAME
@@ -261,6 +408,7 @@ def build_graph_store(
 
         with sqlite3.connect(temp_path) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
+            connection.row_factory = sqlite3.Row
             _create_schema(connection)
             _populate_store(
                 connection,
@@ -268,11 +416,18 @@ def build_graph_store(
                 scan,
                 indexed_at_utc=_utc_now(),
                 file_changes=file_changes,
+                parser_backend=parser_backend,
             )
+            _finalize_graph_metadata(connection)
+            validation = _validate_graph_store(connection)
+            if validation["hard_failures"]:
+                raise GraphValidationError("graph_validation_failed")
             connection.commit()
             _ensure_supported_schema(connection)
 
         os.replace(temp_path, target)
+    except GraphValidationError:
+        raise
     except (OSError, sqlite3.Error) as exc:
         raise GraphStoreError("graph_store_rebuild_failed") from exc
     finally:
@@ -409,7 +564,7 @@ def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
             ),
         )
 
-    warnings = _freshness_warnings(file_changes)
+    warnings = (*_metadata_quality_warnings(stored_metadata), *_freshness_warnings(file_changes))
     return GraphArtifactsStatus(
         status=str(freshness["status"]),
         reason=str(freshness["reason"]),
@@ -477,6 +632,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             source_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             target_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
             kind TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            resolution_strategy TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
             metadata_json TEXT NOT NULL
         ) WITHOUT ROWID;
 
@@ -649,6 +807,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE
         ) WITHOUT ROWID;
 
+        CREATE TABLE config_workspaces (
+            id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+            ecosystem TEXT NOT NULL,
+            path TEXT NOT NULL,
+            source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            pattern TEXT NOT NULL,
+            evidence_kind TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE config_lockfiles (
             id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
             path TEXT NOT NULL UNIQUE REFERENCES files(path) ON DELETE CASCADE,
@@ -665,7 +832,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             command TEXT NOT NULL,
             purpose TEXT NOT NULL,
             not_run INTEGER NOT NULL,
-            auto_run_recommended INTEGER NOT NULL
+            auto_run_recommended INTEGER NOT NULL,
+            group_path TEXT NOT NULL,
+            group_kind TEXT NOT NULL,
+            group_source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE
         ) WITHOUT ROWID;
 
         CREATE TABLE config_entrypoints (
@@ -781,11 +951,12 @@ def _populate_store(
     *,
     indexed_at_utc: str,
     file_changes: tuple[FileChange, ...],
+    parser_backend: ParserBackendOption = "stable",
 ) -> None:
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
     skipped_paths = tuple(sorted(scan.skipped, key=lambda skipped_path: skipped_path.path))
-    extracted = _extract_indexes(root, files)
+    extracted = _extract_indexes(root, files, parser_backend=parser_backend)
     file_states_by_path = _file_states_by_path(
         root,
         files,
@@ -920,24 +1091,25 @@ def _populate_store(
     )
 
 
-def _extract_indexes(root: Path, files: tuple[ScannedFile, ...]) -> _ExtractedIndexes:
-    python_index = extract_python_index(root, files)
-    javascript_index = extract_javascript_index(root, files)
-    config_index = extract_config_index(root, files)
-    documentation_index = extract_documentation_index(root, files)
-    parser_status_by_path = {
-        **python_index.parser_status_by_path,
-        **javascript_index.parser_status_by_path,
-        **config_index.parser_status_by_path,
-        **documentation_index.parser_status_by_path,
-    }
-    return _ExtractedIndexes(
-        python=python_index,
-        javascript=javascript_index,
-        config=config_index,
-        documentation=documentation_index,
-        parser_status_by_path=parser_status_by_path,
+def _finalize_graph_metadata(connection: sqlite3.Connection) -> None:
+    quality_warnings = _quality_warnings(connection)
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        ("graph_quality_warnings", _json_value(quality_warnings)),
     )
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        ("canonical_graph_hash", _canonical_graph_hash(connection)),
+    )
+
+
+def _extract_indexes(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+    *,
+    parser_backend: ParserBackendOption = "stable",
+) -> _ExtractedIndexes:
+    return extract_with_parser_backend(root, files, parser_backend=parser_backend)
 
 
 def _file_states_by_path(
@@ -1206,6 +1378,17 @@ def _file_signatures_by_path(
                 "path": package_root.path,
             },
         )
+    for workspace in extracted.config.workspaces:
+        add_graph(
+            workspace.source_path,
+            "config_workspace",
+            {
+                "ecosystem": workspace.ecosystem,
+                "evidence_kind": workspace.evidence_kind,
+                "path": workspace.path,
+                "pattern": workspace.pattern,
+            },
+        )
     for lockfile in extracted.config.lockfiles:
         add_graph(
             lockfile.path,
@@ -1227,6 +1410,9 @@ def _file_signatures_by_path(
                 "not_run": command.not_run,
                 "purpose": command.purpose,
                 "source": command.source,
+                "group_kind": command.group_kind,
+                "group_path": command.group_path,
+                "group_source_path": command.group_source_path,
             },
         )
     for entrypoint in extracted.config.entrypoints:
@@ -1583,6 +1769,26 @@ def _insert_nodes(
         "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
         (
             (
+                workspace.id,
+                "WorkspaceBoundary",
+                workspace.path,
+                workspace.path,
+                _metadata_json(
+                    {
+                        "ecosystem": workspace.ecosystem,
+                        "evidence_kind": workspace.evidence_kind,
+                        "pattern": workspace.pattern,
+                        "source_path": workspace.source_path,
+                    }
+                ),
+            )
+            for workspace in config_index.workspaces
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO nodes(id, kind, path, label, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            (
                 lockfile.id,
                 "Lockfile",
                 lockfile.path,
@@ -1613,6 +1819,9 @@ def _insert_nodes(
                         "not_run": command.not_run,
                         "purpose": command.purpose,
                         "source": command.source,
+                        "group_kind": command.group_kind,
+                        "group_path": command.group_path,
+                        "group_source_path": command.group_source_path,
                     }
                 ),
             )
@@ -2221,6 +2430,23 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
     )
     connection.executemany(
         """
+        INSERT INTO config_workspaces(id, ecosystem, path, source_path, pattern, evidence_kind)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                workspace.id,
+                workspace.ecosystem,
+                workspace.path,
+                workspace.source_path,
+                workspace.pattern,
+                workspace.evidence_kind,
+            )
+            for workspace in config_index.workspaces
+        ),
+    )
+    connection.executemany(
+        """
         INSERT INTO config_lockfiles(id, path, manager, format, ecosystem)
         VALUES (?, ?, ?, ?, ?)
         """,
@@ -2245,9 +2471,12 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
             command,
             purpose,
             not_run,
-            auto_run_recommended
+            auto_run_recommended,
+            group_path,
+            group_kind,
+            group_source_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2255,10 +2484,13 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
                 command.path,
                 command.source,
                 command.name,
-                command.command,
+                redact_command(command.command),
                 command.purpose,
                 int(command.not_run),
                 int(command.auto_run_recommended),
+                command.group_path,
+                command.group_kind,
+                command.group_source_path,
             )
             for command in config_index.commands
         ),
@@ -2489,15 +2721,32 @@ def _insert_edges(
     config_index: ConfigIndex,
     documentation_index: DocumentationIndex,
 ) -> None:
-    edge_rows: list[tuple[str, str, str, dict[str, Any]]] = []
+    edge_rows: list[_EdgeFact] = []
 
     def add_edge(
         source_id: str,
         target_id: str,
         kind: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        confidence: str = "high",
+        resolution_strategy: str = "direct",
+        evidence: list[dict[str, Any]] | None = None,
     ) -> None:
-        edge_rows.append((source_id, target_id, kind, metadata or {}))
+        edge_metadata = metadata or {}
+        edge_rows.append(
+            _EdgeFact(
+                source_id=source_id,
+                target_id=target_id,
+                kind=kind,
+                metadata=edge_metadata,
+                confidence=confidence,
+                resolution_strategy=resolution_strategy,
+                evidence=evidence
+                if evidence is not None
+                else _edge_evidence_from_metadata(edge_metadata),
+            )
+        )
 
     add_edge(REPOSITORY_ID, ROOT_DIRECTORY_ID, "CONTAINS")
     for directory in directories:
@@ -2679,6 +2928,18 @@ def _insert_edges(
             "DECLARES_PACKAGE_ROOT",
             {"ecosystem": package_root.ecosystem, "path": package_root.path},
         )
+    for workspace in config_index.workspaces:
+        add_edge(
+            config_source_node_id(workspace.source_path),
+            workspace.id,
+            "DECLARES_WORKSPACE",
+            {
+                "ecosystem": workspace.ecosystem,
+                "evidence_kind": workspace.evidence_kind,
+                "path": workspace.path,
+                "pattern": workspace.pattern,
+            },
+        )
     for lockfile in config_index.lockfiles:
         add_edge(
             config_source_node_id(lockfile.path),
@@ -2693,6 +2954,9 @@ def _insert_edges(
             "DECLARES_COMMAND",
             {
                 "auto_run_recommended": command.auto_run_recommended,
+                "group_kind": command.group_kind,
+                "group_path": command.group_path,
+                "group_source_path": command.group_source_path,
                 "not_run": command.not_run,
                 "purpose": command.purpose,
                 "source": command.source,
@@ -2713,9 +2977,33 @@ def _insert_edges(
             {"message": config_error.message},
         )
 
+    python_modules_by_name = _python_modules_by_name(python_index)
+    python_modules_by_node_id = {module.node_id: module for module in python_index.modules}
+    python_local_import_edges: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     import_edges: dict[tuple[str, str, str, str], list[int]] = {}
     import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     for python_import in python_index.imports:
+        resolved_module = _resolve_python_local_import(
+            python_import,
+            modules_by_name=python_modules_by_name,
+            modules_by_node_id=python_modules_by_node_id,
+        )
+        if resolved_module is not None:
+            strategy = "local_import"
+            resolved_key = (
+                python_import.module_node_id,
+                resolved_module.node_id,
+                resolved_module.path,
+                strategy,
+            )
+            python_local_import_edges.setdefault(resolved_key, []).append(
+                {
+                    "id": python_import.id,
+                    "imported_name": python_import.imported_name,
+                    "line": python_import.line,
+                    "module": python_import.module,
+                }
+            )
         if not python_import.root_name:
             continue
         package_id = python_package_node_id(python_import.root_name, python_import.classification)
@@ -2741,11 +3029,42 @@ def _insert_edges(
                 "lines": sorted(set(lines)),
                 "root_name": root_name,
             },
+            resolution_strategy=_import_resolution_strategy(classification),
+        )
+
+    for (source_id, target_id, resolved_path, strategy), facts in sorted(
+        python_local_import_edges.items()
+    ):
+        add_edge(
+            source_id,
+            target_id,
+            "IMPORTS",
+            {
+                "classification": "local_resolved",
+                "import_ids": sorted(fact["id"] for fact in facts),
+                "lines": sorted({fact["line"] for fact in facts}),
+                "resolved_path": resolved_path,
+            },
+            confidence="high",
+            resolution_strategy=strategy,
+            evidence=[
+                {
+                    "import_id": fact["id"],
+                    "imported_name": fact["imported_name"],
+                    "kind": "python_import",
+                    "line": fact["line"],
+                    "module": fact["module"],
+                    "resolved_path": resolved_path,
+                }
+                for fact in sorted(facts, key=lambda item: (item["line"], item["id"]))
+            ],
         )
 
     javascript_import_edges: dict[tuple[str, str, str, str], list[int]] = {}
     javascript_import_edge_ids: dict[tuple[str, str, str, str], list[str]] = {}
     javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
+    javascript_import_statuses: dict[tuple[str, str, str, str], set[str]] = {}
+    javascript_import_facts: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for javascript_import in javascript_index.imports:
         if javascript_import.resolved_path is not None:
             target_id = javascript_module_node_id(javascript_import.resolved_path)
@@ -2763,6 +3082,19 @@ def _insert_edges(
             )
             javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
                 javascript_import.specifier
+            )
+            javascript_import_statuses.setdefault(javascript_import_key, set()).add(
+                javascript_import.resolution_status
+            )
+            javascript_import_facts.setdefault(javascript_import_key, []).append(
+                {
+                    "id": javascript_import.id,
+                    "kind": javascript_import.kind,
+                    "line": javascript_import.line,
+                    "resolved_path": javascript_import.resolved_path,
+                    "resolution_status": javascript_import.resolution_status,
+                    "specifier": javascript_import.specifier,
+                }
             )
             continue
         if javascript_import.root_name is None:
@@ -2782,6 +3114,18 @@ def _insert_edges(
         )
         javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
             javascript_import.specifier
+        )
+        javascript_import_statuses.setdefault(javascript_import_key, set()).add(
+            javascript_import.resolution_status
+        )
+        javascript_import_facts.setdefault(javascript_import_key, []).append(
+            {
+                "id": javascript_import.id,
+                "kind": javascript_import.kind,
+                "line": javascript_import.line,
+                "resolution_status": javascript_import.resolution_status,
+                "specifier": javascript_import.specifier,
+            }
         )
 
     for (source_id, target_id, target_name, classification), lines in sorted(
@@ -2806,6 +3150,17 @@ def _insert_edges(
             target_id,
             "IMPORTS",
             metadata,
+            confidence=_javascript_import_confidence(
+                classification,
+                javascript_import_statuses[(source_id, target_id, target_name, classification)],
+            ),
+            resolution_strategy=_javascript_import_resolution_strategy(
+                classification,
+                javascript_import_statuses[(source_id, target_id, target_name, classification)],
+            ),
+            evidence=_javascript_import_evidence(
+                javascript_import_facts[(source_id, target_id, target_name, classification)]
+            ),
         )
 
     call_edges: dict[tuple[str, str, str], list[int]] = {}
@@ -2819,23 +3174,384 @@ def _insert_edges(
             target_id,
             "CALLS",
             {"callee_name": callee_name, "confidence": "high", "lines": sorted(set(lines))},
+            resolution_strategy="same_file_symbol",
         )
 
+    path_by_node_id = _analysis_path_by_node_id(files, python_index, javascript_index)
+    analysis_node_id_by_path = _analysis_node_id_by_path(files, python_index, javascript_index)
+    source_paths = sorted(
+        path
+        for path in analysis_node_id_by_path
+        if _is_source_path(path) and not _is_test_path(path)
+    )
+    test_paths = sorted(path for path in analysis_node_id_by_path if _is_test_path(path))
+
+    for edge in list(edge_rows):
+        if edge.kind != "IMPORTS":
+            continue
+        test_path = path_by_node_id.get(edge.source_id)
+        source_path = path_by_node_id.get(edge.target_id)
+        if test_path is None or source_path is None:
+            continue
+        if not _is_test_path(test_path) or _is_test_path(source_path):
+            continue
+        add_edge(
+            edge.target_id,
+            edge.source_id,
+            "RELATED_TEST",
+            {
+                "reason": "direct_import_related_test",
+                "source_path": source_path,
+                "test_path": test_path,
+            },
+            confidence="high",
+            resolution_strategy="direct_import",
+            evidence=[_related_test_direct_import_evidence(edge, source_path, test_path)],
+        )
+
+    for source_path in source_paths:
+        source_node_id = analysis_node_id_by_path[source_path]
+        for test_path in test_paths:
+            matched_tokens = _shared_path_tokens(source_path, test_path)
+            if not matched_tokens:
+                continue
+            add_edge(
+                source_node_id,
+                analysis_node_id_by_path[test_path],
+                "RELATED_TEST",
+                {
+                    "matched_tokens": matched_tokens,
+                    "reason": "path_name_similarity",
+                    "source_path": source_path,
+                    "test_path": test_path,
+                },
+                confidence="medium",
+                resolution_strategy="path_name_similarity",
+                evidence=[
+                    {
+                        "kind": "related_test_path_name_similarity",
+                        "matched_tokens": matched_tokens,
+                        "source_path": source_path,
+                        "test_path": test_path,
+                    }
+                ],
+            )
+
+    normalized_edges = _normalize_edge_facts(edge_rows)
     connection.executemany(
-        "INSERT INTO edges(id, source_id, target_id, kind, metadata_json) VALUES (?, ?, ?, ?, ?)",
+        """
+        INSERT INTO edges(
+            id,
+            source_id,
+            target_id,
+            kind,
+            confidence,
+            resolution_strategy,
+            evidence_json,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             (
-                _edge_id(kind, source_id, target_id),
-                source_id,
-                target_id,
-                kind,
-                _metadata_json(metadata),
+                _edge_id(edge.kind, edge.source_id, edge.target_id),
+                edge.source_id,
+                edge.target_id,
+                edge.kind,
+                edge.confidence,
+                edge.resolution_strategy,
+                _json_value(edge.evidence),
+                _metadata_json(edge.metadata),
             )
-            for source_id, target_id, kind, metadata in sorted(
-                edge_rows, key=lambda row: (row[0], row[2], row[1])
-            )
+            for edge in normalized_edges
         ),
     )
+
+
+def _normalize_edge_facts(edge_facts: list[_EdgeFact]) -> tuple[_EdgeFact, ...]:
+    grouped: dict[tuple[str, str, str], list[_EdgeFact]] = {}
+    for edge in edge_facts:
+        grouped.setdefault((edge.source_id, edge.target_id, edge.kind), []).append(edge)
+
+    normalized = []
+    for (source_id, target_id, kind), duplicates in grouped.items():
+        normalized.append(
+            _EdgeFact(
+                source_id=source_id,
+                target_id=target_id,
+                kind=kind,
+                metadata=_merge_edge_metadata(edge.metadata for edge in duplicates),
+                confidence=_merge_edge_confidence(edge.confidence for edge in duplicates),
+                resolution_strategy=_merge_resolution_strategy(
+                    edge.resolution_strategy for edge in duplicates
+                ),
+                evidence=_merge_edge_evidence(edge.evidence for edge in duplicates),
+            )
+        )
+    return tuple(sorted(normalized, key=lambda edge: (edge.source_id, edge.kind, edge.target_id)))
+
+
+def _merge_edge_metadata(values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for metadata in values:
+        for key, value in metadata.items():
+            if key not in merged:
+                merged[key] = value
+                continue
+            merged[key] = _merge_metadata_value(merged[key], value)
+    return {key: _sort_json_like(value) for key, value in sorted(merged.items())}
+
+
+def _merge_metadata_value(left: Any, right: Any) -> Any:
+    if left == right:
+        return left
+    if isinstance(left, list) and isinstance(right, list):
+        return _dedupe_json_like([*left, *right])
+    if isinstance(left, list):
+        return _dedupe_json_like([*left, right])
+    if isinstance(right, list):
+        return _dedupe_json_like([left, *right])
+    return _dedupe_json_like([left, right])
+
+
+def _merge_edge_confidence(values: Any) -> str:
+    return max(values, key=lambda value: (CONFIDENCE_RANK.get(str(value), -1), str(value)))
+
+
+def _merge_resolution_strategy(values: Any) -> str:
+    unique = sorted({str(value) for value in values})
+    return unique[0] if len(unique) == 1 else "+".join(unique)
+
+
+def _merge_edge_evidence(values: Any) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for items in values:
+        evidence.extend(items)
+    return _dedupe_json_like(evidence)[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _edge_evidence_from_metadata(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = []
+    if isinstance(metadata.get("line"), int):
+        evidence.append({"kind": "line", "line": metadata["line"]})
+    lines = metadata.get("lines")
+    if isinstance(lines, list):
+        for line in lines:
+            if isinstance(line, int):
+                evidence.append({"kind": "line", "line": line})
+    return _dedupe_json_like(evidence)[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _analysis_path_by_node_id(
+    files: tuple[Any, ...], python_index: PythonIndex, javascript_index: JavaScriptIndex
+) -> dict[str, str]:
+    paths = {_file_node_id(scanned_file.path): scanned_file.path for scanned_file in files}
+    paths.update({module.node_id: module.path for module in python_index.modules})
+    paths.update({module.node_id: module.path for module in javascript_index.modules})
+    return paths
+
+
+def _analysis_node_id_by_path(
+    files: tuple[Any, ...], python_index: PythonIndex, javascript_index: JavaScriptIndex
+) -> dict[str, str]:
+    node_ids = {scanned_file.path: _file_node_id(scanned_file.path) for scanned_file in files}
+    node_ids.update({module.path: module.node_id for module in python_index.modules})
+    node_ids.update({module.path: module.node_id for module in javascript_index.modules})
+    return node_ids
+
+
+def _related_test_direct_import_evidence(
+    edge: _EdgeFact, source_path: str, test_path: str
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "import_edge_kind": edge.kind,
+        "kind": "related_test_direct_import",
+        "source_path": source_path,
+        "test_path": test_path,
+    }
+    lines = edge.metadata.get("lines")
+    if isinstance(lines, list) and lines:
+        evidence["line"] = lines[0]
+        evidence["lines"] = lines[:MAX_EDGE_EVIDENCE_ITEMS]
+    import_ids = edge.metadata.get("import_ids")
+    if isinstance(import_ids, list) and import_ids:
+        evidence["import_ids"] = import_ids[:MAX_EDGE_EVIDENCE_ITEMS]
+    specifiers = edge.metadata.get("specifiers")
+    if isinstance(specifiers, list) and specifiers:
+        evidence["specifiers"] = specifiers[:MAX_EDGE_EVIDENCE_ITEMS]
+    return evidence
+
+
+def _is_test_path(path: str) -> bool:
+    pure_path = PurePosixPath(path)
+    parts = tuple(part.casefold() for part in pure_path.parts)
+    stem_tokens = set(_meaningful_path_tokens(pure_path.stem))
+    return (
+        any(part in {"test", "tests", "spec", "specs"} for part in parts)
+        or pure_path.name.casefold().startswith("test_")
+        or pure_path.stem.casefold().endswith((".test", ".spec", "_test", "_spec"))
+        or bool(stem_tokens & {"spec", "test", "tests"})
+    )
+
+
+def _is_source_path(path: str) -> bool:
+    suffix = PurePosixPath(path).suffix.casefold()
+    return suffix == ".py" or suffix in JAVASCRIPT_SOURCE_SUFFIXES
+
+
+def _shared_path_tokens(source_path: str, candidate_path: str) -> list[str]:
+    source_name_tokens = set(_meaningful_path_tokens(PurePosixPath(source_path).stem))
+    candidate_tokens = set(_meaningful_path_tokens(candidate_path))
+    ignored = {"index", "source", "src", "spec", "test", "tests"}
+    return sorted((source_name_tokens - ignored) & (candidate_tokens - ignored))
+
+
+def _meaningful_path_tokens(value: str) -> tuple[str, ...]:
+    tokens = []
+    for token in _tokens(value):
+        normalized = token[:-1] if len(token) > 3 and token.endswith("s") else token
+        tokens.append(normalized)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9]+", value.replace("_", " ").replace("-", " "))
+        if token
+    )
+
+
+def _import_resolution_strategy(classification: str) -> str:
+    if classification in {"node_builtin", "standard_library", "stdlib"}:
+        return "standard_library_import"
+    if classification == "third_party":
+        return "external_import"
+    if classification in {"local", "local_resolved"}:
+        return "local_import"
+    return "direct"
+
+
+def _python_modules_by_name(python_index: PythonIndex) -> dict[str, list[PythonModuleFact]]:
+    modules_by_name: dict[str, list[PythonModuleFact]] = {}
+    for module in python_index.modules:
+        modules_by_name.setdefault(module.module_name, []).append(module)
+    return modules_by_name
+
+
+def _resolve_python_local_import(
+    python_import: PythonImportFact,
+    *,
+    modules_by_name: dict[str, list[PythonModuleFact]],
+    modules_by_node_id: dict[str, PythonModuleFact],
+) -> PythonModuleFact | None:
+    if python_import.classification != "local":
+        return None
+
+    for target_name in _python_import_target_names(python_import, modules_by_node_id):
+        matches = modules_by_name.get(target_name, [])
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+    return None
+
+
+def _python_import_target_names(
+    python_import: PythonImportFact,
+    modules_by_node_id: dict[str, PythonModuleFact],
+) -> tuple[str, ...]:
+    if python_import.kind == "import" and python_import.level == 0:
+        return (python_import.module,)
+
+    if python_import.level > 0:
+        source_module = modules_by_node_id.get(python_import.module_node_id)
+        if source_module is None:
+            return ()
+        base_parts = _python_relative_base_parts(
+            source_module.module_name,
+            source_module.path,
+            python_import.level,
+        )
+        if base_parts is None:
+            return ()
+        module_parts = tuple(part for part in python_import.module.split(".") if part)
+        base_name = ".".join((*base_parts, *module_parts))
+    else:
+        base_name = python_import.module
+
+    candidates: list[str] = []
+    if python_import.imported_name and python_import.imported_name != "*":
+        candidates.append(
+            f"{base_name}.{python_import.imported_name}"
+            if base_name
+            else python_import.imported_name
+        )
+    if base_name:
+        candidates.append(base_name)
+    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _python_relative_base_parts(
+    module_name: str,
+    path: str,
+    level: int,
+) -> tuple[str, ...] | None:
+    if path == "__init__.py" or path.endswith("/__init__.py"):
+        package_parts = tuple(module_name.split(".")) if module_name != "__init__" else ()
+    else:
+        package_parts = tuple(module_name.split(".")[:-1])
+    ascend = level - 1
+    if ascend > len(package_parts):
+        return None
+    if ascend == 0:
+        return package_parts
+    return package_parts[:-ascend]
+
+
+def _javascript_import_confidence(classification: str, statuses: set[str]) -> str:
+    if classification == "local_resolved" and "resolved_alias" in statuses:
+        return "medium"
+    return "high"
+
+
+def _javascript_import_resolution_strategy(classification: str, statuses: set[str]) -> str:
+    if classification == "local_resolved":
+        strategies = []
+        if "resolved_alias" in statuses:
+            strategies.append("path_alias_import")
+        if "resolved_relative" in statuses:
+            strategies.append("local_import")
+        return "+".join(sorted(strategies)) if strategies else "local_import"
+    return _import_resolution_strategy(classification)
+
+
+def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "import_id": fact["id"],
+            "kind": "javascript_import",
+            "line": fact["line"],
+            "resolved_path": fact.get("resolved_path"),
+            "resolution_status": fact["resolution_status"],
+            "specifier": fact["specifier"],
+            "statement_kind": fact["kind"],
+        }
+        for fact in sorted(facts, key=lambda item: (item["line"], item["id"]))
+    ][:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _dedupe_json_like(values: list[Any]) -> list[Any]:
+    unique = {_json_value(_sort_json_like(value)): _sort_json_like(value) for value in values}
+    return [unique[key] for key in sorted(unique)]
+
+
+def _sort_json_like(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sort_json_like(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_sort_json_like(item) for item in sorted(value, key=lambda item: _json_value(item))]
+    return value
 
 
 def _load_snapshot(root: Path) -> dict[str, Any]:
@@ -2882,7 +3598,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         edges = _rows(
             connection.execute(
                 """
-                SELECT id, source_id, target_id, kind, metadata_json
+                SELECT
+                    id,
+                    source_id,
+                    target_id,
+                    kind,
+                    confidence,
+                    resolution_strategy,
+                    evidence_json,
+                    metadata_json
                 FROM edges
                 ORDER BY source_id, kind, target_id, id
                 """
@@ -3116,6 +3840,15 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        config_workspaces = _rows(
+            connection.execute(
+                """
+                SELECT id, ecosystem, path, source_path, pattern, evidence_kind
+                FROM config_workspaces
+                ORDER BY ecosystem, path, source_path, pattern
+                """
+            )
+        )
         config_lockfiles = _rows(
             connection.execute(
                 """
@@ -3137,9 +3870,12 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                         command,
                         purpose,
                         not_run,
-                        auto_run_recommended
+                        auto_run_recommended,
+                        group_path,
+                        group_kind,
+                        group_source_path
                     FROM config_commands
-                    ORDER BY path, source, name
+                    ORDER BY group_path, path, source, name
                     """
                 )
             )
@@ -3264,6 +4000,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "config_lockfiles": len(config_lockfiles),
         "config_package_managers": len(config_package_managers),
         "config_package_roots": len(config_package_roots),
+        "config_workspaces": len(config_workspaces),
         "config_packages": len(config_packages),
         "config_parse_errors": len(config_parse_errors),
         "documentation_files": len(documentation_files),
@@ -3303,6 +4040,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "lockfiles": config_lockfiles,
             "package_managers": config_package_managers,
             "package_roots": config_package_roots,
+            "workspaces": config_workspaces,
             "packages": config_packages,
             "parse_errors": config_parse_errors,
         },
@@ -3317,7 +4055,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "skills": skills,
             "tagged_comments": documentation_tagged_comments,
         },
-        "edges": _decode_metadata_rows(edges),
+        "edges": _decode_edge_rows(edges),
         "files": files,
         "javascript": {
             "commonjs_assignments": javascript_commonjs_assignments,
@@ -3352,6 +4090,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "changes": _changes_payload(snapshot["file_changes"]),
         "config": snapshot["config"],
         "counts": snapshot["counts"],
@@ -3367,6 +4106,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema": snapshot["schema"],
         "skipped_paths": snapshot["skipped_paths"],
         "nodes": snapshot["nodes"],
+        "validation": _validation_payload(snapshot),
     }
 
 
@@ -3374,6 +4114,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph-lite",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "counts": snapshot["counts"],
         "files": [
             {
@@ -3395,6 +4136,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
+        "validation": _validation_payload(snapshot),
     }
 
 
@@ -3402,6 +4144,7 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "artifact": "graph-status",
         "artifact_version": snapshot["artifact_version"],
+        "canonical_graph_hash": snapshot["metadata"].get("canonical_graph_hash"),
         "changes": _changes_payload(snapshot["file_changes"]),
         "counts": snapshot["counts"],
         "effective_config_hash": snapshot["metadata"].get("effective_config_hash"),
@@ -3416,6 +4159,14 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         },
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
+        "validation": _validation_payload(snapshot),
+    }
+
+
+def _validation_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hard_failures": [],
+        "quality_warnings": _metadata_quality_warnings(snapshot["metadata"]),
     }
 
 
@@ -3431,6 +4182,9 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "path": command["path"],
                 "purpose": command["purpose"],
                 "source": command["source"],
+                "group_kind": command["group_kind"],
+                "group_path": command["group_path"],
+                "group_source_path": command["group_source_path"],
             }
             for command in config["commands"]
         ],
@@ -3458,6 +4212,7 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "lockfiles": config["lockfiles"],
         "package_managers": config["package_managers"],
         "package_roots": config["package_roots"],
+        "workspaces": config["workspaces"],
         "packages": [
             {
                 "classification": package["classification"],
@@ -3695,6 +4450,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         "Analysis root: .",
         f"Indexed at UTC: {run['indexed_at_utc']}",
         f"Schema version: {snapshot['schema']['version']}",
+        f"Canonical graph hash: {snapshot['metadata'].get('canonical_graph_hash', '')}",
         "",
         "## Summary",
         "",
@@ -5069,6 +5825,183 @@ def _ensure_supported_schema(connection: sqlite3.Connection) -> None:
         raise GraphStoreError("unsupported_schema_version")
 
 
+def _validate_graph_store(connection: sqlite3.Connection) -> dict[str, list[str]]:
+    hard_failures: list[str] = []
+    metadata = _metadata(connection)
+
+    if metadata.get("schema_name") != GRAPH_SCHEMA_NAME:
+        hard_failures.append("invalid_schema_name")
+    if metadata.get("schema_version") != str(GRAPH_SCHEMA_VERSION):
+        hard_failures.append("invalid_schema_version")
+    if metadata.get("canonical_graph_hash") != _canonical_graph_hash(connection):
+        hard_failures.append("canonical_graph_hash_mismatch")
+
+    for table, expected_count in (("repositories", 1), ("runs", 1)):
+        count = _table_count(connection, table)
+        if count != expected_count:
+            hard_failures.append(f"invalid_{table}_count")
+
+    if _table_count(connection, "nodes") == 0:
+        hard_failures.append("missing_nodes")
+
+    invalid_paths = _invalid_repo_paths(connection)
+    if invalid_paths:
+        hard_failures.append("invalid_repo_relative_paths")
+
+    invalid_edge_contracts = _invalid_edge_contracts(connection)
+    if invalid_edge_contracts:
+        hard_failures.append("invalid_edge_contracts")
+
+    return {"hard_failures": hard_failures, "quality_warnings": _quality_warnings(connection)}
+
+
+def _canonical_graph_hash(connection: sqlite3.Connection) -> str:
+    facts: list[dict[str, object]] = []
+
+    facts.extend(
+        {
+            "kind": "directory",
+            "node_id": row["node_id"],
+            "parent_path": row["parent_path"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT path, node_id, parent_path FROM directories ORDER BY path"
+        )
+    )
+    facts.extend(
+        {
+            "graph_hash": row["graph_hash"],
+            "kind": "file",
+            "language": row["language"],
+            "node_id": row["node_id"],
+            "parser_status": row["parser_status"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT path, node_id, language, parser_status, graph_hash FROM files ORDER BY path"
+        )
+    )
+    facts.extend(
+        {
+            "id": row["id"],
+            "kind": "node",
+            "label": row["label"],
+            "metadata": _stable_graph_value(json.loads(row["metadata_json"])),
+            "node_kind": row["kind"],
+            "path": row["path"],
+        }
+        for row in connection.execute(
+            "SELECT id, kind, path, label, metadata_json FROM nodes ORDER BY id"
+        )
+    )
+    facts.extend(
+        {
+            "confidence": row["confidence"],
+            "kind": "edge",
+            "edge_kind": row["kind"],
+            "metadata": _stable_graph_value(json.loads(row["metadata_json"])),
+            "resolution_strategy": row["resolution_strategy"],
+            "source_id": row["source_id"],
+            "target_id": row["target_id"],
+        }
+        for row in connection.execute(
+            """
+            SELECT source_id, target_id, kind, confidence, resolution_strategy, metadata_json
+            FROM edges
+            ORDER BY source_id, kind, target_id
+            """
+        )
+    )
+    return _facts_hash(facts)
+
+
+def _stable_graph_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _stable_graph_value(child)
+            for key, child in sorted(value.items())
+            if key
+            not in {
+                "end_line",
+                "import_ids",
+                "line",
+                "lines",
+                "raw_hash",
+                "size_bytes",
+                "start_line",
+            }
+        }
+    if isinstance(value, list):
+        return [_stable_graph_value(child) for child in value]
+    return value
+
+
+def _quality_warnings(connection: sqlite3.Connection) -> list[str]:
+    warnings: list[str] = []
+    parse_error_count = sum(
+        _table_count(connection, table) for table in ("python_parse_errors", "config_parse_errors")
+    )
+    if parse_error_count:
+        warnings.append(PARSER_ERROR_WARNING)
+    return warnings
+
+
+def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    raw_warnings = metadata.get("graph_quality_warnings")
+    if raw_warnings is None:
+        return []
+    try:
+        warnings = json.loads(raw_warnings)
+    except json.JSONDecodeError:
+        return ["Graph quality warnings metadata is unreadable."]
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings]
+
+
+def _table_count(connection: sqlite3.Connection, table: str) -> int:
+    row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    return int(row[0] if row is not None else 0)
+
+
+def _invalid_repo_paths(connection: sqlite3.Connection) -> list[str]:
+    paths: list[str] = []
+    for table, column in (("directories", "path"), ("files", "path"), ("nodes", "path")):
+        for row in connection.execute(f"SELECT {column} FROM {table} WHERE {column} IS NOT NULL"):
+            path = str(row[0])
+            if (
+                path.startswith("/")
+                or path == ARTIFACT_DIR_NAME
+                or path.startswith(f"{ARTIFACT_DIR_NAME}/")
+            ):
+                paths.append(path)
+            elif ".." in PurePosixPath(path).parts:
+                paths.append(path)
+    return paths
+
+
+def _invalid_edge_contracts(connection: sqlite3.Connection) -> list[str]:
+    invalid: list[str] = []
+    for row in connection.execute(
+        "SELECT id, confidence, resolution_strategy, evidence_json FROM edges ORDER BY id"
+    ):
+        if str(row["confidence"]) not in CONFIDENCE_RANK:
+            invalid.append(str(row["id"]))
+            continue
+        if not str(row["resolution_strategy"]).strip():
+            invalid.append(str(row["id"]))
+            continue
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except json.JSONDecodeError:
+            invalid.append(str(row["id"]))
+            continue
+        if not isinstance(evidence, list):
+            invalid.append(str(row["id"]))
+    return invalid
+
+
 def _read_graph_freshness_inputs(root: Path) -> tuple[dict[str, str], dict[str, FileState]]:
     with sqlite3.connect(root / GRAPH_STORE_PATH) as connection:
         connection.row_factory = sqlite3.Row
@@ -5472,6 +6405,16 @@ def _decode_metadata_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return decoded_rows
 
 
+def _decode_edge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["evidence"] = json.loads(decoded.pop("evidence_json"))
+        decoded["metadata"] = json.loads(decoded.pop("metadata_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
 def _decode_python_symbol_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     decoded_rows = []
     for row in rows:
@@ -5601,7 +6544,9 @@ def _directory_sort_key(path: str) -> tuple[int, str]:
 
 
 def _metadata_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        redact_payload(value), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
 
 
 def _json_value(value: Any) -> str:

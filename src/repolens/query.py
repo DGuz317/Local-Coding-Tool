@@ -66,10 +66,12 @@ _DEFAULT_PATH_EDGE_KINDS = {
     "IMPORTS",
     "LINKS_TO_FILE",
     "MENTIONS_FILE",
+    "RELATED_TEST",
 }
 _EDGE_PRIORITY = {
     "CALLS": 0,
     "IMPORTS": 1,
+    "RELATED_TEST": 1,
     "DECLARES_ENTRYPOINT": 2,
     "DECLARES_COMMAND": 3,
     "DECLARES_PACKAGE": 4,
@@ -101,6 +103,7 @@ _ENTRYPOINT_KIND_PRIORITY = {
     "shebang": 7,
 }
 _IMPACT_EDGE_KINDS = {"CALLS", "IMPORTS"}
+_RELATED_TEST_EDGE_KINDS = {"RELATED_TEST"}
 _RELATED_DOC_EDGE_KINDS = {"LINKS_TO_FILE", "MENTIONS_FILE"}
 _VERIFICATION_PURPOSES = {"lint", "test", "typecheck"}
 _TEST_PATH_TOKENS = {"spec", "test", "tests"}
@@ -148,6 +151,12 @@ _CONFIG_NODE_KINDS = {
 }
 _DOCUMENTATION_NODE_KINDS = {"MarkdownFile", "MarkdownHeading", "Skill"}
 _SOURCE_MODULE_KINDS = {"JavaScriptModule", "PythonModule"}
+_FILE_ANALYSIS_NODE_KINDS = {
+    "ConfigFile",
+    "JavaScriptModule",
+    "MarkdownFile",
+    "PythonModule",
+}
 _FILE_RECOMMENDATION_KIND_PRIORITY = {
     "source": 0,
     "test": 1,
@@ -183,6 +192,7 @@ class _ResolvedNode:
     ambiguous: bool
     confidence: str
     reason: str | None = None
+    resolution_strategy: str | None = None
 
 
 class GraphQueryService:
@@ -426,7 +436,7 @@ class GraphQueryService:
                 prefer_exact_id=node_id is not None,
             )
 
-        if resolved.node is None and not resolved.ambiguous:
+        if resolved.node is None and not resolved.ambiguous and not resolved.candidates:
             return _error_envelope(
                 code="node_not_found",
                 message="No graph node matched the requested reference.",
@@ -443,6 +453,8 @@ class GraphQueryService:
         }
         if resolved.reason is not None:
             data["reason"] = resolved.reason
+        if resolved.resolution_strategy is not None:
+            data["resolution_strategy"] = resolved.resolution_strategy
         return _envelope(
             data=data,
             confidence="low" if resolved.ambiguous else resolved.confidence,
@@ -502,6 +514,10 @@ class GraphQueryService:
                     "neighbors": [],
                     "reference": resolved_reference,
                 }
+                if resolved.reason is not None:
+                    data["reason"] = resolved.reason
+                if resolved.resolution_strategy is not None:
+                    data["resolution_strategy"] = resolved.resolution_strategy
                 return _envelope(
                     data=data,
                     confidence="low",
@@ -701,6 +717,7 @@ class GraphQueryService:
                     "ambiguous": True,
                     "candidates": list(focused_resolution.candidates),
                     "caps": {"max_files": limit},
+                    "candidate_verification_commands": [],
                     "reading_order": [],
                     "task": task,
                     "tokens": list(tokens),
@@ -720,12 +737,19 @@ class GraphQueryService:
                 )
 
             recommendations = self._reading_order_recommendations(connection, task, tokens)
+            candidate_commands = self._reading_order_candidate_verification_commands(
+                connection,
+                tokens=tokens,
+                recommendations=recommendations,
+                max_commands=limit,
+            )
 
         page = recommendations[:limit]
         data = {
             "ambiguous": False,
             "candidates": [],
             "caps": {"max_files": limit},
+            "candidate_verification_commands": candidate_commands,
             "reading_order": page,
             "task": task,
             "tokens": list(tokens),
@@ -793,6 +817,7 @@ class GraphQueryService:
         recommended_action = self._recommended_action()
         base_data: dict[str, Any] = {
             "artifact_dir": ARTIFACT_DIR_NAME,
+            "canonical_graph_hash": None,
             "detected_schema_version": None,
             "fresh": False,
             "missing_artifacts": list(missing_artifacts),
@@ -887,6 +912,7 @@ class GraphQueryService:
                     )
                 )
                 changed_files = self._metadata_file_changes(files)
+                quality_warnings = _metadata_quality_warnings(metadata)
         except sqlite3.Error:
             data = {
                 **base_data,
@@ -911,13 +937,15 @@ class GraphQueryService:
         fresh = not changed_files
         reason = "graph_current" if fresh else "file_metadata_changed"
         status = "available" if fresh else "stale"
-        warnings = (
-            ()
-            if fresh
-            else ("Graph artifacts may be stale; file metadata changed since indexing.",)
-        )
+        warnings = tuple(quality_warnings)
+        if not fresh:
+            warnings = (
+                *warnings,
+                "Graph artifacts may be stale; file metadata changed since indexing.",
+            )
         data = {
             **base_data,
+            "canonical_graph_hash": metadata.get("canonical_graph_hash"),
             "change_counts": change_counts,
             "changed_files": shown_changes,
             "changed_files_truncated": len(changed_files) > max_changed_files,
@@ -991,6 +1019,7 @@ class GraphQueryService:
             "config_commands",
             "config_entrypoints",
             "config_files",
+            "config_workspaces",
             "directories",
             "edges",
             "files",
@@ -1054,9 +1083,20 @@ class GraphQueryService:
         rows = _rows_to_dicts(
             connection.execute(
                 """
-                SELECT id, path, source, name, command, purpose, not_run, auto_run_recommended
+                SELECT
+                    id,
+                    path,
+                    source,
+                    name,
+                    command,
+                    purpose,
+                    not_run,
+                    auto_run_recommended,
+                    group_path,
+                    group_kind,
+                    group_source_path
                 FROM config_commands
-                ORDER BY purpose, source, path, name
+                ORDER BY purpose, group_path, source, path, name
                 """
             )
         )
@@ -1135,6 +1175,7 @@ class GraphQueryService:
                     "evidence": _match_evidence(node, matched_fields),
                     "matched_fields": matched_fields,
                     "node": node,
+                    "resolution_strategy": _resolution_strategy_for_score(score),
                     "score": score,
                 }
             )
@@ -1184,6 +1225,7 @@ class GraphQueryService:
                 candidates=(),
                 ambiguous=False,
                 confidence="high",
+                resolution_strategy="exact_reference",
             )
         if prefer_exact_id:
             return _ResolvedNode(
@@ -1192,6 +1234,7 @@ class GraphQueryService:
                 ambiguous=False,
                 confidence="low",
                 reason="node_id_not_found",
+                resolution_strategy="exact_reference",
             )
 
         normalized_path = self._reference_to_repo_path(reference)
@@ -1214,6 +1257,7 @@ class GraphQueryService:
                     candidates=(),
                     ambiguous=False,
                     confidence="high",
+                    resolution_strategy="exact_reference",
                 )
 
         matches = self._search_matches(connection, reference)
@@ -1224,6 +1268,7 @@ class GraphQueryService:
                 ambiguous=False,
                 confidence="low",
                 reason="not_found",
+                resolution_strategy="structured_metadata_match",
             )
         if _is_ambiguous(matches):
             return _ResolvedNode(
@@ -1232,12 +1277,23 @@ class GraphQueryService:
                 ambiguous=True,
                 confidence="low",
                 reason="ambiguous",
+                resolution_strategy="structured_metadata_match",
+            )
+        if matches[0]["confidence"] == "low":
+            return _ResolvedNode(
+                node=None,
+                candidates=tuple(matches[:5]),
+                ambiguous=False,
+                confidence="low",
+                reason="fuzzy_candidate_only",
+                resolution_strategy="fuzzy_candidate",
             )
         return _ResolvedNode(
             node=matches[0]["node"],
             candidates=(),
             ambiguous=False,
             confidence=matches[0]["confidence"],
+            resolution_strategy="structured_metadata_match",
         )
 
     def _reference_to_repo_path(self, reference: str) -> str | None:
@@ -1371,10 +1427,19 @@ class GraphQueryService:
         if direction in {"incoming", "both"}:
             conditions.append(f"target_id IN ({placeholders})")
             params.extend(sorted_node_ids)
-        sql = (
-            "SELECT id, source_id, target_id, kind, metadata_json FROM edges WHERE "
-            + " OR ".join(f"({condition})" for condition in conditions)
-        )
+        sql = """
+            SELECT
+                id,
+                source_id,
+                target_id,
+                kind,
+                confidence,
+                resolution_strategy,
+                evidence_json,
+                metadata_json
+            FROM edges
+            WHERE
+            """ + " OR ".join(f"({condition})" for condition in conditions)
         if edge_kinds:
             kind_placeholders = ",".join("?" for _ in edge_kinds)
             sql = f"SELECT * FROM ({sql}) WHERE kind IN ({kind_placeholders})"
@@ -1415,6 +1480,26 @@ class GraphQueryService:
             for row in connection.execute("SELECT id FROM nodes WHERE path = ?", (path,))
         }
 
+    def _direct_contains_child_ids(
+        self,
+        connection: sqlite3.Connection,
+        node_ids: set[str],
+    ) -> set[str]:
+        if not node_ids:
+            return set()
+        placeholders = ",".join("?" for _ in node_ids)
+        return {
+            str(row["target_id"])
+            for row in connection.execute(
+                f"""
+                SELECT target_id
+                FROM edges
+                WHERE kind = 'CONTAINS' AND source_id IN ({placeholders})
+                """,
+                sorted(node_ids),
+            )
+        }
+
     def _analysis_node_ids(
         self,
         connection: sqlite3.Connection,
@@ -1422,8 +1507,19 @@ class GraphQueryService:
     ) -> set[str]:
         node_ids = {str(target_node["id"])}
         path = _node_path(target_node)
-        if path is not None:
-            node_ids.update(self._node_ids_for_path(connection, path))
+        if target_node["kind"] in _FILE_ANALYSIS_NODE_KINDS and path is not None:
+            same_path_ids = self._node_ids_for_path(connection, path)
+            file_ids = {
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM nodes WHERE path = ? AND kind = 'File'",
+                    (path,),
+                )
+            }
+            node_ids.update(file_ids)
+            node_ids.update(self._direct_contains_child_ids(connection, file_ids | same_path_ids))
+        else:
+            node_ids.update(self._direct_contains_child_ids(connection, node_ids))
         return node_ids
 
     def _impact_context(
@@ -1517,34 +1613,38 @@ class GraphQueryService:
             related_config_paths=tuple(item["path"] for item in related_configs),
         )
         likely_affected = _dedupe_file_items([*likely_tests, *related_docs, *related_configs])
+        groups = _impact_groups(
+            max_results=max_results,
+            direct_affected=direct_affected,
+            dependencies=dependencies,
+            dependents=dependents,
+            likely_tests=likely_tests,
+            related_docs=related_docs,
+            related_configs=related_configs,
+            risk_comments=risk_comments,
+            candidate_commands=candidate_commands,
+        )
+        rollups = _impact_rollups(groups)
 
         return {
             "ambiguous": False,
-            "candidate_verification_commands": candidate_commands[:max_results],
+            "candidate_verification_commands": groups["candidate_verification_commands"]["items"],
             "candidates": [],
             "caps": {"depth": depth, "max_results": max_results},
-            "dependencies": dependencies[:max_results],
-            "dependents": dependents[:max_results],
-            "direct_affected_files": direct_affected[:max_results],
+            "dependencies": groups["dependencies"]["items"],
+            "dependents": groups["dependents"]["items"],
+            "direct_affected_files": groups["direct_affected_files"]["items"],
+            "impact_groups": groups,
             "likely_affected_files": likely_affected[:max_results],
-            "likely_tests": likely_tests[:max_results],
-            "related_configs": related_configs[:max_results],
-            "related_docs": related_docs[:max_results],
+            "likely_tests": groups["likely_tests"]["items"],
+            "related_configs": groups["related_configs"]["items"],
+            "related_docs": groups["related_docs"]["items"],
             "requested_target": requested_target,
             "resolution": {"ambiguous": False, "candidates": [], "node": target_node},
-            "risk_comments": risk_comments[:max_results],
+            "risk_comments": groups["risk_comments"]["items"],
+            "rollups": rollups,
             "target": target_node,
-            "truncated": {
-                "candidate_verification_commands": len(candidate_commands) > max_results,
-                "dependencies": len(dependencies) > max_results,
-                "dependents": len(dependents) > max_results,
-                "direct_affected_files": len(direct_affected) > max_results,
-                "likely_affected_files": len(likely_affected) > max_results,
-                "likely_tests": len(likely_tests) > max_results,
-                "related_configs": len(related_configs) > max_results,
-                "related_docs": len(related_docs) > max_results,
-                "risk_comments": len(risk_comments) > max_results,
-            },
+            "truncated": _impact_truncation(groups, likely_affected, max_results),
         }
 
     def _impact_relationships(
@@ -1612,48 +1712,41 @@ class GraphQueryService:
         files_by_path: dict[str, dict[str, Any]],
         dependent_relationships: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        del target_node_ids
+        del dependent_relationships
         candidates: list[dict[str, Any]] = []
-        for relationship in dependent_relationships:
-            path = str(relationship["path"])
-            if not _is_test_path(path):
+        if target_path is None:
+            return candidates
+
+        nodes_by_id = self._nodes_by_id(connection)
+        for edge in self._edges_for_nodes(
+            connection,
+            target_node_ids,
+            direction="outgoing",
+            edge_kinds=_RELATED_TEST_EDGE_KINDS,
+        ):
+            if edge["source_id"] not in target_node_ids:
+                continue
+            node = nodes_by_id.get(str(edge["target_id"]))
+            if node is None:
+                continue
+            path = _node_path(node)
+            if path is None or path not in files_by_path or not _is_test_path(path):
                 continue
             candidates.append(
                 _file_context_item(
                     path=path,
-                    reason=str(relationship["reason"]),
-                    confidence="high",
-                    evidence=relationship["evidence"],
-                    node=relationship["node"],
+                    reason=_related_test_reason(edge),
+                    confidence=str(edge.get("confidence", "medium")),
+                    evidence=edge.get("evidence", []),
+                    node=node,
+                    resolution_strategy=str(edge.get("resolution_strategy", "direct")),
                 )
             )
-
-        if target_path is not None:
-            for path in sorted(files_by_path):
-                if not _is_test_path(path):
-                    continue
-                matched_tokens = _shared_path_tokens(target_path, path)
-                if not matched_tokens:
-                    continue
-                candidates.append(
-                    _file_context_item(
-                        path=path,
-                        reason="path_name_similarity",
-                        confidence="medium",
-                        evidence=[
-                            {
-                                "matched_tokens": matched_tokens,
-                                "source": "path_name_similarity",
-                                "target_path": target_path,
-                            }
-                        ],
-                    )
-                )
 
         candidates = _dedupe_file_items(candidates)
         candidates.sort(
             key=lambda item: (
-                0 if item["reason"] == "imports_target" else 1,
+                0 if str(item.get("resolution_strategy", "")).startswith("direct_import") else 1,
                 str(item["path"]),
             )
         )
@@ -1891,9 +1984,20 @@ class GraphQueryService:
         rows = _rows_to_dicts(
             connection.execute(
                 """
-                SELECT id, path, source, name, command, purpose, not_run, auto_run_recommended
+                SELECT
+                    id,
+                    path,
+                    source,
+                    name,
+                    command,
+                    purpose,
+                    not_run,
+                    auto_run_recommended,
+                    group_path,
+                    group_kind,
+                    group_source_path
                 FROM config_commands
-                ORDER BY purpose, path, source, name
+                ORDER BY purpose, group_path, path, source, name
                 """
             )
         )
@@ -1964,6 +2068,7 @@ class GraphQueryService:
             current["evidence"] = _merge_evidence(current["evidence"], evidence)
             current["confidence"] = _confidence_for_reading_score(int(current["_score"]))
             current["reason"] = _preferred_reading_reason(str(current["reason"]), reason)
+            current["ranking_reason"] = _ranking_reason(str(current["reason"]))
             if _node_reading_priority(node) < _node_reading_priority(current["node"]):
                 current["node"] = node
 
@@ -2032,16 +2137,40 @@ class GraphQueryService:
                         confidence=str(item["confidence"]),
                         evidence=[
                             *item["evidence"],
-                            {"source": "likely_test_heuristic", "target_path": source_path},
+                            {"source": "related_test_edges", "target_path": source_path},
                         ],
                         category="test",
                         node=item.get("node"),
-                        score=120 if item["reason"] == "imports_target" else 80,
+                        score=120
+                        if str(item.get("resolution_strategy", "")).startswith("direct_import")
+                        else 80,
                         source_path=source_path,
+                        resolution_strategy=item.get("resolution_strategy"),
                     )
                 )
         tests.sort(key=lambda item: (-int(item["_score"]), str(item["path"])))
         return _dedupe_reading_items(tests)
+
+    def _reading_order_candidate_verification_commands(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        tokens: tuple[str, ...],
+        recommendations: list[dict[str, Any]],
+        max_commands: int,
+    ) -> list[dict[str, Any]]:
+        if not _task_mentions_config(tokens):
+            return []
+        config_paths = self._config_file_paths(connection)
+        related_paths = tuple(
+            str(item["path"]) for item in recommendations if str(item["path"]) in config_paths
+        )
+        if not related_paths:
+            related_paths = tuple(sorted(config_paths))
+        return self._candidate_verification_commands(
+            connection,
+            related_config_paths=related_paths,
+        )[:max_commands]
 
     def _config_file_paths(self, connection: sqlite3.Connection) -> set[str]:
         return {str(row["path"]) for row in connection.execute("SELECT path FROM config_files")}
@@ -2054,6 +2183,17 @@ def _empty_impact_data(
     depth: int,
     max_results: int,
 ) -> dict[str, Any]:
+    groups = _impact_groups(
+        max_results=max_results,
+        direct_affected=[],
+        dependencies=[],
+        dependents=[],
+        likely_tests=[],
+        related_docs=[],
+        related_configs=[],
+        risk_comments=[],
+        candidate_commands=[],
+    )
     return {
         "ambiguous": resolved.ambiguous,
         "candidate_verification_commands": [],
@@ -2062,6 +2202,7 @@ def _empty_impact_data(
         "dependencies": [],
         "dependents": [],
         "direct_affected_files": [],
+        "impact_groups": groups,
         "likely_affected_files": [],
         "likely_tests": [],
         "related_configs": [],
@@ -2069,18 +2210,111 @@ def _empty_impact_data(
         "requested_target": target,
         "resolution": _resolution_payload(resolved),
         "risk_comments": [],
+        "rollups": _impact_rollups(groups),
         "target": None,
-        "truncated": {
-            "candidate_verification_commands": False,
-            "dependencies": False,
-            "dependents": False,
-            "direct_affected_files": False,
-            "likely_affected_files": False,
-            "likely_tests": False,
-            "related_configs": False,
-            "related_docs": False,
-            "risk_comments": False,
-        },
+        "truncated": _impact_truncation(groups, [], max_results),
+    }
+
+
+def _impact_groups(
+    *,
+    max_results: int,
+    direct_affected: list[dict[str, Any]],
+    dependencies: list[dict[str, Any]],
+    dependents: list[dict[str, Any]],
+    likely_tests: list[dict[str, Any]],
+    related_docs: list[dict[str, Any]],
+    related_configs: list[dict[str, Any]],
+    risk_comments: list[dict[str, Any]],
+    candidate_commands: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        "direct_affected_files": _impact_group(
+            label="Target and likely dependent files",
+            reason="Files to inspect first when planning an edit around the target.",
+            items=direct_affected,
+            max_results=max_results,
+        ),
+        "dependencies": _impact_group(
+            label="Likely dependencies",
+            reason="Files or symbols the target references through indexed graph relationships.",
+            items=dependencies,
+            max_results=max_results,
+        ),
+        "dependents": _impact_group(
+            label="Likely dependents",
+            reason="Files or symbols that reference the target through indexed graph relationships.",
+            items=dependents,
+            max_results=max_results,
+        ),
+        "likely_tests": _impact_group(
+            label="Related tests",
+            reason="Tests connected by direct references or deterministic path/name similarity; not coverage proof.",
+            items=likely_tests,
+            max_results=max_results,
+        ),
+        "related_docs": _impact_group(
+            label="Related documentation",
+            reason="Documentation files that link to or mention the target.",
+            items=related_docs,
+            max_results=max_results,
+        ),
+        "related_configs": _impact_group(
+            label="Related configuration",
+            reason="Configuration files that provide package, command, or entrypoint context for the target.",
+            items=related_configs,
+            max_results=max_results,
+        ),
+        "risk_comments": _impact_group(
+            label="Risk notes",
+            reason="Tagged comments on the target or likely dependent files.",
+            items=risk_comments,
+            max_results=max_results,
+        ),
+        "candidate_verification_commands": _impact_group(
+            label="Candidate verification commands",
+            reason="Declared lint, test, or typecheck commands recorded as candidates only; not run or auto-recommended.",
+            items=candidate_commands,
+            max_results=max_results,
+        ),
+    }
+
+
+def _impact_group(
+    *,
+    label: str,
+    reason: str,
+    items: list[dict[str, Any]],
+    max_results: int,
+) -> dict[str, Any]:
+    return {
+        "items": items[:max_results],
+        "label": label,
+        "reason": reason,
+        "total": len(items),
+        "truncated": len(items) > max_results,
+    }
+
+
+def _impact_rollups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    counts = {name: int(group["total"]) for name, group in groups.items()}
+    return {
+        "counts": counts,
+        "total_groups": len(groups),
+        "total_items": sum(counts.values()),
+        "truncated_groups": [name for name, group in groups.items() if group["truncated"]],
+    }
+
+
+def _impact_truncation(
+    groups: dict[str, dict[str, Any]],
+    likely_affected: list[dict[str, Any]],
+    max_results: int,
+) -> dict[str, bool]:
+    return {
+        **{name: bool(group["truncated"]) for name, group in groups.items()},
+        "impact_groups": any(group["truncated"] for group in groups.values()),
+        "likely_affected_files": len(likely_affected) > max_results,
     }
 
 
@@ -2126,6 +2360,7 @@ def _file_context_item(
     confidence: str,
     evidence: list[dict[str, Any]],
     node: dict[str, Any] | None = None,
+    resolution_strategy: str | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "confidence": confidence,
@@ -2133,6 +2368,8 @@ def _file_context_item(
         "path": path,
         "reason": reason,
     }
+    if resolution_strategy is not None:
+        item["resolution_strategy"] = resolution_strategy
     if node is not None:
         item["node"] = node
     return item
@@ -2148,6 +2385,8 @@ def _dedupe_file_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if _confidence_rank(str(item["confidence"])) > _confidence_rank(str(current["confidence"])):
             current["confidence"] = item["confidence"]
+            if "resolution_strategy" in item:
+                current["resolution_strategy"] = item["resolution_strategy"]
         current["evidence"] = _merge_evidence(current["evidence"], item["evidence"])
     return list(deduped.values())
 
@@ -2246,6 +2485,18 @@ def _relationship_reason(edge_kind: str, direction: str) -> str:
     if direction == "outgoing" and edge_kind == "CALLS":
         return "target_calls"
     return "related_by_graph_edge"
+
+
+def _related_test_reason(edge: dict[str, Any]) -> str:
+    metadata = edge.get("metadata", {})
+    reason = metadata.get("reason")
+    if isinstance(reason, list):
+        reasons = {str(item) for item in reason}
+        if "direct_import_related_test" in reasons:
+            return "direct_import_related_test"
+        if "path_name_similarity" in reasons:
+            return "path_name_similarity"
+    return str(reason) if reason else "likely_related_test"
 
 
 def _relationship_confidence(edge_kind: str) -> str:
@@ -2410,6 +2661,7 @@ def _reading_order_item(
     node: dict[str, Any] | None,
     score: int,
     source_path: str | None = None,
+    resolution_strategy: str | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "_score": score,
@@ -2419,9 +2671,12 @@ def _reading_order_item(
         "node": node,
         "path": path,
         "reason": reason,
+        "ranking_reason": _ranking_reason(reason),
     }
     if source_path is not None:
         item["source_path"] = source_path
+    if resolution_strategy is not None:
+        item["resolution_strategy"] = resolution_strategy
     return item
 
 
@@ -2450,6 +2705,17 @@ def _preferred_reading_reason(current: str, candidate: str) -> str:
         "task_token_match": 3,
     }
     return candidate if priority.get(candidate, 100) < priority.get(current, 100) else current
+
+
+def _ranking_reason(reason: str) -> str:
+    reasons = {
+        "config_matches_task": "Task tokens matched indexed config or command metadata.",
+        "documentation_matches_task": "Task tokens matched indexed documentation context.",
+        "likely_related_test": "Likely related test from graph evidence.",
+        "task_matches_symbols": "Task tokens matched indexed source symbols.",
+        "task_token_match": "Task tokens matched indexed graph metadata.",
+    }
+    return reasons.get(reason, "Ranked from deterministic graph metadata.")
 
 
 def _node_reading_priority(node: dict[str, Any] | None) -> int:
@@ -2518,6 +2784,19 @@ def _metadata(connection: sqlite3.Connection) -> dict[str, str]:
     }
 
 
+def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    raw_warnings = metadata.get("graph_quality_warnings")
+    if raw_warnings is None:
+        return []
+    try:
+        warnings = json.loads(raw_warnings)
+    except json.JSONDecodeError:
+        return ["Graph quality warnings metadata is unreadable."]
+    if not isinstance(warnings, list):
+        return []
+    return [str(warning) for warning in warnings]
+
+
 def _single_row_dict(cursor: sqlite3.Cursor) -> dict[str, Any]:
     row = cursor.fetchone()
     return _row_to_dict(row) if row is not None else {}
@@ -2552,14 +2831,18 @@ def _node_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 def _edge_row_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = _decode_metadata(data.pop("metadata_json", None))
+    data["evidence"] = _decode_list(data.pop("evidence_json", None))
     return data
 
 
 def _edge_payload(edge: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": edge["id"],
+        "confidence": edge.get("confidence", "high"),
+        "evidence": edge.get("evidence", []),
         "kind": edge["kind"],
         "metadata": edge.get("metadata", {}),
+        "resolution_strategy": edge.get("resolution_strategy", "direct"),
         "source_id": edge["source_id"],
         "target_id": edge["target_id"],
     }
@@ -2575,6 +2858,18 @@ def _decode_metadata(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _decode_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        decoded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    return decoded if isinstance(decoded, list) else []
 
 
 def _entrypoint_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -2596,6 +2891,9 @@ def _command_payload(row: dict[str, Any]) -> dict[str, Any]:
         "command": row["command"],
         "confidence": "high",
         "id": row["id"],
+        "group_kind": row["group_kind"],
+        "group_path": row["group_path"],
+        "group_source_path": row["group_source_path"],
         "name": row["name"],
         "not_run": bool(row["not_run"]),
         "path": row["path"],
@@ -2763,6 +3061,14 @@ def _confidence_for_score(score: int) -> str:
     return "low"
 
 
+def _resolution_strategy_for_score(score: int) -> str:
+    if score >= _EXACT_MATCH_SCORE:
+        return "exact_reference"
+    if score >= 500:
+        return "structured_metadata_match"
+    return "fuzzy_candidate"
+
+
 def _match_evidence(
     node: dict[str, Any], matched_fields: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -2810,6 +3116,7 @@ def _resolution_payload(resolved: _ResolvedNode) -> dict[str, Any]:
         "confidence": resolved.confidence,
         "node": resolved.node,
         "reason": resolved.reason,
+        "resolution_strategy": resolved.resolution_strategy,
     }
 
 
