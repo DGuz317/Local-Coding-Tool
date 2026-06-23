@@ -1,0 +1,161 @@
+{
+  "manifest_version": "0.3.contract.v1",
+  "description": "Release-blocking Context Pack fixture manifest for v0.3 implementation slices.",
+  "default_budget": {
+    "max_first_read_files": 5,
+    "max_items_per_support_group": 5,
+    "max_next_actions": 3,
+    "max_agent_guidance_items": 3,
+    "max_candidate_verification_commands": 5,
+    "max_risk_signals": 5,
+    "max_total_chars": 12000,
+    "approx_token_estimate_divisor": 4
+  },
+  "cases": [
+    {
+      "id": "happy_path_direct_symbol_login",
+      "category": "happy_path",
+      "task": "Fix the login timeout handler",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["src/auth/login.py", "src/auth/session.py"],
+        "confidence_at_least": "medium",
+        "requires_evidence": true,
+        "no_source_snippets": true
+      }
+    },
+    {
+      "id": "test_focused_login_flow",
+      "category": "test_focused",
+      "task": "Add tests for login timeout behavior",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "likely_tests_include_any": ["tests/test_login.py", "tests/auth/test_session.py"],
+        "test_files_may_rank_as_first_read": true,
+        "candidate_commands_marked_not_run": true
+      }
+    },
+    {
+      "id": "documentation_config_package_test_command",
+      "category": "documentation_config",
+      "task": "Find the package test command and related setup docs",
+      "fixture_repo": "tests/fixtures/context_pack/config-docs",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "supporting_configs_include_any": ["pyproject.toml", "package.json"],
+        "supporting_docs_include_any": ["README.md", "docs/testing.md"],
+        "candidate_commands_marked_not_run": true
+      }
+    },
+    {
+      "id": "broad_task_auth_cleanup",
+      "category": "broad_task",
+      "task": "Improve auth across the repository",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "warnings_include": ["breadth_warning"],
+        "bounded_by_default_budget": true,
+        "does_not_dump_repository": true
+      }
+    },
+    {
+      "id": "focal_ambiguity_cache",
+      "category": "focal_ambiguity",
+      "task": "Fix cache refresh",
+      "fixture_repo": "tests/fixtures/context_pack/ambiguous-targets",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "ambiguity_candidates_include_any": ["src/http/cache.py", "src/build/cache.py"],
+        "does_not_silently_choose_single_target": true,
+        "confidence_at_most": "medium"
+      }
+    },
+    {
+      "id": "no_match_payroll_import",
+      "category": "no_match",
+      "task": "Fix payroll import reconciliation",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "ok": true,
+        "confidence": "low",
+        "first_read_files_max": 0,
+        "does_not_dump_repository": true
+      }
+    },
+    {
+      "id": "focus_hint_valid_and_unresolved",
+      "category": "focus_hint",
+      "task": "Fix timeout validation",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": ["src/auth/session.py", "src/auth/missing.py"],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["src/auth/session.py"],
+        "warnings_include": ["unresolved_focus_hint"],
+        "invalid_outside_root_hints_are_errors": true
+      }
+    },
+    {
+      "id": "stale_graph_warning",
+      "category": "stale_graph",
+      "task": "Fix login timeout handler",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "graph_state": "stale_but_readable",
+      "expected_outcomes": {
+        "freshness_status": "stale",
+        "warnings_include": ["stale_graph"],
+        "confidence_downgraded": true
+      }
+    },
+    {
+      "id": "secret_redaction_task_and_hints",
+      "category": "secret_redaction",
+      "task": "Fix deploy failure with API_TOKEN=abc123 and password=hunter2",
+      "fixture_repo": "tests/fixtures/context_pack/config-docs",
+      "focus_hints": ["TOKEN=abc123"],
+      "expected_outcomes": {
+        "redacted_task_text": true,
+        "pack_id_does_not_include_secret_fragments": true,
+        "handles_do_not_include_secret_fragments": true,
+        "raw_task_text_absent": true
+      }
+    },
+    {
+      "id": "stale_pack_id_rejected_for_expansion",
+      "category": "stale_pack",
+      "task": "Expand a stale login pack item",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "graph_state": "pack_id_mismatched_with_current_graph",
+      "expected_outcomes": {
+        "ok": false,
+        "error_code": "stale_context_pack",
+        "requires_fresh_pack": true
+      }
+    },
+    {
+      "id": "no_source_disclosure_negative",
+      "category": "no_source_disclosure",
+      "task": "Return context for login handler without leaking source",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "forbidden_fields_rejected_or_sanitized": [
+          "snippet",
+          "source_text",
+          "function_body",
+          "function_signature",
+          "paragraph_excerpt",
+          "raw_comment_text",
+          "raw_agent_guidance"
+        ],
+        "repo_relative_paths_only": true,
+        "structural_symbols_allowed": true
+      }
+    }
+  ]
+}
