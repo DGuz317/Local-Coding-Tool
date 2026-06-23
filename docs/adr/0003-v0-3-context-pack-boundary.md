@@ -1,0 +1,3 @@
+# Keep v0.3 Context Packs deterministic, stateless, and orientation-only
+
+RepoLens v0.3 Context Packs are deterministic, stateless, task-scoped orientation bundles rather than source-preview bundles or AI-generated semantic context. They should use graph facts, Structural Summaries, evidence, confidence, and reproducible expansion handles; they should not include source snippets, require embeddings or LLMs, or persist assistant session state. This preserves RepoLens' local-first safety model while still improving assistant context economy through ranking, progressive disclosure, and evaluation.

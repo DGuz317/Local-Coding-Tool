@@ -23,28 +23,28 @@ GitHub umbrella tracker: #35
 ## Release-Blocking P0 Work
 
 - [x] #35 RepoLens MCP v0.2 roadmap and release criteria
-- [ ] #36 Add Edge Contract storage and duplicate edge normalization
-- [ ] #37 Add Canonical Graph Hash, Graph Validation, and rebuild guardrails
-- [ ] #38 Resolve Python local imports deterministically
-- [ ] #39 Resolve JS/TS relative imports and harden simple aliases
-- [ ] #40 Normalize Resolution Strategy and candidate-only ambiguity handling
-- [ ] #41 Store Related Test relationships with confidence and evidence
-- [ ] #42 Group Impact Analysis and enforce Target Expansion traversal boundaries
-- [ ] #43 Improve Suggested Reading Order ranking and command context
-- [ ] #44 Add shared MCP envelope foundation and contract tests
-- [ ] #45 Migrate MCP tools to standardized envelope, errors, pagination, and stdio discipline
-- [ ] #46 Add file-level Selective Update planner and graph replacement path
-- [ ] #47 Add Selective Update cleanup tests and generated benchmark fixture
-- [ ] #48 Add shared Redaction Policy and scanner/security fixtures
-- [ ] #49 Add MCP No Whole-Source Disclosure and raw text safety tests
+- [x] #36 Add Edge Contract storage and duplicate edge normalization
+- [x] #37 Add Canonical Graph Hash, Graph Validation, and rebuild guardrails
+- [x] #38 Resolve Python local imports deterministically
+- [x] #39 Resolve JS/TS relative imports and harden simple aliases
+- [x] #40 Normalize Resolution Strategy and candidate-only ambiguity handling
+- [x] #41 Store Related Test relationships with confidence and evidence
+- [x] #42 Group Impact Analysis and enforce Target Expansion traversal boundaries
+- [x] #43 Improve Suggested Reading Order ranking and command context
+- [x] #44 Add shared MCP envelope foundation and contract tests
+- [x] #45 Migrate MCP tools to standardized envelope, errors, pagination, and stdio discipline
+- [x] #46 Add file-level Selective Update planner and graph replacement path
+- [x] #47 Add Selective Update cleanup tests and generated benchmark fixture
+- [x] #48 Add shared Redaction Policy and scanner/security fixtures
+- [x] #49 Add MCP No Whole-Source Disclosure and raw text safety tests
 - [x] #52 Add Dogfooding Reports and regression fixture process
-- [ ] #53 Add minimal CI and isolated install smoke
-- [ ] #54 Add v0.2 user docs, assistant docs, release checklist, and known limitations
+- [x] #53 Add minimal CI and isolated install smoke
+- [x] #54 Add v0.2 user docs, assistant docs, release checklist, and known limitations
 
 ## Non-Blocking P1 Work
 
-- [ ] #50 Improve Package Boundary, workspace, and command grouping awareness
-- [ ] #51 Add optional Parser Backend experiment behind default-stable behavior
+- [x] #50 Improve Package Boundary, workspace, and command grouping awareness
+- [x] #51 Add optional Parser Backend experiment behind default-stable behavior
 
 Promote #50 only if dogfooding proves package/workspace gaps are release-blocking. #51 remains optional and must not destabilize default parser behavior.
 
