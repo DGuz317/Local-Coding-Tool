@@ -97,6 +97,7 @@ def get_task_context(
 
     pack = _build_context_pack(
         reading,
+        file_metadata=_context_pack_file_metadata(query, reading, active_budget),
         support_context=_support_context(query, reading, active_budget),
         status=status,
         task=task,
@@ -121,6 +122,7 @@ def get_task_context(
 def _build_context_pack(
     reading: Mapping[str, Any],
     *,
+    file_metadata: Mapping[str, Any],
     support_context: Mapping[str, Any],
     status: Mapping[str, Any],
     task: str,
@@ -170,6 +172,7 @@ def _build_context_pack(
             context_pack_id=context_pack_id,
             rank=index + 1,
             related_tests=related_tests_by_source.get(str(item.get("path", "")), []),
+            file_metadata=file_metadata,
             freshness=freshness,
         )
         for index, item in enumerate(first_read_raw[: budget["max_first_read_files"]])
@@ -185,7 +188,11 @@ def _build_context_pack(
     ]
     supporting_docs = [
         _support_item(
-            item, context_pack_id=context_pack_id, kind="supporting_doc", freshness=freshness
+            item,
+            context_pack_id=context_pack_id,
+            kind="supporting_doc",
+            freshness=freshness,
+            file_metadata=file_metadata,
         )
         for item in _dedupe_support_items(
             [*supporting_docs_raw, *_sequence(support_context.get("supporting_docs"))]
@@ -197,6 +204,7 @@ def _build_context_pack(
             context_pack_id=context_pack_id,
             kind="supporting_config",
             freshness=freshness,
+            file_metadata=file_metadata,
         )
         for item in _dedupe_support_items(
             [*supporting_configs_raw, *_sequence(support_context.get("supporting_configs"))]
@@ -218,6 +226,7 @@ def _build_context_pack(
             context_pack_id=context_pack_id,
             kind="lower_priority_context",
             freshness=freshness,
+            file_metadata=file_metadata,
         )
         for item in _sequence(support_context.get("lower_priority_context"))[
             : budget["max_items_per_support_group"]
@@ -287,10 +296,12 @@ def _first_read_item(
     context_pack_id: str,
     rank: int,
     related_tests: list[str],
+    file_metadata: Mapping[str, Any],
     freshness: Mapping[str, Any],
 ) -> dict[str, Any]:
     node = _mapping(item.get("node"))
-    return {
+    path = str(item.get("path", ""))
+    result = {
         **_base_item(
             item,
             context_pack_id=context_pack_id,
@@ -302,6 +313,23 @@ def _first_read_item(
         "related_tests": related_tests,
         "symbols": _symbols_for_item(node),
     }
+    _attach_file_metadata(result, path=path, file_metadata=file_metadata, freshness=freshness)
+    return result
+
+
+def _context_pack_file_metadata(
+    query: GraphQueryService,
+    reading: Mapping[str, Any],
+    budget: Mapping[str, int],
+) -> dict[str, Any]:
+    data = _mapping(reading.get("data"))
+    paths = [
+        str(item.get("path")) for item in _sequence(data.get("reading_order")) if item.get("path")
+    ][: budget["max_first_read_files"] + budget["max_items_per_support_group"]]
+    metadata = query.context_pack_file_metadata(paths)
+    if not metadata.get("ok", False):
+        return {}
+    return _mapping(metadata.get("data"))
 
 
 def _support_context(
@@ -432,8 +460,34 @@ def _support_item(
     context_pack_id: str,
     kind: str,
     freshness: Mapping[str, Any],
+    file_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return _base_item(item, context_pack_id=context_pack_id, kind=kind, freshness=freshness)
+    result = _base_item(item, context_pack_id=context_pack_id, kind=kind, freshness=freshness)
+    if file_metadata is not None:
+        _attach_file_metadata(
+            result,
+            path=str(item.get("path", "")),
+            file_metadata=file_metadata,
+            freshness=freshness,
+        )
+    return result
+
+
+def _attach_file_metadata(
+    item: dict[str, Any],
+    *,
+    path: str,
+    file_metadata: Mapping[str, Any],
+    freshness: Mapping[str, Any],
+) -> None:
+    summaries = _mapping(file_metadata.get("structural_summaries"))
+    summary = _mapping(summaries.get(path))
+    if summary:
+        item["structural_summary"] = {**summary, "freshness": dict(freshness)}
+    package_boundaries = _mapping(file_metadata.get("package_boundaries"))
+    package_boundary = _mapping(package_boundaries.get(path))
+    if package_boundary:
+        item["package_boundary"] = package_boundary
 
 
 def _command_item(

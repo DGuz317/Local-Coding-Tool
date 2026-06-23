@@ -41,12 +41,53 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     assert first_read["kind"] == "first_read_file"
     assert first_read["rank"] == 1
     assert first_read["handle"].startswith("item_")
+    assert first_read["structural_summary"] == {
+        "freshness": pack["freshness"],
+        "scope": "file",
+        "source": "graph_facts",
+        "symbols": [
+            {
+                "kind": "JavaScriptFunction",
+                "line_range": {"end": 4, "start": 2},
+                "name": "validateLogin",
+                "public": True,
+                "qualified_name": "validateLogin",
+            },
+            {
+                "kind": "JavaScriptFunction",
+                "line_range": {"end": 8, "start": 6},
+                "name": "loginFlow",
+                "public": True,
+                "qualified_name": "loginFlow",
+            },
+        ],
+    }
+    assert first_read["package_boundary"] == {
+        "confidence": "high",
+        "ecosystem": "javascript",
+        "evidence": [
+            {
+                "package_root": ".",
+                "source": "config_package_roots",
+                "source_path": "package.json",
+            }
+        ],
+        "name": "auth-demo",
+        "path": ".",
+    }
     assert first_read["symbols"]
     assert first_read["relationships"] == []
     assert first_read["related_tests"] == ["tests/login.test.ts"]
 
     assert [item["path"] for item in pack["likely_tests"]] == ["tests/login.test.ts"]
     assert [item["path"] for item in pack["supporting_docs"]] == ["README.md"]
+    assert pack["supporting_docs"][0]["structural_summary"] == {
+        "freshness": pack["freshness"],
+        "headings": [{"level": 1, "line": 1, "text": "Auth Demo"}],
+        "scope": "file",
+        "source": "graph_facts",
+        "title": "Auth Demo",
+    }
     assert [item["path"] for item in pack["supporting_configs"]] == ["package.json"]
     assert [item["path"] for item in pack["agent_guidance"]] == ["AGENTS.md"]
     assert pack["agent_guidance"][0].keys() >= {
@@ -200,6 +241,20 @@ def test_context_pack_focal_ambiguity_returns_candidates(tmp_path):
         "acme/ambiguous.py",
         "src/acme/ambiguous.py",
     ]
+
+
+def test_context_pack_does_not_infer_package_boundary_from_directory_name(tmp_path):
+    _write_text(
+        tmp_path / "src" / "auth" / "login.ts",
+        "export function loginFlow() { return true; }\n",
+    )
+    index_repository(tmp_path)
+
+    envelope = get_task_context(tmp_path, "loginFlow")
+
+    first_read = envelope["data"]["first_read_files"][0]
+    assert first_read["path"] == "src/auth/login.ts"
+    assert "package_boundary" not in first_read
 
 
 def _write_context_fixture_repo(root) -> None:
