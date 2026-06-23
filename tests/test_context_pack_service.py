@@ -84,6 +84,106 @@ def test_context_pack_cli_and_mcp_use_same_service(tmp_path):
     assert "Lower-priority context to inspect later" in human_result.output
 
 
+def test_context_pack_preserves_missing_graph_unavailable_error(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+
+    envelope = get_task_context(tmp_path, "Fix login validation")
+
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "missing_graph_artifacts"
+    assert envelope["freshness"]["fresh"] is False
+
+
+def test_context_pack_stale_graph_returns_downgraded_pack_with_warning(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_text(tmp_path / "src" / "auth" / "login.ts", "export const changed = true;\n")
+
+    envelope = get_task_context(tmp_path, "Fix login validation")
+
+    assert envelope["ok"] is True
+    assert envelope["freshness"]["fresh"] is False
+    assert envelope["data"]["freshness"]["status"] == "stale"
+    assert "Graph artifacts may be stale" in " ".join(envelope["warnings"])
+
+
+def test_context_pack_no_match_returns_low_confidence_without_repository_dump(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    _write_text(tmp_path / "src" / "billing" / "invoice.ts", "export const invoice = 1;\n")
+    index_repository(tmp_path)
+
+    envelope = get_task_context(tmp_path, "Repair quantum banana telemetry")
+
+    assert envelope["ok"] is True
+    assert envelope["confidence"] == "low"
+    assert envelope["data"]["first_read_files"] == []
+    assert envelope["data"]["likely_tests"] == []
+    assert "No useful graph matches" in " ".join(envelope["warnings"])
+
+
+def test_context_pack_broad_task_is_bounded_and_warned(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    _write_text(tmp_path / "src" / "billing" / "invoice.ts", "export const invoice = 1;\n")
+    index_repository(tmp_path)
+
+    envelope = get_task_context(tmp_path, "Update project")
+
+    assert envelope["ok"] is True
+    assert (
+        len(envelope["data"]["first_read_files"])
+        <= DEFAULT_CONTEXT_PACK_BUDGET["max_first_read_files"]
+    )
+    assert "Task is broad" in " ".join(envelope["warnings"])
+
+
+def test_context_pack_focus_path_outside_root_is_rejected(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    outside_path = tmp_path.parent / "outside.py"
+
+    envelope = get_task_context(tmp_path, "Fix login validation", focus_hints=[str(outside_path)])
+
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "focus_hint_outside_root"
+    assert str(outside_path) not in json.dumps(envelope)
+
+
+def test_context_pack_unresolved_focus_hint_warns_and_lowers_confidence(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    envelope = get_task_context(
+        tmp_path,
+        "Fix login validation",
+        focus_hints=["src/auth/missing.ts", "API_TOKEN=abc123"],
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["confidence"] == "low"
+    serialized = json.dumps(envelope)
+    assert "Unresolved focus hint" in " ".join(envelope["warnings"])
+    assert "src/auth/missing.ts" in serialized
+    assert "abc123" not in serialized
+
+
+def test_context_pack_focal_ambiguity_returns_candidates(tmp_path):
+    _write_text(tmp_path / "src" / "acme" / "ambiguous.py", "VALUE = 1\n")
+    _write_text(tmp_path / "acme" / "ambiguous.py", "VALUE = 2\n")
+    index_repository(tmp_path)
+
+    envelope = get_task_context(tmp_path, "ambiguous")
+
+    pack = envelope["data"]
+
+    assert envelope["ok"] is True
+    assert pack["first_read_files"] == []
+    assert all(item["kind"] == "ambiguity_candidate" for item in pack["ambiguity"])
+    assert sorted({item["path"] for item in pack["ambiguity"]}) == [
+        "acme/ambiguous.py",
+        "src/acme/ambiguous.py",
+    ]
+
+
 def _write_context_fixture_repo(root) -> None:
     _write_text(
         root / "package.json",

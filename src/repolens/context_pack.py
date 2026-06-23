@@ -15,7 +15,12 @@ from repolens.context_pack_contract import (
     HUMAN_LOWER_PRIORITY_LABEL,
     guard_context_pack_output,
 )
-from repolens.mcp_envelope import mcp_from_query_envelope, mcp_success, truncation_metadata
+from repolens.mcp_envelope import (
+    mcp_error,
+    mcp_from_query_envelope,
+    mcp_success,
+    truncation_metadata,
+)
 from repolens.query import GraphQueryService
 from repolens.redaction import redact_text
 
@@ -38,6 +43,7 @@ _SOURCE_KINDS = {
     "PythonModule",
     "JavaScriptModule",
 }
+_BROAD_TASK_TOKENS = {"app", "application", "codebase", "project", "repo", "repository"}
 
 
 def get_task_context(
@@ -49,6 +55,11 @@ def get_task_context(
 ) -> dict[str, Any]:
     """Return a deterministic v0.3 Context Pack envelope for a natural-language task."""
     active_budget = _context_budget(budget)
+    repo_root = Path(repo_path).resolve()
+    focus_error = _outside_focus_hint_error(repo_root, focus_hints, active_budget)
+    if focus_error is not None:
+        return focus_error
+
     query = GraphQueryService(repo_path)
     status = query.graph_status()
     reading = query.suggest_reading_order(
@@ -58,6 +69,19 @@ def get_task_context(
     )
     if not reading.get("ok", False):
         return mcp_from_query_envelope(reading)
+
+    hardening_warnings = _hardening_warnings(
+        reading,
+        task=task,
+        focus_hints=focus_hints,
+        repo_root=repo_root,
+    )
+    warnings = [*reading.get("warnings", []), *hardening_warnings]
+    confidence = str(reading.get("confidence", "low"))
+    if hardening_warnings and any(
+        "focus hint" in warning.lower() for warning in hardening_warnings
+    ):
+        confidence = "low"
 
     pack = _build_context_pack(
         reading,
@@ -71,12 +95,12 @@ def get_task_context(
     return guard_context_pack_output(
         mcp_success(
             data=guarded_pack,
-            confidence=str(reading.get("confidence", "low")),
+            confidence=confidence,
             evidence=reading.get("evidence", []),
             freshness=guarded_pack["freshness"],
             limits=active_budget,
             truncation=truncation,
-            warnings=reading.get("warnings", []),
+            warnings=warnings,
         )
     )
 
@@ -399,6 +423,104 @@ def _task_fingerprint(task: str) -> str:
 
 def _display_task(task: str) -> str:
     return _SECRET_ASSIGNMENT_RE.sub(lambda match: match.group(1), redact_text(task))
+
+
+def _outside_focus_hint_error(
+    repo_root: Path, focus_hints: Sequence[str], budget: Mapping[str, int]
+) -> dict[str, Any] | None:
+    for hint in focus_hints:
+        raw_hint = str(hint)
+        if not _looks_like_path(raw_hint):
+            continue
+        hint_path = Path(raw_hint)
+        resolved = (hint_path if hint_path.is_absolute() else repo_root / hint_path).resolve()
+        if resolved == repo_root or repo_root in resolved.parents:
+            continue
+        return mcp_error(
+            code="focus_hint_outside_root",
+            message="Focus hints must stay inside the analysis root.",
+            details={"focus_hint": "outside_analysis_root"},
+            limits=budget,
+            warnings=[],
+            confidence="none",
+            freshness={"fresh": False, "status": "invalid_focus_hint"},
+        )
+    return None
+
+
+def _hardening_warnings(
+    reading: Mapping[str, Any], *, task: str, focus_hints: Sequence[str], repo_root: Path
+) -> list[str]:
+    data = _mapping(reading.get("data"))
+    warnings: list[str] = []
+    if _is_broad_task(task):
+        warnings.append(
+            "Task is broad; Context Pack output is bounded and may omit lower-priority context."
+        )
+    if not _sequence(data.get("reading_order")) and not _sequence(data.get("candidates")):
+        warnings.append("No useful graph matches found; returning a low-confidence bounded pack.")
+    warnings.extend(
+        _unresolved_focus_hint_warnings(data, focus_hints=focus_hints, repo_root=repo_root)
+    )
+    return list(dict.fromkeys(warnings))
+
+
+def _unresolved_focus_hint_warnings(
+    data: Mapping[str, Any], *, focus_hints: Sequence[str], repo_root: Path
+) -> list[str]:
+    if not focus_hints:
+        return []
+    warnings: list[str] = []
+    matched_text = _focus_match_text(data)
+    for hint in focus_hints:
+        raw_hint = str(hint)
+        display_hint = _display_task(raw_hint)
+        if _looks_like_path(raw_hint):
+            hint_path = Path(raw_hint)
+            resolved = (hint_path if hint_path.is_absolute() else repo_root / hint_path).resolve()
+            if resolved.exists():
+                continue
+            warnings.append(f"Unresolved focus hint: {display_hint}; confidence downgraded.")
+            continue
+        if display_hint.lower() in matched_text:
+            continue
+        warnings.append(f"Unresolved focus hint: {display_hint}; confidence downgraded.")
+    return warnings
+
+
+def _focus_match_text(data: Mapping[str, Any]) -> str:
+    chunks: list[str] = []
+    for item in [*_sequence(data.get("reading_order")), *_sequence(data.get("candidates"))]:
+        mapped = _mapping(item)
+        node = _mapping(mapped.get("node"))
+        metadata = _mapping(node.get("metadata"))
+        chunks.extend(
+            str(value)
+            for value in (
+                mapped.get("path"),
+                node.get("label"),
+                node.get("path"),
+                metadata.get("qualified_name"),
+            )
+            if value
+        )
+    return "\n".join(chunks).lower()
+
+
+def _is_broad_task(task: str) -> bool:
+    tokens = re.findall(r"[A-Za-z0-9_./-]+", _display_task(task).lower())
+    meaningful = [
+        token for token in tokens if token not in {"add", "change", "fix", "the", "to", "update"}
+    ]
+    return (
+        bool(meaningful)
+        and len(meaningful) <= 2
+        and any(token in _BROAD_TASK_TOKENS for token in meaningful)
+    )
+
+
+def _looks_like_path(value: str) -> bool:
+    return "/" in value or "\\" in value or value.startswith(".") or bool(Path(value).suffix)
 
 
 def _hash_id(prefix: str, value: Any) -> str:
