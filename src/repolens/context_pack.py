@@ -44,6 +44,18 @@ _SOURCE_KINDS = {
     "JavaScriptModule",
 }
 _BROAD_TASK_TOKENS = {"app", "application", "codebase", "project", "repo", "repository"}
+_TEST_TASK_TOKENS = {"spec", "specs", "test", "tests"}
+_AGENT_GUIDANCE_NAMES = {"agents.md", "claude.md"}
+_CONFIG_NAMES = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+    "tsconfig.json",
+    "jsconfig.json",
+}
 
 
 def get_task_context(
@@ -85,6 +97,7 @@ def get_task_context(
 
     pack = _build_context_pack(
         reading,
+        support_context=_support_context(query, reading, active_budget),
         status=status,
         task=task,
         focus_hints=focus_hints,
@@ -108,6 +121,7 @@ def get_task_context(
 def _build_context_pack(
     reading: Mapping[str, Any],
     *,
+    support_context: Mapping[str, Any],
     status: Mapping[str, Any],
     task: str,
     focus_hints: Sequence[str],
@@ -130,7 +144,24 @@ def _build_context_pack(
 
     reading_items = [_mapping(item) for item in _sequence(data.get("reading_order"))]
     likely_tests_raw = [item for item in reading_items if _is_test_path(str(item.get("path", "")))]
-    first_read_raw = [item for item in reading_items if item not in likely_tests_raw]
+    supporting_docs_raw = [
+        item for item in reading_items if _is_doc_path(str(item.get("path", "")))
+    ]
+    supporting_configs_raw = [
+        item for item in reading_items if _is_config_path(str(item.get("path", "")))
+    ]
+    support_paths = {
+        str(item.get("path", ""))
+        for item in [*supporting_docs_raw, *supporting_configs_raw]
+        if item.get("path")
+    }
+    if not _is_test_focused_task(task):
+        support_paths.update(
+            str(item.get("path", "")) for item in likely_tests_raw if item.get("path")
+        )
+    first_read_raw = [
+        item for item in reading_items if str(item.get("path", "")) not in support_paths
+    ]
     related_tests_by_source = _related_tests_by_source(likely_tests_raw)
 
     first_read_files = [
@@ -152,11 +183,54 @@ def _build_context_pack(
         )
         for item in likely_tests_raw[: budget["max_items_per_support_group"]]
     ]
+    supporting_docs = [
+        _support_item(
+            item, context_pack_id=context_pack_id, kind="supporting_doc", freshness=freshness
+        )
+        for item in _dedupe_support_items(
+            [*supporting_docs_raw, *_sequence(support_context.get("supporting_docs"))]
+        )[: budget["max_items_per_support_group"]]
+    ]
+    supporting_configs = [
+        _support_item(
+            item,
+            context_pack_id=context_pack_id,
+            kind="supporting_config",
+            freshness=freshness,
+        )
+        for item in _dedupe_support_items(
+            [*supporting_configs_raw, *_sequence(support_context.get("supporting_configs"))]
+        )[: budget["max_items_per_support_group"]]
+    ]
+    agent_guidance = [
+        _agent_guidance_item(item, context_pack_id=context_pack_id, freshness=freshness)
+        for item in _sequence(support_context.get("agent_guidance"))[
+            : budget["max_agent_guidance_items"]
+        ]
+    ]
+    risk_signals = [
+        _risk_signal_item(item, context_pack_id=context_pack_id, freshness=freshness)
+        for item in _sequence(support_context.get("risk_signals"))[: budget["max_risk_signals"]]
+    ]
+    lower_priority_context = [
+        _support_item(
+            item,
+            context_pack_id=context_pack_id,
+            kind="lower_priority_context",
+            freshness=freshness,
+        )
+        for item in _sequence(support_context.get("lower_priority_context"))[
+            : budget["max_items_per_support_group"]
+        ]
+    ]
     candidate_commands = [
         _command_item(command, context_pack_id=context_pack_id, freshness=freshness)
-        for command in _sequence(data.get("candidate_verification_commands"))[
-            : budget["max_candidate_verification_commands"]
-        ]
+        for command in _dedupe_commands(
+            [
+                *_sequence(data.get("candidate_verification_commands")),
+                *_sequence(support_context.get("candidate_verification_commands")),
+            ]
+        )[: budget["max_candidate_verification_commands"]]
     ]
     ambiguity = [
         _ambiguity_item(candidate, context_pack_id=context_pack_id, freshness=freshness)
@@ -176,7 +250,17 @@ def _build_context_pack(
     pack = {
         "agent_guidance": [],
         "ambiguity": ambiguity,
-        "budget": _budget_metadata(budget, first_read_files, likely_tests, candidate_commands),
+        "budget": _budget_metadata(
+            budget,
+            first_read_files,
+            likely_tests,
+            candidate_commands,
+            supporting_docs,
+            supporting_configs,
+            agent_guidance,
+            risk_signals,
+            lower_priority_context,
+        ),
         "candidate_verification_commands": candidate_commands,
         "context_pack_id": context_pack_id,
         "context_pack_version": CONTEXT_PACK_VERSION,
@@ -184,15 +268,16 @@ def _build_context_pack(
         "first_read_files": first_read_files,
         "freshness": freshness,
         "likely_tests": likely_tests,
-        "lower_priority_context": [],
-        "next_actions": _next_actions(first_read_files, likely_tests),
-        "risk_signals": [],
-        "supporting_configs": [],
-        "supporting_docs": [],
+        "lower_priority_context": lower_priority_context,
+        "next_actions": _next_actions(first_read_files),
+        "risk_signals": risk_signals,
+        "supporting_configs": supporting_configs,
+        "supporting_docs": supporting_docs,
         "task": _display_task(task),
         "task_fingerprint": task_fingerprint,
         "truncation": truncation_metadata(),
     }
+    pack["agent_guidance"] = agent_guidance
     return _apply_character_budget(pack, budget["max_total_chars"])
 
 
@@ -219,6 +304,128 @@ def _first_read_item(
     }
 
 
+def _support_context(
+    query: GraphQueryService,
+    reading: Mapping[str, Any],
+    budget: Mapping[str, int],
+) -> dict[str, list[dict[str, Any]]]:
+    data = _mapping(reading.get("data"))
+    source_paths = [
+        str(item.get("path"))
+        for item in _sequence(data.get("reading_order"))
+        if item.get("path")
+        and not _is_test_path(str(item.get("path")))
+        and not _is_doc_path(str(item.get("path")))
+        and not _is_config_path(str(item.get("path")))
+    ][: budget["max_first_read_files"]]
+    support: dict[str, list[dict[str, Any]]] = {
+        "agent_guidance": _agent_guidance_context(query, budget),
+        "candidate_verification_commands": [],
+        "lower_priority_context": [],
+        "risk_signals": [],
+        "supporting_configs": [],
+        "supporting_docs": [],
+    }
+    first_read_paths = set(source_paths)
+    support_paths: set[str] = set()
+    for path in source_paths:
+        impact = query.impact_analysis(
+            path,
+            max_results=max(
+                budget["max_items_per_support_group"],
+                budget["max_candidate_verification_commands"],
+                budget["max_risk_signals"],
+            ),
+        )
+        if not impact.get("ok", False):
+            continue
+        impact_data = _mapping(impact.get("data"))
+        support["supporting_docs"].extend(_sequence(impact_data.get("related_docs")))
+        support["supporting_configs"].extend(_sequence(impact_data.get("related_configs")))
+        support["candidate_verification_commands"].extend(
+            _sequence(impact_data.get("candidate_verification_commands"))
+        )
+        support["risk_signals"].extend(
+            _risk_context_item(item) for item in _sequence(impact_data.get("risk_comments"))
+        )
+        support_paths.update(
+            str(item.get("path"))
+            for item in [
+                *_sequence(impact_data.get("related_docs")),
+                *_sequence(impact_data.get("related_configs")),
+            ]
+            if _mapping(item).get("path")
+        )
+        for group_name in ("dependencies", "dependents"):
+            for item in _sequence(impact_data.get(group_name)):
+                mapped = _mapping(item)
+                item_path = str(mapped.get("path", ""))
+                if (
+                    not item_path
+                    or item_path in first_read_paths
+                    or item_path in support_paths
+                    or _is_test_path(item_path)
+                    or _is_doc_path(item_path)
+                    or _is_config_path(item_path)
+                ):
+                    continue
+                support["lower_priority_context"].append(
+                    {
+                        **mapped,
+                        "reason": "Evidence-backed related context to inspect later if needed.",
+                    }
+                )
+    support["supporting_docs"] = _dedupe_support_items(support["supporting_docs"])
+    support["supporting_configs"] = _dedupe_support_items(support["supporting_configs"])
+    support["candidate_verification_commands"] = _dedupe_commands(
+        support["candidate_verification_commands"]
+    )
+    support["risk_signals"] = _dedupe_risk_signals(support["risk_signals"])
+    support["lower_priority_context"] = _dedupe_support_items(support["lower_priority_context"])
+    return support
+
+
+def _agent_guidance_context(
+    query: GraphQueryService, budget: Mapping[str, int]
+) -> list[dict[str, Any]]:
+    summary = query.repo_summary(max_important_files=budget["max_agent_guidance_items"])
+    if not summary.get("ok", False):
+        return []
+    important_files = _sequence(_mapping(summary.get("data")).get("important_files"))
+    guidance: list[dict[str, Any]] = []
+    for item in important_files:
+        mapped = _mapping(item)
+        path = str(mapped.get("path", ""))
+        if str(mapped.get("doc_kind", "")) != "agent_instructions" and not _is_agent_guidance_path(
+            path
+        ):
+            continue
+        guidance.append(
+            {
+                "confidence": "medium",
+                "evidence": [{"path": path, "source": "documentation_files"}],
+                "path": path,
+                "reason": "Indexed Agent Guidance metadata is present.",
+            }
+        )
+    return guidance
+
+
+def _risk_context_item(item: Any) -> dict[str, Any]:
+    mapped = _mapping(item)
+    tag = str(mapped.get("tag") or "tagged_comment")
+    line = mapped.get("line")
+    path = str(mapped.get("path", ""))
+    return {
+        "category": tag,
+        "confidence": str(mapped.get("confidence", "medium")),
+        "evidence": [{"category": tag, "line": line, "path": path, "source": "tagged_comments"}],
+        "line": line,
+        "path": path,
+        "reason": str(mapped.get("reason") or "tagged_comment_on_related_file"),
+    }
+
+
 def _support_item(
     item: Mapping[str, Any],
     *,
@@ -239,7 +446,7 @@ def _command_item(
     path = str(item.get("path") or item.get("group_source_path") or "")
     identity = {"kind": "candidate_verification_command", "name": item.get("name"), "path": path}
     return {
-        "auto_run_recommended": bool(item.get("auto_run_recommended", False)),
+        "auto_run_recommended": False,
         "command": str(item.get("command", "")),
         "confidence": str(item.get("confidence", "high")),
         "evidence": [{"source": "config_commands"}],
@@ -247,9 +454,59 @@ def _command_item(
         "handle": _hash_id("item", {"context_pack_id": context_pack_id, "identity": identity}),
         "kind": "candidate_verification_command",
         "name": str(item.get("name", "")),
-        "not_run": bool(item.get("not_run", True)),
+        "not_run": True,
         "path": path,
         "reason": "Candidate verification command from repository config; not run.",
+    }
+
+
+def _agent_guidance_item(
+    item: Any,
+    *,
+    context_pack_id: str,
+    freshness: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapped = _mapping(item)
+    path = str(mapped.get("path", ""))
+    identity = {"kind": "agent_guidance", "path": path}
+    return {
+        "confidence": str(mapped.get("confidence", "medium")),
+        "evidence": _safe_evidence(mapped.get("evidence", [])),
+        "freshness": dict(freshness),
+        "handle": _hash_id("item", {"context_pack_id": context_pack_id, "identity": identity}),
+        "kind": "agent_guidance",
+        "path": path,
+        "reason": str(mapped.get("reason") or "Indexed Agent Guidance metadata is present."),
+    }
+
+
+def _risk_signal_item(
+    item: Any,
+    *,
+    context_pack_id: str,
+    freshness: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapped = _mapping(item)
+    path = str(mapped.get("path", ""))
+    category = str(mapped.get("category") or mapped.get("tag") or "tagged_comment")
+    line = mapped.get("line")
+    location: dict[str, Any] = {"path": path}
+    if isinstance(line, int):
+        location["line"] = line
+    identity = {"category": category, "kind": "risk_signal", "line": line, "path": path}
+    evidence = _safe_evidence(mapped.get("evidence", [])) or [
+        {"category": category, "line": line, "path": path, "source": "tagged_comments"}
+    ]
+    return {
+        "category": category,
+        "confidence": str(mapped.get("confidence", "medium")),
+        "evidence": evidence,
+        "freshness": dict(freshness),
+        "handle": _hash_id("item", {"context_pack_id": context_pack_id, "identity": identity}),
+        "kind": "risk_signal",
+        "location": location,
+        "path": path,
+        "reason": str(mapped.get("reason") or "Tagged comment metadata on related context."),
     }
 
 
@@ -357,13 +614,23 @@ def _budget_metadata(
     first_read_files: Sequence[Mapping[str, Any]],
     likely_tests: Sequence[Mapping[str, Any]],
     candidate_commands: Sequence[Mapping[str, Any]],
+    supporting_docs: Sequence[Mapping[str, Any]] = (),
+    supporting_configs: Sequence[Mapping[str, Any]] = (),
+    agent_guidance: Sequence[Mapping[str, Any]] = (),
+    risk_signals: Sequence[Mapping[str, Any]] = (),
+    lower_priority_context: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     serialized_chars = len(
         json.dumps(
             {
+                "agent_guidance": agent_guidance,
                 "candidate_verification_commands": candidate_commands,
                 "first_read_files": first_read_files,
                 "likely_tests": likely_tests,
+                "lower_priority_context": lower_priority_context,
+                "risk_signals": risk_signals,
+                "supporting_configs": supporting_configs,
+                "supporting_docs": supporting_docs,
             },
             sort_keys=True,
         )
@@ -375,15 +642,12 @@ def _budget_metadata(
     }
 
 
-def _next_actions(
-    first_read_files: Sequence[Mapping[str, Any]], likely_tests: Sequence[Mapping[str, Any]]
-) -> list[str]:
+def _next_actions(first_read_files: Sequence[Mapping[str, Any]]) -> list[str]:
     actions = []
     if first_read_files:
         actions.append("Inspect the ranked First-Read Files before editing.")
-    if likely_tests:
-        actions.append("Inspect likely related tests for expected behavior.")
     actions.append("Use expansion handles only for bounded follow-up context.")
+    actions.append("Use explain relevance on returned items before broadening scope.")
     return actions[: DEFAULT_CONTEXT_PACK_BUDGET["max_next_actions"]]
 
 
@@ -414,6 +678,43 @@ def _related_tests_by_source(tests: Sequence[Mapping[str, Any]]) -> dict[str, li
         if source_path and path:
             related.setdefault(str(source_path), []).append(str(path))
     return {path: sorted(set(paths)) for path, paths in related.items()}
+
+
+def _dedupe_support_items(items: Sequence[Any]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        mapped = _mapping(item)
+        path = str(mapped.get("path", ""))
+        if not path or path in deduped:
+            continue
+        deduped[path] = mapped
+    return [deduped[path] for path in sorted(deduped)]
+
+
+def _dedupe_commands(items: Sequence[Any]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in items:
+        mapped = _mapping(item)
+        key = (
+            str(mapped.get("path", "")),
+            str(mapped.get("name", "")),
+            str(mapped.get("command", "")),
+        )
+        if key in deduped:
+            continue
+        deduped[key] = mapped
+    return [deduped[key] for key in sorted(deduped)]
+
+
+def _dedupe_risk_signals(items: Sequence[Any]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[str, str, Any], dict[str, Any]] = {}
+    for item in items:
+        mapped = _mapping(item)
+        key = (str(mapped.get("path", "")), str(mapped.get("category", "")), mapped.get("line"))
+        if key in deduped:
+            continue
+        deduped[key] = mapped
+    return [deduped[key] for key in sorted(deduped, key=lambda key: (key[0], str(key[2]), key[1]))]
 
 
 def _task_fingerprint(task: str) -> str:
@@ -519,6 +820,12 @@ def _is_broad_task(task: str) -> bool:
     )
 
 
+def _is_test_focused_task(task: str) -> bool:
+    return bool(
+        set(re.findall(r"[A-Za-z0-9_./-]+", _display_task(task).lower())) & _TEST_TASK_TOKENS
+    )
+
+
 def _looks_like_path(value: str) -> bool:
     return "/" in value or "\\" in value or value.startswith(".") or bool(Path(value).suffix)
 
@@ -538,6 +845,22 @@ def _safe_evidence(value: Any) -> list[dict[str, Any]]:
 
 def _is_test_path(path: str) -> bool:
     return bool(_TEST_PATH_RE.search(path))
+
+
+def _is_doc_path(path: str) -> bool:
+    return Path(path).suffix.lower() in {".md", ".markdown", ".mdx"}
+
+
+def _is_agent_guidance_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    return name in _AGENT_GUIDANCE_NAMES or path.startswith("docs/agents/")
+
+
+def _is_config_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    if name in _CONFIG_NAMES:
+        return True
+    return name.endswith((".toml", ".yaml", ".yml", ".ini")) and not _is_doc_path(path)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
