@@ -451,7 +451,7 @@ def test_index_writes_javascript_symbol_export_and_commonjs_facts_to_artifacts(t
             )
         )
 
-    assert ("function", "handler", 1, 1) in symbols
+    assert ("function", "handler", 1, 3) in symbols
     assert ("arrow_function", "view", 5, 5) in symbols
     assert ("arrow_function", "internal", 7, 7) in symbols
     assert ("class", "Service", 9, 9) in symbols
