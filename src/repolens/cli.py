@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from repolens.benchmark import RepoLensBenchmarkError, run_update_benchmark
+from repolens.context_pack import get_task_context, human_context_pack
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
 from repolens.mcp_server import run_mcp_server
@@ -402,6 +403,38 @@ def search(
         typer.echo(f"{match.path}:{match.line}:{match.column}: {match.preview}{truncated_marker}")
     for warning in warnings:
         typer.echo(f"Warning: {warning}", err=True)
+
+
+@app.command()
+def context(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path to inspect.",
+        ),
+    ],
+    task: Annotated[str, typer.Argument(help="Natural-language task to orient around.")],
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Return a deterministic, bounded Context Pack for a task."""
+    envelope = get_task_context(repo_path, task)
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False):
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_context_pack(envelope), nl=False)
+    if not envelope.get("ok", False):
+        raise typer.Exit(1)
 
 
 @app.command()
