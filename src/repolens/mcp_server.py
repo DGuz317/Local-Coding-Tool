@@ -8,6 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from repolens.context_pack import get_task_context
 from repolens.mcp_envelope import (
     MCP_GRAPH_UNAVAILABLE_CODES,
     mcp_error,
@@ -39,6 +40,7 @@ MCP_TOOL_NAMES = (
     "shortest_path",
     "impact_analysis",
     "suggest_reading_order",
+    "get_task_context",
     "list_entrypoints",
 )
 
@@ -196,6 +198,9 @@ class RepoLensMcpTools:
     def suggest_reading_order(self, task: str, max_files: int = 7) -> dict[str, Any]:
         return self._mcp_envelope(self.query.suggest_reading_order(task, max_files=max_files))
 
+    def get_task_context(self, task: str) -> dict[str, Any]:
+        return get_task_context(self.repo_path, task)
+
     def list_entrypoints(
         self,
         kind: str | None = None,
@@ -318,6 +323,11 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
     def suggest_reading_order(task: str, max_files: int = 7) -> dict[str, Any]:
         """Suggest a bounded file reading order for a natural-language task."""
         return tools.suggest_reading_order(task, max_files)
+
+    @server.tool()
+    def get_task_context(task: str) -> dict[str, Any]:
+        """Return a deterministic v0.3 Context Pack for a natural-language task."""
+        return tools.get_task_context(task)
 
     @server.tool()
     def list_entrypoints(
