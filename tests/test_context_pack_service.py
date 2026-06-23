@@ -36,10 +36,7 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     assert pack["freshness"]["canonical_graph_hash"]
     assert pack["truncation"] == {"fields": [], "truncated": False}
 
-    assert [item["path"] for item in pack["first_read_files"]] == [
-        "src/auth/login.ts",
-        "README.md",
-    ]
+    assert [item["path"] for item in pack["first_read_files"]] == ["src/auth/login.ts"]
     first_read = pack["first_read_files"][0]
     assert first_read["kind"] == "first_read_file"
     assert first_read["rank"] == 1
@@ -49,7 +46,28 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     assert first_read["related_tests"] == ["tests/login.test.ts"]
 
     assert [item["path"] for item in pack["likely_tests"]] == ["tests/login.test.ts"]
-    assert pack["candidate_verification_commands"] == []
+    assert [item["path"] for item in pack["supporting_docs"]] == ["README.md"]
+    assert [item["path"] for item in pack["supporting_configs"]] == ["package.json"]
+    assert [item["path"] for item in pack["agent_guidance"]] == ["AGENTS.md"]
+    assert pack["agent_guidance"][0].keys() >= {
+        "path",
+        "kind",
+        "freshness",
+        "reason",
+    }
+    assert "raw_agent_guidance" not in pack["agent_guidance"][0]
+
+    assert [item["category"] for item in pack["risk_signals"]] == ["TODO"]
+    assert "handle secret rotation" not in json.dumps(pack["risk_signals"])
+
+    command = pack["candidate_verification_commands"][0]
+    assert command["path"] == "package.json"
+    assert command["not_run"] is True
+    assert command["auto_run_recommended"] is False
+
+    assert [item["path"] for item in pack["lower_priority_context"]] == []
+    assert all("ignore" not in item.lower() for item in pack["next_actions"])
+    assert all("automatic" not in item.lower() for item in pack["next_actions"])
     assert [handle["handle"] for handle in pack["expansion_handles"]] == [
         item["handle"] for item in pack["first_read_files"]
     ]
@@ -191,7 +209,10 @@ def _write_context_fixture_repo(root) -> None:
             """
             {
               "name": "auth-demo",
-              "scripts": {"test": "vitest run tests/login.test.ts"}
+              "scripts": {
+                "test": "vitest run tests/login.test.ts",
+                "lint": "eslint src/auth/login.ts"
+              }
             }
             """
         ).lstrip(),
@@ -207,9 +228,20 @@ def _write_context_fixture_repo(root) -> None:
         ).lstrip(),
     )
     _write_text(
+        root / "AGENTS.md",
+        dedent(
+            """
+            # Agent Guidance
+
+            Keep changes focused.
+            """
+        ).lstrip(),
+    )
+    _write_text(
         root / "src" / "auth" / "login.ts",
         dedent(
             """
+            // TODO: handle secret rotation before changing validation
             export function validateLogin(input: { user: string }) {
               return input.user.length > 0;
             }
