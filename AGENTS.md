@@ -358,30 +358,10 @@ Use expectation-based release gates rather than universal numeric thresholds.
 - IDs should be stable across normal line shifts where practical.
 - Context Pack code should be deterministic under repeated runs against the same graph, task, focus hints, and budget parameters.
 
-## Current v0.3 Progress
-
-Published issue plan:
-
-- `#79` RepoLens MCP v0.3 release tracker.
-- `#80` Context Pack contracts and fixture specification.
-- `#81` Context Pack tracer bullet.
-- `#82` Context Pack safety and ambiguity hardening.
-- `#83` Evidence-gated support groups.
-- `#84` Derived Structural Summaries and package ownership.
-- `#85` Pack-scoped expansion and relevance.
-- `#86` Context Pack Evaluation execution.
-- `#87` v0.3 docs and release readiness.
-- `#88` Navigation gap improvements from evaluation.
-- `#89` Persisted summary caching if needed.
-- `#90` Additional evaluation corpora.
-
-Next planned slice:
-
-- `#80` Context Pack contracts and fixture specification.
-
 ## Architecture-Level Context
 
 - If `CONTEXT.md` exists, read it before naming new concepts.
 - If `docs/adr/` exists, read relevant ADRs before architecture-level changes.
 - `docs/adr/0003-v0-3-context-pack-boundary.md` defines the v0.3 Context Pack boundary.
 - Do not re-litigate accepted decisions unless new implementation friction justifies it.
+
