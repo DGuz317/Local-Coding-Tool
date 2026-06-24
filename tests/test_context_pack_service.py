@@ -6,7 +6,7 @@ from textwrap import dedent
 from typer.testing import CliRunner
 
 from repolens.cli import app
-from repolens.context_pack import get_task_context
+from repolens.context_pack import expand_context, explain_relevance, get_task_context
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION, DEFAULT_CONTEXT_PACK_BUDGET
 from repolens.indexer import index_repository
 from repolens.mcp_server import RepoLensMcpTools
@@ -110,7 +110,18 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     assert all("ignore" not in item.lower() for item in pack["next_actions"])
     assert all("automatic" not in item.lower() for item in pack["next_actions"])
     assert [handle["handle"] for handle in pack["expansion_handles"]] == [
-        item["handle"] for item in pack["first_read_files"]
+        item["handle"]
+        for item in [
+            *pack["first_read_files"],
+            *pack["likely_tests"],
+            *pack["supporting_docs"],
+            *pack["supporting_configs"],
+            *pack["agent_guidance"],
+            *pack["candidate_verification_commands"],
+            *pack["risk_signals"],
+            *pack["lower_priority_context"],
+            *pack["ambiguity"],
+        ]
     ]
     assert all(
         handle["context_pack_id"] == pack["context_pack_id"] for handle in pack["expansion_handles"]
@@ -255,6 +266,135 @@ def test_context_pack_does_not_infer_package_boundary_from_directory_name(tmp_pa
     first_read = envelope["data"]["first_read_files"][0]
     assert first_read["path"] == "src/auth/login.ts"
     assert "package_boundary" not in first_read
+
+
+def test_expand_context_is_pack_scoped_bounded_and_source_free(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    task = "Add validation to login flow tests"
+    pack_envelope = get_task_context(tmp_path, task)
+    pack = pack_envelope["data"]
+    item = pack["first_read_files"][0]
+
+    envelope = expand_context(
+        tmp_path,
+        task,
+        pack["context_pack_id"],
+        item["handle"],
+        depth=99,
+        max_items_per_kind=1,
+        max_total_items=3,
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["data"]["context_pack_id"] == pack["context_pack_id"]
+    assert envelope["data"]["item"]["handle"] == item["handle"]
+    assert envelope["data"]["depth"] == 2
+    assert envelope["limits"] == {
+        "max_depth": 2,
+        "max_items_per_kind": 1,
+        "max_total_items": 3,
+    }
+    expanded = envelope["data"]["expanded_context"]
+    assert [entry["path"] for entry in expanded["direct_affected_files"]] == ["src/auth/login.ts"]
+    assert [entry["path"] for entry in expanded["likely_tests"]] == ["tests/login.test.ts"]
+    assert sum(len(entries) for entries in expanded.values()) <= 3
+    assert envelope["data"]["item"]["reason"] == item["reason"]
+    assert envelope["confidence"] == item["confidence"]
+    assert "return input.user" not in json.dumps(envelope)
+
+
+def test_expand_context_rejects_handles_not_returned_in_pack(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    task = "Add validation to login flow tests"
+    pack = get_task_context(tmp_path, task)["data"]
+
+    envelope = expand_context(
+        tmp_path,
+        task,
+        pack["context_pack_id"],
+        "item_not_returned",
+    )
+
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "context_pack_item_not_returned"
+    assert envelope["error"]["requires_new_pack"] is True
+
+
+def test_expand_context_rejects_stale_or_mismatched_pack_id(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    task = "Add validation to login flow tests"
+    pack = get_task_context(tmp_path, task)["data"]
+    item = pack["first_read_files"][0]
+
+    mismatched = expand_context(
+        tmp_path,
+        task,
+        "cp_mismatch",
+        item["handle"],
+    )
+
+    assert mismatched["ok"] is False
+    assert mismatched["error"]["code"] == "context_pack_id_mismatch"
+    assert mismatched["error"]["requires_new_pack"] is True
+
+    _write_text(tmp_path / "src" / "auth" / "login.ts", "export const changed = true;\n")
+    stale = expand_context(
+        tmp_path,
+        task,
+        pack["context_pack_id"],
+        item["handle"],
+    )
+
+    assert stale["ok"] is False
+    assert stale["error"]["code"] == "stale_context_pack"
+    assert stale["error"]["requires_new_pack"] is True
+
+
+def test_explain_relevance_returns_item_reason_and_evidence(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    task = "Add validation to login flow tests"
+    pack = get_task_context(tmp_path, task)["data"]
+    item = pack["likely_tests"][0]
+
+    envelope = explain_relevance(
+        tmp_path,
+        task,
+        pack["context_pack_id"],
+        item["handle"],
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["data"] == {
+        "confidence": item["confidence"],
+        "context_pack_id": pack["context_pack_id"],
+        "evidence": item["evidence"],
+        "freshness": item["freshness"],
+        "item_handle": item["handle"],
+        "item_kind": item["kind"],
+        "path": item["path"],
+        "reason": item["reason"],
+    }
+    assert envelope["freshness"] == item["freshness"]
+
+
+def test_context_pack_mcp_expansion_and_relevance_use_same_service(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+    task = "Add validation to login flow tests"
+    pack = tools.get_task_context(task)["data"]
+    item = pack["first_read_files"][0]
+
+    assert tools.expand_context(task, pack["context_pack_id"], item["handle"]) == expand_context(
+        tmp_path, task, pack["context_pack_id"], item["handle"]
+    )
+    assert tools.explain_relevance(
+        task, pack["context_pack_id"], item["handle"]
+    ) == explain_relevance(tmp_path, task, pack["context_pack_id"], item["handle"])
 
 
 def _write_context_fixture_repo(root) -> None:

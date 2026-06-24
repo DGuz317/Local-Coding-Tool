@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from repolens.context_pack import get_task_context
+from repolens.context_pack import expand_context, explain_relevance, get_task_context
 from repolens.mcp_envelope import (
     MCP_GRAPH_UNAVAILABLE_CODES,
     mcp_error,
@@ -41,6 +41,8 @@ MCP_TOOL_NAMES = (
     "impact_analysis",
     "suggest_reading_order",
     "get_task_context",
+    "expand_context",
+    "explain_relevance",
     "list_entrypoints",
 )
 
@@ -201,6 +203,30 @@ class RepoLensMcpTools:
     def get_task_context(self, task: str) -> dict[str, Any]:
         return get_task_context(self.repo_path, task)
 
+    def expand_context(
+        self,
+        task: str,
+        context_pack_id: str,
+        item_handle: str,
+        depth: int = 1,
+        max_items_per_kind: int = 3,
+        max_total_items: int = 10,
+    ) -> dict[str, Any]:
+        return expand_context(
+            self.repo_path,
+            task,
+            context_pack_id,
+            item_handle,
+            depth=depth,
+            max_items_per_kind=max_items_per_kind,
+            max_total_items=max_total_items,
+        )
+
+    def explain_relevance(
+        self, task: str, context_pack_id: str, item_handle: str
+    ) -> dict[str, Any]:
+        return explain_relevance(self.repo_path, task, context_pack_id, item_handle)
+
     def list_entrypoints(
         self,
         kind: str | None = None,
@@ -328,6 +354,30 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
     def get_task_context(task: str) -> dict[str, Any]:
         """Return a deterministic v0.3 Context Pack for a natural-language task."""
         return tools.get_task_context(task)
+
+    @server.tool()
+    def expand_context(
+        task: str,
+        context_pack_id: str,
+        item_handle: str,
+        depth: int = 1,
+        max_items_per_kind: int = 3,
+        max_total_items: int = 10,
+    ) -> dict[str, Any]:
+        """Expand one returned Context Pack item with bounded graph context."""
+        return tools.expand_context(
+            task,
+            context_pack_id,
+            item_handle,
+            depth,
+            max_items_per_kind,
+            max_total_items,
+        )
+
+    @server.tool()
+    def explain_relevance(task: str, context_pack_id: str, item_handle: str) -> dict[str, Any]:
+        """Explain why one returned item appeared in a Context Pack."""
+        return tools.explain_relevance(task, context_pack_id, item_handle)
 
     @server.tool()
     def list_entrypoints(
