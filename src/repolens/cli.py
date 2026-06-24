@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from repolens.benchmark import RepoLensBenchmarkError, run_update_benchmark
+from repolens.context_evaluation import human_context_evaluation, run_context_evaluation
 from repolens.context_pack import get_task_context, human_context_pack
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
@@ -434,6 +435,38 @@ def context(
 
     typer.echo(human_context_pack(envelope), nl=False)
     if not envelope.get("ok", False):
+        raise typer.Exit(1)
+
+
+@app.command("evaluate-context")
+def evaluate_context(
+    manifest_path: Annotated[
+        Path,
+        typer.Option(
+            "--manifest",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+            help="Context Pack Evaluation manifest to run.",
+        ),
+    ] = Path("tests/fixtures/context_pack/evaluation_manifest.json"),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Run local Context Pack Evaluation fixtures."""
+    envelope = run_context_evaluation(manifest_path=manifest_path)
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_context_evaluation(envelope), nl=False)
+    if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
         raise typer.Exit(1)
 
 

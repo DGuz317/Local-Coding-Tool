@@ -1,0 +1,6 @@
+{
+  "name": "context-pack-happy-path",
+  "scripts": {
+    "test": "pytest tests"
+  }
+}
