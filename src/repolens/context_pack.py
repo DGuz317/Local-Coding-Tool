@@ -218,6 +218,7 @@ def get_task_context(
     )
     if not reading.get("ok", False):
         return mcp_from_query_envelope(reading)
+    reading = _apply_focus_hint_resolution(reading, focus_hints=focus_hints, repo_root=repo_root)
 
     hardening_warnings = _hardening_warnings(
         reading,
@@ -968,6 +969,53 @@ def _hardening_warnings(
     return list(dict.fromkeys(warnings))
 
 
+def _apply_focus_hint_resolution(
+    reading: Mapping[str, Any], *, focus_hints: Sequence[str], repo_root: Path
+) -> dict[str, Any]:
+    """Use an existing in-root focus path to disambiguate reading-order candidates."""
+    data = _mapping(reading.get("data"))
+    candidates = [_mapping(item) for item in _sequence(data.get("candidates"))]
+    if not candidates or not focus_hints:
+        return dict(reading)
+
+    focus_paths: set[str] = set()
+    for hint in focus_hints:
+        raw_hint = str(hint)
+        if not _looks_like_path(raw_hint):
+            continue
+        hint_path = Path(raw_hint)
+        resolved = (hint_path if hint_path.is_absolute() else repo_root / hint_path).resolve()
+        if resolved.exists() and (resolved == repo_root or repo_root in resolved.parents):
+            focus_paths.add(resolved.relative_to(repo_root).as_posix())
+    if not focus_paths:
+        return dict(reading)
+
+    focused = []
+    for item in candidates:
+        path = _candidate_path(item)
+        if path in focus_paths:
+            focused.append({**item, "path": path})
+    if not focused:
+        return dict(reading)
+
+    updated_data = dict(data)
+    updated_data["ambiguous"] = False
+    updated_data["candidates"] = []
+    updated_data["reading_order"] = focused
+    updated_data["total_recommendations"] = len(focused)
+    updated = dict(reading)
+    updated["data"] = updated_data
+    updated["confidence"] = "medium"
+    return updated
+
+
+def _candidate_path(item: Mapping[str, Any]) -> str:
+    direct_path = str(item.get("path") or "")
+    if direct_path:
+        return direct_path
+    return str(_mapping(item.get("node")).get("path") or "")
+
+
 def _unresolved_focus_hint_warnings(
     data: Mapping[str, Any], *, focus_hints: Sequence[str], repo_root: Path
 ) -> list[str]:
@@ -1013,7 +1061,9 @@ def _focus_match_text(data: Mapping[str, Any]) -> str:
 def _is_broad_task(task: str) -> bool:
     tokens = re.findall(r"[A-Za-z0-9_./-]+", _display_task(task).lower())
     meaningful = [
-        token for token in tokens if token not in {"add", "change", "fix", "the", "to", "update"}
+        token
+        for token in tokens
+        if token not in {"across", "add", "change", "fix", "improve", "the", "to", "update"}
     ]
     return (
         bool(meaningful)

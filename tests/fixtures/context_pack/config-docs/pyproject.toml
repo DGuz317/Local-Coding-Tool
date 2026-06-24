@@ -1,0 +1,9 @@
+[project]
+name = "context-pack-config-docs"
+version = "0.1.0"
+
+[project.scripts]
+context-pack-demo = "demo:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

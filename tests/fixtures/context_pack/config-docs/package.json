@@ -1,0 +1,7 @@
+{
+  "name": "context-pack-config-docs",
+  "scripts": {
+    "test": "pytest tests",
+    "lint": "ruff check ."
+  }
+}
