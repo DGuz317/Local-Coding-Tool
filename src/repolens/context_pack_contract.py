@@ -240,6 +240,9 @@ def _guard_value(value: Any, *, path: str, sanitize: bool) -> tuple[Any, list[st
         for key, child in value.items():
             key_text = str(key)
             child_path = f"{path}.{key_text}"
+            if path == "$.error" and key_text == "code":
+                result[key_text] = child
+                continue
             if key_text in FORBIDDEN_CONTEXT_PACK_FIELD_NAMES:
                 violations.append(f"{child_path}: forbidden field")
                 if sanitize:

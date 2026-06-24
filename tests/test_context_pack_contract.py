@@ -113,6 +113,20 @@ def test_context_pack_disclosure_guard_rejects_absolute_paths_in_output():
     assert "$.data.path: absolute path" in exc_info.value.violations
 
 
+def test_context_pack_disclosure_guard_allows_standard_mcp_error_code():
+    guarded = guard_context_pack_output(
+        {
+            "data": {},
+            "error": {
+                "code": "context_pack_id_mismatch",
+                "message": "Request a fresh Context Pack.",
+            },
+        }
+    )
+
+    assert guarded["error"]["code"] == "context_pack_id_mismatch"
+
+
 def test_context_pack_fixture_manifest_names_required_case_families():
     manifest_path = Path("tests/fixtures/context_pack/evaluation_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

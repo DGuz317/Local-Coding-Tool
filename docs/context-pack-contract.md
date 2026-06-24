@@ -31,6 +31,10 @@ Supported item kinds are `first_read_file`, `likely_test`, `supporting_doc`, `su
 
 Expansion handles must include `handle`, `item_kind`, `context_pack_id`, `reason`, and `max_depth`. Handles are deterministic, pack-scoped references to items returned in the pack.
 
+`expand_context` is a stateless follow-up operation. Callers provide the original task, Context Pack ID, and item handle; RepoLens reconstructs the current Context Pack from graph state and returns `ok: false` when the pack is stale, mismatched, or the item handle was not returned in that pack. Expansion defaults to depth 1, enforces a hard maximum depth of 2, and bounds output by per-kind and total item caps.
+
+`explain_relevance` is a stateless follow-up operation. Callers provide the original task, Context Pack ID, and item handle; RepoLens returns the returned item's reason, confidence, bounded evidence, and freshness metadata without expanding source text.
+
 ## MCP Envelope
 
 Context Pack MCP tools must return the standard envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`. Structured errors use `ok: false` and the existing RepoLens error shape. Missing or unavailable graph artifacts use the existing graph-unavailable errors.

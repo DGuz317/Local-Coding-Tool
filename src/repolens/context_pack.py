@@ -56,6 +56,143 @@ _CONFIG_NAMES = {
     "tsconfig.json",
     "jsconfig.json",
 }
+_EXPAND_CONTEXT_MAX_DEPTH = 2
+_EXPAND_CONTEXT_DEFAULT_DEPTH = 1
+_EXPAND_CONTEXT_DEFAULT_ITEMS_PER_KIND = 3
+_EXPAND_CONTEXT_DEFAULT_TOTAL_ITEMS = 10
+_EXPAND_CONTEXT_GROUPS = (
+    "direct_affected_files",
+    "dependencies",
+    "dependents",
+    "likely_tests",
+    "related_docs",
+    "related_configs",
+    "risk_signals",
+    "candidate_verification_commands",
+)
+
+
+def expand_context(
+    repo_path: Path | str,
+    task: str,
+    context_pack_id: str,
+    item_handle: str,
+    *,
+    focus_hints: Sequence[str] = (),
+    budget: Mapping[str, int] | None = None,
+    depth: int = _EXPAND_CONTEXT_DEFAULT_DEPTH,
+    max_items_per_kind: int = _EXPAND_CONTEXT_DEFAULT_ITEMS_PER_KIND,
+    max_total_items: int = _EXPAND_CONTEXT_DEFAULT_TOTAL_ITEMS,
+) -> dict[str, Any]:
+    """Expand one item returned in a specific Context Pack without session state."""
+    capped_depth = min(max(1, int(depth)), _EXPAND_CONTEXT_MAX_DEPTH)
+    limits = _expansion_limits(max_items_per_kind, max_total_items)
+    validated = _validated_pack_item(
+        repo_path,
+        task,
+        context_pack_id,
+        item_handle,
+        focus_hints=focus_hints,
+        budget=budget,
+        limits=limits,
+    )
+    if not validated["ok"]:
+        return validated["envelope"]
+
+    pack = validated["pack"]
+    item = validated["item"]
+    item_path = str(item.get("path", ""))
+    if not item_path:
+        return _context_pack_followup_error(
+            code="context_pack_item_not_expandable",
+            message="Context Pack item cannot be expanded because it has no graph path.",
+            limits=limits,
+            freshness=pack.get("freshness"),
+        )
+
+    impact = GraphQueryService(repo_path).impact_analysis(
+        item_path,
+        depth=capped_depth,
+        max_results=max(limits["max_items_per_kind"], limits["max_total_items"]),
+    )
+    if not impact.get("ok", False):
+        return mcp_from_query_envelope(impact)
+
+    impact_data = _mapping(impact.get("data"))
+    expanded_context, truncated_fields = _expanded_context_groups(
+        impact_data,
+        context_pack_id=context_pack_id,
+        freshness=_mapping(pack.get("freshness")),
+        max_items_per_kind=limits["max_items_per_kind"],
+        max_total_items=limits["max_total_items"],
+    )
+    data = {
+        "context_pack_id": context_pack_id,
+        "depth": capped_depth,
+        "expanded_context": expanded_context,
+        "item": _followup_item_summary(item),
+        "item_handle": item_handle,
+        "item_kind": item.get("kind"),
+        "truncation": truncation_metadata(fields=truncated_fields),
+    }
+    return guard_context_pack_output(
+        mcp_success(
+            data=guard_context_pack_output(data),
+            confidence=str(item.get("confidence", impact.get("confidence", "low"))),
+            evidence=item.get("evidence", []),
+            freshness=_mapping(pack.get("freshness")),
+            limits=limits,
+            truncation=truncation_metadata(fields=truncated_fields),
+            warnings=impact.get("warnings", []),
+        )
+    )
+
+
+def explain_relevance(
+    repo_path: Path | str,
+    task: str,
+    context_pack_id: str,
+    item_handle: str,
+    *,
+    focus_hints: Sequence[str] = (),
+    budget: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Explain why one returned Context Pack item appeared in that pack."""
+    limits = {"max_depth": 0, "max_items_per_kind": 0, "max_total_items": 1}
+    validated = _validated_pack_item(
+        repo_path,
+        task,
+        context_pack_id,
+        item_handle,
+        focus_hints=focus_hints,
+        budget=budget,
+        limits=limits,
+    )
+    if not validated["ok"]:
+        return validated["envelope"]
+
+    item = validated["item"]
+    data = {
+        "confidence": str(item.get("confidence", "low")),
+        "context_pack_id": context_pack_id,
+        "evidence": _safe_evidence(item.get("evidence", [])),
+        "freshness": _mapping(item.get("freshness")),
+        "item_handle": item_handle,
+        "item_kind": item.get("kind"),
+        "path": item.get("path", ""),
+        "reason": str(item.get("reason", "Graph-derived task match.")),
+    }
+    return guard_context_pack_output(
+        mcp_success(
+            data=guard_context_pack_output(data),
+            confidence=data["confidence"],
+            evidence=data["evidence"],
+            freshness=data["freshness"],
+            limits=limits,
+            truncation=truncation_metadata(),
+            warnings=[],
+        )
+    )
 
 
 def get_task_context(
@@ -245,15 +382,26 @@ def _build_context_pack(
         _ambiguity_item(candidate, context_pack_id=context_pack_id, freshness=freshness)
         for candidate in _sequence(data.get("candidates"))[: budget["max_items_per_support_group"]]
     ]
+    expandable_items = [
+        *first_read_files,
+        *likely_tests,
+        *supporting_docs,
+        *supporting_configs,
+        *agent_guidance,
+        *candidate_commands,
+        *risk_signals,
+        *lower_priority_context,
+        *ambiguity,
+    ]
     expansion_handles = [
         {
             "context_pack_id": context_pack_id,
             "handle": item["handle"],
             "item_kind": item["kind"],
-            "max_depth": 1,
+            "max_depth": _EXPAND_CONTEXT_DEFAULT_DEPTH,
             "reason": "Expand this returned item with bounded graph context.",
         }
-        for item in first_read_files
+        for item in expandable_items
     ]
 
     pack = {
@@ -895,6 +1043,197 @@ def _safe_evidence(value: Any) -> list[dict[str, Any]]:
         mapped = _mapping(item)
         evidence.append({key: child for key, child in mapped.items() if key != "value"})
     return evidence[:3]
+
+
+def _validated_pack_item(
+    repo_path: Path | str,
+    task: str,
+    context_pack_id: str,
+    item_handle: str,
+    *,
+    focus_hints: Sequence[str],
+    budget: Mapping[str, int] | None,
+    limits: Mapping[str, int],
+) -> dict[str, Any]:
+    envelope = get_task_context(repo_path, task, focus_hints=focus_hints, budget=budget)
+    if not envelope.get("ok", False):
+        return {"envelope": envelope, "ok": False}
+
+    pack = _mapping(envelope.get("data"))
+    freshness = _mapping(pack.get("freshness"))
+    if freshness.get("fresh") is False:
+        return {
+            "envelope": _context_pack_followup_error(
+                code="stale_context_pack",
+                message="Context Pack is stale; request a fresh Context Pack before follow-up use.",
+                limits=limits,
+                freshness=freshness,
+                warnings=envelope.get("warnings", []),
+            ),
+            "ok": False,
+        }
+    current_pack_id = str(pack.get("context_pack_id", ""))
+    if current_pack_id != context_pack_id:
+        return {
+            "envelope": _context_pack_followup_error(
+                code="context_pack_id_mismatch",
+                message="Context Pack ID does not match current graph, task, focus, or budget.",
+                limits=limits,
+                freshness=freshness,
+                details={"current_context_pack_id": current_pack_id},
+            ),
+            "ok": False,
+        }
+
+    item = _returned_pack_items(pack).get(item_handle)
+    if item is None:
+        return {
+            "envelope": _context_pack_followup_error(
+                code="context_pack_item_not_returned",
+                message="Item handle was not returned in this Context Pack.",
+                limits=limits,
+                freshness=freshness,
+            ),
+            "ok": False,
+        }
+    return {"item": item, "ok": True, "pack": pack}
+
+
+def _context_pack_followup_error(
+    *,
+    code: str,
+    message: str,
+    limits: Mapping[str, Any],
+    freshness: Mapping[str, Any] | None = None,
+    details: Mapping[str, Any] | None = None,
+    warnings: Sequence[str] = (),
+) -> dict[str, Any]:
+    return guard_context_pack_output(
+        mcp_error(
+            code=code,
+            message=message,
+            details={"requires_new_pack": True, **dict(details or {})},
+            limits=limits,
+            warnings=warnings,
+            freshness=freshness or {"fresh": None, "status": "unknown"},
+        )
+    )
+
+
+def _returned_pack_items(pack: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    items: dict[str, dict[str, Any]] = {}
+    for group_name in (
+        "first_read_files",
+        "likely_tests",
+        "supporting_docs",
+        "supporting_configs",
+        "agent_guidance",
+        "candidate_verification_commands",
+        "risk_signals",
+        "lower_priority_context",
+        "ambiguity",
+    ):
+        for item in _sequence(pack.get(group_name)):
+            mapped = _mapping(item)
+            handle = str(mapped.get("handle", ""))
+            if handle:
+                items[handle] = mapped
+    return items
+
+
+def _expansion_limits(max_items_per_kind: int, max_total_items: int) -> dict[str, int]:
+    per_kind = max(1, int(max_items_per_kind))
+    total = max(1, int(max_total_items))
+    return {
+        "max_depth": _EXPAND_CONTEXT_MAX_DEPTH,
+        "max_items_per_kind": per_kind,
+        "max_total_items": total,
+    }
+
+
+def _expanded_context_groups(
+    impact_data: Mapping[str, Any],
+    *,
+    context_pack_id: str,
+    freshness: Mapping[str, Any],
+    max_items_per_kind: int,
+    max_total_items: int,
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    groups: dict[str, list[dict[str, Any]]] = {group: [] for group in _EXPAND_CONTEXT_GROUPS}
+    truncated_fields: list[str] = []
+    remaining = max_total_items
+    for group in _EXPAND_CONTEXT_GROUPS:
+        raw_items = _sequence(
+            impact_data.get("risk_comments") if group == "risk_signals" else impact_data.get(group)
+        )
+        if not raw_items:
+            continue
+        limited_raw = raw_items[: min(max_items_per_kind, remaining)]
+        groups[group] = [
+            _expanded_context_item(
+                item,
+                group=group,
+                context_pack_id=context_pack_id,
+                freshness=freshness,
+            )
+            for item in limited_raw
+        ]
+        remaining -= len(groups[group])
+        if len(raw_items) > len(limited_raw):
+            truncated_fields.append(group)
+        if remaining <= 0:
+            later_groups = _EXPAND_CONTEXT_GROUPS[_EXPAND_CONTEXT_GROUPS.index(group) + 1 :]
+            truncated_fields.extend(
+                later_group
+                for later_group in later_groups
+                if _sequence(
+                    impact_data.get("risk_comments")
+                    if later_group == "risk_signals"
+                    else impact_data.get(later_group)
+                )
+            )
+            break
+    return groups, sorted(set(truncated_fields))
+
+
+def _expanded_context_item(
+    item: Any,
+    *,
+    group: str,
+    context_pack_id: str,
+    freshness: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapped = _mapping(item)
+    if group == "risk_signals":
+        return _risk_signal_item(mapped, context_pack_id=context_pack_id, freshness=freshness)
+    if group == "candidate_verification_commands":
+        return _command_item(mapped, context_pack_id=context_pack_id, freshness=freshness)
+    kind_by_group = {
+        "dependencies": "lower_priority_context",
+        "dependents": "lower_priority_context",
+        "direct_affected_files": "first_read_file",
+        "likely_tests": "likely_test",
+        "related_configs": "supporting_config",
+        "related_docs": "supporting_doc",
+    }
+    return _support_item(
+        mapped,
+        context_pack_id=context_pack_id,
+        kind=kind_by_group.get(group, "lower_priority_context"),
+        freshness=freshness,
+    )
+
+
+def _followup_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "confidence": str(item.get("confidence", "low")),
+        "evidence": _safe_evidence(item.get("evidence", [])),
+        "freshness": _mapping(item.get("freshness")),
+        "handle": str(item.get("handle", "")),
+        "kind": str(item.get("kind", "")),
+        "path": str(item.get("path", "")),
+        "reason": str(item.get("reason", "Graph-derived task match.")),
+    }
 
 
 def _is_test_path(path: str) -> bool:
