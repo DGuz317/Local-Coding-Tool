@@ -152,6 +152,7 @@
     },
     {
       "id": "no_source_disclosure_negative",
+      "corpus": "release_blocking",
       "category": "no_source_disclosure",
       "task": "Return context for login handler without leaking source",
       "fixture_repo": "tests/fixtures/context_pack/happy-path",
@@ -168,6 +169,22 @@
         ],
         "repo_relative_paths_only": true,
         "structural_symbols_allowed": true
+      }
+    },
+    {
+      "id": "expanded_cli_invoice_export",
+      "corpus": "expanded",
+      "category": "cli_export",
+      "task": "Fix invoice export rounding in the CLI command",
+      "fixture_repo": "tests/fixtures/context_pack/cli-export",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["src/invoice_export/cli.py"],
+        "likely_tests_include_any": ["tests/test_cli_export.py"],
+        "supporting_configs_include_any": ["pyproject.toml"],
+        "candidate_commands_marked_not_run": true,
+        "confidence_at_least": "medium",
+        "no_source_snippets": true
       }
     }
   ]

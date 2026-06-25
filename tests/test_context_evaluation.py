@@ -19,10 +19,17 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert envelope["ok"] is True
     data = envelope["data"]
     assert data["manifest_version"] == "0.3.contract.v1"
-    assert data["summary"]["total_cases"] == 12
-    assert data["summary"]["passed_cases"] == 12
+    assert data["summary"]["total_cases"] == 13
+    assert data["summary"]["passed_cases"] == 13
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
+    assert data["release_gate"]["required_cases"] == [
+        case["id"] for case in data["cases"] if case["corpus"] == "release_blocking"
+    ]
+    assert data["corpora"] == {
+        "expanded": {"failed_cases": 0, "passed_cases": 1, "total_cases": 1},
+        "release_blocking": {"failed_cases": 0, "passed_cases": 12, "total_cases": 12},
+    }
     assert data["structural_summary_caching"] == {
         "decision": "derived_on_demand",
         "findings": [],
@@ -44,6 +51,10 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert safety_case["safety_negative_outcomes"]["raw_task_text_absent"] is True
     assert safety_case["safety_negative_outcomes"]["pack_id_redacted_fragments_absent"] is True
     assert "API_TOKEN=abc123" not in json.dumps(envelope)
+
+    expanded_case = case_by_id["expanded_cli_invoice_export"]
+    assert expanded_case["corpus"] == "expanded"
+    assert expanded_case["metrics"]["context_pack"]["first_read_hit_rate"] == 1.0
 
 
 def test_evaluate_context_cli_emits_json_for_ci() -> None:

@@ -131,9 +131,16 @@ def test_context_pack_fixture_manifest_names_required_case_families():
     manifest_path = Path("tests/fixtures/context_pack/evaluation_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    categories = {case["category"] for case in manifest["cases"]}
+    release_categories = {
+        case["category"]
+        for case in manifest["cases"]
+        if case.get("corpus", "release_blocking") == "release_blocking"
+    }
+    expanded_categories = {
+        case["category"] for case in manifest["cases"] if case.get("corpus") == "expanded"
+    }
 
-    assert categories == {
+    assert release_categories == {
         "happy_path",
         "test_focused",
         "documentation_config",
@@ -147,5 +154,6 @@ def test_context_pack_fixture_manifest_names_required_case_families():
         "stale_pack",
         "no_source_disclosure",
     }
+    assert expanded_categories == {"cli_export"}
     assert manifest["default_budget"] == DEFAULT_CONTEXT_PACK_BUDGET
     assert all("expected_outcomes" in case for case in manifest["cases"])
