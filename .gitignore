@@ -11,3 +11,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Documentation
+docs/codegraph-deep-dive.md
+docs/gitnexus-deep-dive.md
+docs/graphify-deep-dive.md
