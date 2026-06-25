@@ -771,7 +771,7 @@ def _symbols_for_item(node: Mapping[str, Any]) -> list[dict[str, Any]]:
     line_start = metadata.get("line_start") or metadata.get("start_line")
     line_end = metadata.get("line_end") or metadata.get("end_line")
     if isinstance(line_start, int) and isinstance(line_end, int):
-        symbol["line_range"] = {"end": line_end, "start": line_start}
+        symbol["line_range"] = {"start": line_start, "end": line_end}
     return [symbol]
 
 

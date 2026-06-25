@@ -1216,7 +1216,7 @@ def _file_signatures_by_path(
         add_line_range(
             py_symbol.path,
             "python_symbol",
-            {"end_line": py_symbol.end_line, "start_line": py_symbol.start_line},
+            {"start_line": py_symbol.start_line, "end_line": py_symbol.end_line},
         )
     for py_import in extracted.python.imports:
         add_dependency(
@@ -1288,9 +1288,9 @@ def _file_signatures_by_path(
             js_symbol.path,
             "javascript_symbol",
             {
-                "end_line": js_symbol.end_line,
-                "line": js_symbol.line,
                 "start_line": js_symbol.start_line,
+                "line": js_symbol.line,
+                "end_line": js_symbol.end_line,
             },
         )
     for js_import in extracted.javascript.imports:
@@ -1480,7 +1480,7 @@ def _file_signatures_by_path(
         add_line_range(
             fence.path,
             "markdown_code_fence",
-            {"end_line": fence.end_line, "start_line": fence.start_line},
+            {"start_line": fence.start_line, "end_line": fence.end_line},
         )
     for doc_comment in extracted.documentation.tagged_comments:
         add_graph(
@@ -1641,10 +1641,10 @@ def _insert_nodes(
                 fence.language or "code fence",
                 _metadata_json(
                     {
-                        "end_line": fence.end_line,
+                        "start_line": fence.start_line,
                         "info_string": fence.info_string,
                         "language": fence.language,
-                        "start_line": fence.start_line,
+                        "end_line": fence.end_line,
                     }
                 ),
             )
@@ -1910,13 +1910,13 @@ def _insert_nodes(
                 symbol.qualified_name,
                 _metadata_json(
                     {
-                        "end_line": symbol.end_line,
+                        "start_line": symbol.start_line,
                         "kind": symbol.kind,
                         "line": symbol.line,
                         "module_node_id": symbol.module_node_id,
                         "name": symbol.name,
                         "qualified_name": symbol.qualified_name,
-                        "start_line": symbol.start_line,
+                        "end_line": symbol.end_line,
                     }
                 ),
             )
@@ -1967,13 +1967,13 @@ def _insert_nodes(
                         "bases": list(symbol.bases),
                         "decorators": list(symbol.decorators),
                         "docstring_summary": symbol.docstring_summary,
-                        "end_line": symbol.end_line,
+                        "start_line": symbol.start_line,
                         "kind": symbol.kind,
                         "module_node_id": symbol.module_node_id,
                         "name": symbol.name,
                         "parent_id": symbol.parent_id,
                         "qualified_name": symbol.qualified_name,
-                        "start_line": symbol.start_line,
+                        "end_line": symbol.end_line,
                     }
                 ),
             )
@@ -2778,10 +2778,10 @@ def _insert_edges(
             fence.id,
             "CONTAINS",
             {
-                "end_line": fence.end_line,
+                "start_line": fence.start_line,
                 "info_string": fence.info_string,
                 "language": fence.language,
-                "start_line": fence.start_line,
+                "end_line": fence.end_line,
             },
         )
     for skill in documentation_index.skills:
@@ -4233,11 +4233,11 @@ def _documentation_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "code_fences": [
             {
-                "end_line": fence["end_line"],
+                "start_line": fence["start_line"],
                 "info_string": fence["info_string"],
                 "language": fence["language"],
                 "path": fence["path"],
-                "start_line": fence["start_line"],
+                "end_line": fence["end_line"],
             }
             for fence in documentation["code_fences"]
         ],
@@ -4345,11 +4345,11 @@ def _python_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "bases": symbol["bases"],
                 "decorators": symbol["decorators"],
                 "docstring_summary": symbol["docstring_summary"],
-                "end_line": symbol["end_line"],
+                "start_line": symbol["start_line"],
                 "kind": symbol["kind"],
                 "path": symbol["path"],
                 "qualified_name": symbol["qualified_name"],
-                "start_line": symbol["start_line"],
+                "end_line": symbol["end_line"],
             }
             for symbol in python["symbols"]
         ],
@@ -4413,11 +4413,11 @@ def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "packages": javascript["packages"],
         "symbols": [
             {
-                "end_line": symbol["end_line"],
+                "start_line": symbol["start_line"],
                 "kind": symbol["kind"],
                 "path": symbol["path"],
                 "qualified_name": symbol["qualified_name"],
-                "start_line": symbol["start_line"],
+                "end_line": symbol["end_line"],
             }
             for symbol in javascript["symbols"]
         ],
@@ -5923,13 +5923,13 @@ def _stable_graph_value(value: Any) -> Any:
             for key, child in sorted(value.items())
             if key
             not in {
-                "end_line",
+                "start_line",
                 "import_ids",
                 "line",
                 "lines",
                 "raw_hash",
                 "size_bytes",
-                "start_line",
+                "end_line",
             }
         }
     if isinstance(value, list):

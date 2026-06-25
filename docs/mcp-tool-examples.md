@@ -1,6 +1,8 @@
-# RepoLens MCP v0.2 Tool Examples
+# RepoLens MCP v0.3 Tool Examples
 
 All RepoLens MCP tools are read-only and return the standard MCP response envelope with `ok`, `data`, `warnings`, `limits`, `confidence`, `evidence`, `freshness`, and `truncation`. Some tools also return `pagination`.
+
+Context Pack tools return orientation metadata only. They must not expose full source files, source snippets, code bodies, function or method signatures, paragraph excerpts, raw comments, raw Agent Guidance instructions, raw secret-like task text, absolute host paths, or persisted assistant session state.
 
 ## Check Graph Status
 
@@ -46,6 +48,92 @@ Use this for languages, high-level counts, detected entrypoints, important files
 ```
 
 Read the suggested files before editing. If the response is ambiguous or low-confidence, narrow the task or query a specific path or symbol.
+
+## Get A Task Context Pack
+
+Use `get_task_context` as the v0.3 default before broad file exploration.
+
+```json
+{
+  "tool": "get_task_context",
+  "arguments": {
+    "task": "Fix the auth timeout bug"
+  }
+}
+```
+
+Expected response shape is the standard envelope with `data.context_pack_id`, `data.context_pack_version`, `data.task_fingerprint`, `data.first_read_files`, `data.likely_tests`, support groups, `data.expansion_handles`, `data.next_actions`, `freshness`, `limits`, `warnings`, and truncation metadata. Returned items include repo-relative paths, structural symbol names and line ranges where available, relationship kinds, confidence, bounded evidence metadata, and freshness. They do not include source snippets.
+
+Use `first_read_files` as the first files to inspect manually. Use support groups as bounded orientation. Use `lower_priority_context` only as context to inspect later if needed.
+
+## Expand A Returned Context Item
+
+Use `expand_context` only with an item handle returned by the same Context Pack. Expansion is stateless, defaults to depth 1, and enforces bounded item caps.
+
+```json
+{
+  "tool": "expand_context",
+  "arguments": {
+    "task": "Fix the auth timeout bug",
+    "context_pack_id": "cp_example1234567890",
+    "item_handle": "item_example1234567890",
+    "depth": 1,
+    "max_items_per_kind": 3,
+    "max_total_items": 10
+  }
+}
+```
+
+If the graph changed or the pack ID no longer matches the current graph state, RepoLens returns `ok: false` and requires a fresh `get_task_context` call. Do not reuse handles from older packs.
+
+## Explain Why An Item Appeared
+
+Use `explain_relevance` when an assistant needs the reason, confidence, evidence, and freshness for one returned item without expanding scope.
+
+```json
+{
+  "tool": "explain_relevance",
+  "arguments": {
+    "task": "Fix the auth timeout bug",
+    "context_pack_id": "cp_example1234567890",
+    "item_handle": "item_example1234567890"
+  }
+}
+```
+
+The explanation is still orientation metadata. It must not be treated as proof that lower-priority context is irrelevant or safe to ignore.
+
+## CLI Context Pack Examples
+
+Human-readable task context:
+
+```bash
+repolens context /absolute/path/to/repo "Fix the auth timeout bug"
+```
+
+Machine-readable task context:
+
+```bash
+repolens context /absolute/path/to/repo "Fix the auth timeout bug" --json
+```
+
+Run the local Context Pack Evaluation fixture suite:
+
+```bash
+repolens evaluate-context
+```
+
+Emit CI-friendly JSON and fail when the expectation-based release gate fails:
+
+```bash
+repolens evaluate-context --json
+```
+
+Use a custom evaluation manifest:
+
+```bash
+repolens evaluate-context --manifest tests/fixtures/context_pack/evaluation_manifest.json --json
+```
 
 ## Analyze Edit Impact
 

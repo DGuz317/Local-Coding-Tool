@@ -79,7 +79,7 @@ def test_dogfood_reports_define_process_and_release_blocker() -> None:
         assert required in report
 
     assert "docs/dogfood/README.md" in readiness
-    assert "v0.2 release remains blocked on minimal CI passing" in readiness
+    assert "v0.3 release remains blocked on full verification" in readiness
 
 
 def test_dogfood_distilled_fixtures_are_committed_sources_only() -> None:
