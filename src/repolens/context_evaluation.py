@@ -47,13 +47,17 @@ def run_context_evaluation(
     ]
     passed_cases = sum(1 for case in cases if case["passed"] is True)
     failed_cases = len(cases) - passed_cases
+    corpora = _corpora_summary(cases)
+    release_cases = [case for case in cases if case.get("corpus") == "release_blocking"]
+    release_failed_cases = sum(1 for case in release_cases if case["passed"] is not True)
     data = {
         "cases": cases,
+        "corpora": corpora,
         "manifest_version": str(manifest.get("manifest_version", "")),
         "release_gate": {
             "gate_type": "expectation_based",
-            "passed": failed_cases == 0,
-            "required_cases": [case["id"] for case in cases],
+            "passed": release_failed_cases == 0,
+            "required_cases": [case["id"] for case in release_cases],
         },
         "structural_summary_caching": _structural_summary_caching_assessment(cases),
         "summary": {
@@ -97,6 +101,21 @@ def _structural_summary_caching_assessment(cases: Sequence[Mapping[str, Any]]) -
     }
 
 
+def _corpora_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    summary: dict[str, dict[str, int]] = {}
+    for case in cases:
+        corpus = str(case.get("corpus") or "release_blocking")
+        corpus_summary = summary.setdefault(
+            corpus, {"failed_cases": 0, "passed_cases": 0, "total_cases": 0}
+        )
+        corpus_summary["total_cases"] += 1
+        if case.get("passed") is True:
+            corpus_summary["passed_cases"] += 1
+        else:
+            corpus_summary["failed_cases"] += 1
+    return dict(sorted(summary.items()))
+
+
 def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
     """Render a compact human evaluation summary."""
     if not envelope.get("ok", False):
@@ -113,7 +132,7 @@ def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
     for case in _sequence(data.get("cases")):
         mapped = _mapping(case)
         marker = "PASS" if mapped.get("passed") is True else "FAIL"
-        lines.append(f"- {marker} {mapped.get('id')}")
+        lines.append(f"- {marker} [{mapped.get('corpus')}] {mapped.get('id')}")
     return "\n".join(lines) + "\n"
 
 
@@ -188,6 +207,7 @@ def _case_result(
     return {
         "category": str(case.get("category", "")),
         "checks": checks,
+        "corpus": str(case.get("corpus") or "release_blocking"),
         "id": str(case.get("id", "")),
         "metrics": {
             "context_pack": _metrics_for_paths(

@@ -1,0 +1,12 @@
+[project]
+name = "invoice-export-fixture"
+version = "0.1.0"
+
+[project.scripts]
+invoice-export = "invoice_export.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.repolens.commands]
+test = "pytest tests/test_cli_export.py"
