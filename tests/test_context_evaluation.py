@@ -23,6 +23,15 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert data["summary"]["passed_cases"] == 12
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
+    assert data["structural_summary_caching"] == {
+        "decision": "derived_on_demand",
+        "findings": [],
+        "persisted_cache_enabled": False,
+        "reason": (
+            "Persisted Structural Summary caching requires a concrete evaluation performance "
+            "or stability finding. Current fixture evaluation does not provide one."
+        ),
+    }
 
     case_by_id = {case["id"]: case for case in data["cases"]}
     direct_case = case_by_id["happy_path_direct_symbol_login"]
