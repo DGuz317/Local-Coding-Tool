@@ -2849,6 +2849,10 @@ def _score_reading_order_node(
                 "source": "task_token_match",
             }
         )
+    route_score, route_evidence = _route_path_score(node, tokens, category)
+    if route_score > 0:
+        score += route_score
+        evidence.extend(route_evidence)
     if score <= 0:
         return 0, [], "task_token_match"
     if node["kind"] in _SYMBOL_NODE_KINDS:
@@ -2859,9 +2863,54 @@ def _score_reading_order_node(
         return score, evidence[:3], "config_matches_task"
     if category == "documentation":
         return score, evidence[:3], "documentation_matches_task"
+    if route_score > 0:
+        return score, evidence[:3], "route_path_matches_task"
     if node["kind"] in _SYMBOL_NODE_KINDS or node["kind"] in _SOURCE_MODULE_KINDS:
         return score, evidence[:3], "task_matches_symbols"
     return score, evidence[:3], "task_token_match"
+
+
+def _route_path_score(
+    node: dict[str, Any], tokens: tuple[str, ...], category: str
+) -> tuple[int, list[dict[str, Any]]]:
+    path = str(node.get("path") or "")
+    route_tokens = _route_path_tokens(path)
+    if category != "source" or not route_tokens or not _task_mentions_route(tokens):
+        return 0, []
+    matched = sorted(set(tokens) & set(route_tokens))
+    if not matched:
+        return 0, []
+    score = len(matched) * len(matched) * 70
+    if set(route_tokens).issubset(set(tokens)):
+        score += 40
+    return score, [
+        {
+            "field": "path.route_segments",
+            "matched_tokens": matched,
+            "node_id": node["id"],
+            "path": path,
+            "source": "route_path_match",
+        }
+    ]
+
+
+def _route_path_tokens(path: str) -> tuple[str, ...]:
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return ()
+    filename = parts[-1].casefold()
+    if filename not in {"page.jsx", "page.js", "page.ts", "page.tsx", "route.js", "route.ts"}:
+        return ()
+    ignored = {"app", "pages", "page", "route", "src"}
+    return tuple(
+        token
+        for token in _meaningful_tokens(" ".join(parts[:-1]))
+        if token not in ignored and not token.startswith("[") and not token.startswith("(")
+    )
+
+
+def _task_mentions_route(tokens: tuple[str, ...]) -> bool:
+    return bool(set(tokens) & {"navigation", "page", "path", "route", "url"})
 
 
 def _confidence_for_reading_score(score: int) -> str:
@@ -2920,10 +2969,11 @@ def _merge_evidence(
 
 def _preferred_reading_reason(current: str, candidate: str) -> str:
     priority = {
-        "task_matches_symbols": 0,
-        "config_matches_task": 1,
-        "documentation_matches_task": 2,
-        "task_token_match": 3,
+        "route_path_matches_task": 0,
+        "task_matches_symbols": 1,
+        "config_matches_task": 2,
+        "documentation_matches_task": 3,
+        "task_token_match": 4,
     }
     return candidate if priority.get(candidate, 100) < priority.get(current, 100) else current
 
@@ -2933,6 +2983,7 @@ def _ranking_reason(reason: str) -> str:
         "config_matches_task": "Task tokens matched indexed config or command metadata.",
         "documentation_matches_task": "Task tokens matched indexed documentation context.",
         "likely_related_test": "Likely related test from graph evidence.",
+        "route_path_matches_task": "Task tokens matched route-like file path segments.",
         "task_matches_symbols": "Task tokens matched indexed source symbols.",
         "task_token_match": "Task tokens matched indexed graph metadata.",
     }
