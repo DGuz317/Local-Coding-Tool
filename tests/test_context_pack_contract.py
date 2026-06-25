@@ -139,6 +139,7 @@ def test_context_pack_fixture_manifest_names_required_case_families():
         "documentation_config",
         "broad_task",
         "focal_ambiguity",
+        "navigation_gap",
         "no_match",
         "focus_hint",
         "stale_graph",

@@ -19,8 +19,8 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert envelope["ok"] is True
     data = envelope["data"]
     assert data["manifest_version"] == "0.3.contract.v1"
-    assert data["summary"]["total_cases"] == 11
-    assert data["summary"]["passed_cases"] == 11
+    assert data["summary"]["total_cases"] == 12
+    assert data["summary"]["passed_cases"] == 12
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
 

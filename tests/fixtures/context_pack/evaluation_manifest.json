@@ -138,6 +138,19 @@
       }
     },
     {
+      "id": "navigation_gap_route_path_account",
+      "category": "navigation_gap",
+      "task": "Fix the account route loading state",
+      "fixture_repo": "tests/fixtures/context_pack/route-navigation",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["app/account/page.tsx"],
+        "confidence_at_least": "medium",
+        "requires_evidence": true,
+        "no_source_snippets": true
+      }
+    },
+    {
       "id": "no_source_disclosure_negative",
       "category": "no_source_disclosure",
       "task": "Return context for login handler without leaking source",
