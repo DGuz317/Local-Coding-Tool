@@ -15,13 +15,13 @@ RepoLens is local-first. Normal indexing and MCP usage do not require AI models,
 
 AI coding assistants often waste context by reading too many files too early.
 
-RepoLens gives the assistant a safer first step:
+RepoLens gives the assistant a safer and cheaper first step:
 
-1. Build a graph of the repository.
-2. Ask RepoLens for orientation.
-3. Read the most relevant files after that.
+1. Build a graph from the repository source, docs, configs, tests, and commands.
+2. Ask RepoLens for task-scoped orientation instead of starting with broad grep or random file reads.
+3. Open only the most relevant source files before editing.
 
-RepoLens does not replace reading source code. It helps decide where to start.
+RepoLens is meant to replace broad exploratory codebase scanning, not the final targeted source review needed before making a safe edit.
 
 ## The Short Version
 

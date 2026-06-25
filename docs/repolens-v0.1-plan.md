@@ -1,78 +1,56 @@
-# RepoLens MCP v0.1 Implementation Plan
+# RepoLens MCP v0.1 Plan Archive
 
-This plan tracks the approved vertical-slice issue sequence for RepoLens MCP v0.1. Each implementation issue should be independently grabbable by an AFK agent unless marked otherwise.
+Status: archived historical plan.
 
-## Issue Tracker
+v0.1 established RepoLens as a local-first repository intelligence backend for AI coding assistants.
+
+## Tracker
 
 - PRD: GitHub issue `#1`
 - Umbrella tracker: GitHub issue `#2`
-- Implementation branch: `feature/repolens-v0.1`
-- AFK-ready implementation issues use the `ready-for-agent` label.
+- Integration branch: `feature/repolens-v0.1`
 
-## Dependency Graph
+## Release Shape
+
+v0.1 shipped the first end-to-end RepoLens loop:
+
+- installable `repolens` CLI;
+- safe repository discovery and `.repolens` artifact bootstrap;
+- deterministic SQLite graph store and deterministic exports;
+- Python, JavaScript, TypeScript, config, command, docs, comments, and Agent Guidance indexing;
+- incremental update and stale status classification;
+- report and safe raw text search CLI;
+- framework-independent graph query service;
+- impact analysis and suggested reading order;
+- read-only stdio MCP server;
+- Docker, assistant configuration, and release-readiness docs.
+
+## Issue Sequence
+
+The implementation issues were published as `#3` through `#15`.
+
+Dependency path:
 
 ```text
-#3 -> #4 -> #5
-#5 -> #6
-#5 -> #7
-#5 -> #8
-#5 -> #9
-#6,#7,#8,#9 -> #10
-#5 -> #11
-#10 -> #12
-#12 -> #13
-#11,#12,#13 -> #14
-#14 -> #15
+#3 CLI scaffold -> #4 safe discovery -> #5 graph store
+#5 -> #6 Python indexing
+#5 -> #7 JS/TS indexing
+#5 -> #8 config/commands/packages
+#5 -> #9 docs/comments/guidance
+#6-#9 -> #10 update/status
+#5 -> #11 report/search
+#10 -> #12 query service
+#12 -> #13 impact/reading order
+#11-#13 -> #14 MCP
+#14 -> #15 release readiness
 ```
 
-## Vertical Slices
+## Durable Rules
 
-1. `#3` Installable CLI Scaffold With Missing-Graph Status
-   - Establish package identity, Typer CLI shell, Hatchling packaging, pytest/Ruff/mypy configuration, JSON/text CLI envelope patterns, docs, and read-like missing-graph `status`.
-   - This issue intentionally excludes real scanning, graph storage, parser extraction, and MCP.
-
-2. `#4` Safe Repository Discovery And Artifact Bootstrap
-   - Add `index` traversal with path containment, `.gitignore`, built-in excludes, secret skips, binary/media and size caps, non-Git roots, repo-relative paths, `.repolens/.gitignore`, skip reasons, and sanitized logs.
-
-3. `#5` Deterministic Graph Store And Exports
-   - Create the minimum viable SQLite graph store and deterministic exports for repository, directory, file, skip-reason, and run metadata facts.
-   - Keep this slice constrained so it does not become a horizontal storage project.
-
-4. `#6` Python Structure Indexing End To End
-   - Add Python AST extraction through the CLI and artifact pipeline, including symbols, imports, decorators, inheritance metadata, tagged comments, stdlib/third-party classification, local import root inference, and parse-error handling.
-
-5. `#7` JavaScript And TypeScript Structure Indexing End To End
-   - Add pure-Python JS/TS extraction through the CLI and artifact pipeline, including imports, exports, top-level symbols, interfaces, type aliases, package normalization, Node built-ins, and deterministic simple alias resolution.
-
-6. `#8` Config, Command, Package, And Entrypoint Indexing
-   - Add shallow parsing for package/config/tooling files, requirements, lockfile detection, command extraction and sanitization, package managers, dependencies, and evidence-backed entrypoints.
-
-7. `#9` Markdown, Comments, Docs, And Agent Guidance Indexing
-   - Add README metadata, Markdown headings and links, exact path mentions, code-fence metadata without code bodies, tagged comments, agent instruction classification, and skill metadata.
-
-8. `#10` Incremental Update And Staleness Classification
-   - Add `update` and richer read-like `status`, including raw/normalized/graph hashes, Git stale signals, config/extractor invalidation, and change classifications.
-
-9. `#11` Report And Safe Raw Text Search CLI
-   - Add `report` and CLI raw text `search` using the scan safety policy with capped sanitized previews and no whole-file output.
-
-10. `#12` Structured Graph Query Service
-    - Add framework-independent read-only query service methods for repo summary, graph status, graph report, structured graph search, node lookup, neighbors, shortest path, and entrypoints.
-
-11. `#13` Impact Analysis And Reading Order Queries
-    - Add deterministic impact analysis and suggested reading order with evidence, confidence, likely tests, docs, configs, risks, and candidate verification commands.
-
-12. `#14` Read-Only Stdio MCP Server
-    - Expose the v0.1 query surface over stdio MCP with read-only tools, structured envelopes, missing-graph responses, stdout discipline, caps, and MCP smoke coverage.
-
-13. `#15` Docker, Assistant Config, And Release Readiness Docs
-    - Add Docker support, host-user mapping examples, native install docs, OpenCode MCP example, README quickstart/security/config/tooling guidance, roadmap, and release-readiness checks.
-    - This slice is AFK with a HITL checkpoint for release-facing decisions.
-
-## Cross-Cutting Rules
-
-- Each implementation issue owns tests for the behavior it introduces.
-- Story 72 is cross-cutting and should not be deferred to a single late testing issue.
-- Keep slices vertical and externally observable.
-- Do not expand v0.1 beyond the PRD.
-- Use concise area-prefixed commits that reference the issue number after issues exist.
+- Keep MCP read-only.
+- Keep indexing deterministic, local, and offline-capable.
+- Keep `.repolens` local cache/output, not source.
+- Never scan `.repolens`.
+- Use repo-relative POSIX paths in artifacts and assistant-facing output.
+- Skip secret-looking files before parsing.
+- Do not copy whole source files into graph artifacts or MCP output.
