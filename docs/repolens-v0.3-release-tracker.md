@@ -78,6 +78,7 @@ Latest issue #87 evidence captured on 2026-06-24:
 - CLI smoke: `uv run repolens index .` followed by `uv run repolens context . "Document Context Pack workflow" --json` returned `ok: true` with `context_pack_id`, bounded First-Read Files, likely tests, support metadata, expansion handles, freshness, limits, and truncation metadata.
 - MCP-backed follow-up smoke: direct service calls for `get_task_context`, `expand_context`, and `explain_relevance` all returned `ok: true` for one returned First-Read File handle.
 - Safety spot-check: smoke outputs used repo-relative paths and metadata; no source snippets were required or recorded in release docs.
+- #89 cache gate: current Context Pack Evaluation records no performance or stability finding that justifies persisted Structural Summary caching, so Structural Summaries remain derived on demand.
 
 ## Known Limitation Policy
 

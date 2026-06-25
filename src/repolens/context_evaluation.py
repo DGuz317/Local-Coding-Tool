@@ -55,6 +55,7 @@ def run_context_evaluation(
             "passed": failed_cases == 0,
             "required_cases": [case["id"] for case in cases],
         },
+        "structural_summary_caching": _structural_summary_caching_assessment(cases),
         "summary": {
             "failed_cases": failed_cases,
             "passed_cases": passed_cases,
@@ -72,6 +73,28 @@ def run_context_evaluation(
             warnings=[],
         )
     )
+
+
+def _structural_summary_caching_assessment(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    failed_cases = [str(case.get("id", "")) for case in cases if case.get("passed") is not True]
+    findings: list[dict[str, Any]] = []
+    if failed_cases:
+        findings.append(
+            {
+                "category": "stability",
+                "case_ids": failed_cases,
+                "reason": "Context Pack Evaluation failures need diagnosis before adding persisted summary state.",
+            }
+        )
+    return {
+        "decision": "defer_persisted_cache" if findings else "derived_on_demand",
+        "findings": findings,
+        "persisted_cache_enabled": False,
+        "reason": (
+            "Persisted Structural Summary caching requires a concrete evaluation performance "
+            "or stability finding. Current fixture evaluation does not provide one."
+        ),
+    }
 
 
 def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
