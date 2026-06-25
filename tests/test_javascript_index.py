@@ -191,7 +191,14 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
         ("type_alias", "LocalAlias"),
         ("type_alias", "WidgetKind"),
     }
-    assert all(item.line == item.start_line == item.end_line for item in symbols.values())
+    assert symbols[("function", "exportedFunction")].start_line == 1
+    assert symbols[("function", "exportedFunction")].end_line == 3
+    assert symbols[("function", "helper")].start_line == 5
+    assert symbols[("function", "helper")].end_line == 7
+    assert symbols[("function", "outer")].start_line == 28
+    assert symbols[("function", "outer")].end_line == 32
+    assert symbols[("arrow_function", "makeThing")].start_line == 9
+    assert symbols[("arrow_function", "makeThing")].end_line == 9
     assert ("function", "nested") not in symbols
     assert ("arrow_function", "nestedArrow") not in symbols
     assert ("class", "Nested") not in symbols

@@ -365,7 +365,8 @@ def _extract_file_facts(
     commonjs_id_counts: Counter[str] = Counter()
     brace_depth = 0
 
-    for line_number, line in enumerate(_strip_comments_preserving_strings(source), start=1):
+    stripped_lines = tuple(_strip_comments_preserving_strings(source))
+    for line_number, line in enumerate(stripped_lines, start=1):
         static_import = _static_import_fact(
             path,
             module_node_id,
@@ -411,6 +412,7 @@ def _extract_file_facts(
                 module_node_id,
                 line,
                 line_number,
+                _top_level_symbol_end_line(stripped_lines, line_number),
                 symbol_id_counts,
             )
             if symbol is not None:
@@ -495,6 +497,7 @@ def _top_level_symbol_fact(
     module_node_id: str,
     line: str,
     line_number: int,
+    end_line: int,
     id_counts: Counter[str],
 ) -> JavaScriptSymbolFact | None:
     for kind, pattern in (
@@ -512,9 +515,25 @@ def _top_level_symbol_fact(
                 kind,
                 match.group("name"),
                 line_number,
+                end_line,
                 id_counts,
             )
     return None
+
+
+def _top_level_symbol_end_line(lines: tuple[str, ...], start_line: int) -> int:
+    seen_opening_brace = False
+    brace_depth = 0
+    for line_number, line in enumerate(lines[start_line - 1 :], start=start_line):
+        if not seen_opening_brace and _statement_ends_outside_strings(line):
+            return start_line
+        delta = _brace_delta_outside_strings(line)
+        if _has_opening_brace_outside_strings(line):
+            seen_opening_brace = True
+        brace_depth += delta
+        if seen_opening_brace and brace_depth <= 0:
+            return line_number
+    return start_line
 
 
 def _symbol_fact(
@@ -523,6 +542,7 @@ def _symbol_fact(
     kind: str,
     name: str,
     line: int,
+    end_line: int,
     id_counts: Counter[str],
 ) -> JavaScriptSymbolFact:
     key = "|".join((path, kind, name))
@@ -537,7 +557,7 @@ def _symbol_fact(
         qualified_name=name,
         line=line,
         start_line=line,
-        end_line=line,
+        end_line=end_line,
     )
 
 
@@ -1145,6 +1165,44 @@ def _brace_delta_outside_strings(line: str) -> int:
         elif character == "}":
             delta -= 1
     return delta
+
+
+def _has_opening_brace_outside_strings(line: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character == "{":
+            return True
+    return False
+
+
+def _statement_ends_outside_strings(line: str) -> bool:
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character == ";":
+            return True
+    return False
 
 
 def _literal_call_specifiers(line: str, function_name: str) -> tuple[str, ...]:

@@ -7,6 +7,7 @@ import re
 import shlex
 import sqlite3
 from collections import Counter, deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -802,6 +803,31 @@ class GraphQueryService:
                 returned=len(page),
                 total=len(entrypoints),
             ),
+        )
+
+    def context_pack_file_metadata(self, paths: Sequence[str]) -> dict[str, Any]:
+        """Return source-free Context Pack file summaries and ownership metadata."""
+        status = self._status_snapshot()
+        normalized_paths = tuple(dict.fromkeys(str(path) for path in paths if path))
+        limits = {"max_paths": len(normalized_paths)}
+        if not status.available:
+            return self._missing_graph_envelope(status, limits=limits)
+
+        with self._connect() as connection:
+            data = {
+                "package_boundaries": self._package_boundaries_for_paths(
+                    connection, normalized_paths
+                ),
+                "structural_summaries": self._structural_summaries_for_paths(
+                    connection, normalized_paths
+                ),
+            }
+        return _envelope(
+            data=data,
+            confidence=status.confidence,
+            evidence=(*status.evidence, {"source": "graph_metadata", "tool": "context_pack"}),
+            limits=limits,
+            warnings=status.warnings,
         )
 
     def _connect(self) -> sqlite3.Connection:
@@ -2175,6 +2201,65 @@ class GraphQueryService:
     def _config_file_paths(self, connection: sqlite3.Connection) -> set[str]:
         return {str(row["path"]) for row in connection.execute("SELECT path FROM config_files")}
 
+    def _structural_summaries_for_paths(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        summaries: dict[str, dict[str, Any]] = {}
+        for path in sorted(paths):
+            summary: dict[str, Any] = {"scope": "file", "source": "graph_facts"}
+            symbols = _file_symbol_summaries(connection, path)
+            if symbols:
+                summary["symbols"] = symbols
+            doc_summary = _documentation_summary(connection, path)
+            if doc_summary:
+                summary.update(doc_summary)
+            if len(summary) > 2:
+                summaries[path] = summary
+        return summaries
+
+    def _package_boundaries_for_paths(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        rows = _rows_to_dicts(
+            connection.execute(
+                """
+                SELECT name, ecosystem, path, source_path
+                FROM config_package_roots
+                ORDER BY path, name, ecosystem, source_path
+                """
+            )
+        )
+        boundaries: dict[str, dict[str, Any]] = {}
+        for path in sorted(paths):
+            candidates = [row for row in rows if _path_is_under(path, str(row["path"]))]
+            if not candidates:
+                continue
+            candidates.sort(
+                key=lambda row: (
+                    -_path_depth(str(row["path"])),
+                    str(row["path"]),
+                    str(row["name"]),
+                    str(row["ecosystem"]),
+                    str(row["source_path"]),
+                )
+            )
+            owner = candidates[0]
+            package_root = str(owner["path"])
+            boundaries[path] = {
+                "confidence": "high",
+                "ecosystem": str(owner["ecosystem"]),
+                "evidence": [
+                    {
+                        "package_root": package_root,
+                        "source": "config_package_roots",
+                        "source_path": str(owner["source_path"]),
+                    }
+                ],
+                "name": str(owner["name"]),
+                "path": package_root,
+            }
+        return boundaries
+
 
 def _empty_impact_data(
     *,
@@ -2549,6 +2634,142 @@ def _path_is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(f"{root}/")
 
 
+def _path_depth(path: str) -> int:
+    if path == ".":
+        return 0
+    return len(PurePosixPath(path).parts)
+
+
+def _file_symbol_summaries(connection: sqlite3.Connection, path: str) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
+    for row in connection.execute(
+        """
+        SELECT kind, name, qualified_name, start_line, end_line
+        FROM python_symbols
+        WHERE path = ?
+        ORDER BY start_line, qualified_name, id
+        """,
+        (path,),
+    ):
+        symbols.append(
+            _symbol_summary(
+                kind=_python_symbol_display_kind(str(row["kind"])),
+                name=str(row["name"]),
+                qualified_name=str(row["qualified_name"]),
+                start_line=int(row["start_line"]),
+                end_line=int(row["end_line"]),
+                public=not str(row["name"]).startswith("_"),
+            )
+        )
+    exported_javascript_names = {
+        str(row["name"])
+        for row in connection.execute(
+            """
+            SELECT COALESCE(local_name, exported_name) AS name
+            FROM javascript_exports
+            WHERE path = ?
+            ORDER BY line, id
+            """,
+            (path,),
+        )
+        if row["name"]
+    }
+    for row in connection.execute(
+        """
+        SELECT kind, name, qualified_name, start_line, end_line
+        FROM javascript_symbols
+        WHERE path = ?
+        ORDER BY start_line, qualified_name, id
+        """,
+        (path,),
+    ):
+        symbols.append(
+            _symbol_summary(
+                kind=_javascript_symbol_display_kind(str(row["kind"])),
+                name=str(row["name"]),
+                qualified_name=str(row["qualified_name"]),
+                start_line=int(row["start_line"]),
+                end_line=int(row["end_line"]),
+                public=str(row["name"]) in exported_javascript_names,
+            )
+        )
+    symbols.sort(
+        key=lambda symbol: (
+            int(symbol.get("line_range", {}).get("start", 0)),
+            str(symbol.get("qualified_name") or symbol.get("name")),
+            str(symbol.get("kind")),
+        )
+    )
+    return symbols
+
+
+def _symbol_summary(
+    *,
+    kind: str,
+    name: str,
+    qualified_name: str,
+    start_line: int,
+    end_line: int,
+    public: bool,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "line_range": {"end": end_line, "start": start_line},
+        "name": name,
+        "public": public,
+        "qualified_name": qualified_name,
+    }
+
+
+def _documentation_summary(connection: sqlite3.Connection, path: str) -> dict[str, Any]:
+    doc = _single_optional_row_dict(
+        connection.execute("SELECT title FROM documentation_files WHERE path = ?", (path,))
+    )
+    if doc is None:
+        return {}
+    summary: dict[str, Any] = {}
+    if doc.get("title"):
+        summary["title"] = str(doc["title"])
+    headings = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT level, text, line
+            FROM markdown_headings
+            WHERE path = ?
+            ORDER BY line, level, text
+            LIMIT 8
+            """,
+            (path,),
+        )
+    )
+    if headings:
+        summary["headings"] = [
+            {"level": int(row["level"]), "line": int(row["line"]), "text": str(row["text"])}
+            for row in headings
+        ]
+    return summary
+
+
+def _python_symbol_display_kind(kind: str) -> str:
+    return {
+        "async_function": "PythonAsyncFunction",
+        "async_method": "PythonAsyncMethod",
+        "class": "PythonClass",
+        "function": "PythonFunction",
+        "method": "PythonMethod",
+    }.get(kind, kind)
+
+
+def _javascript_symbol_display_kind(kind: str) -> str:
+    return {
+        "arrow_function": "JavaScriptArrowFunction",
+        "class": "JavaScriptClass",
+        "function": "JavaScriptFunction",
+        "interface": "TypeScriptInterface",
+        "type_alias": "TypeScriptTypeAlias",
+    }.get(kind, kind)
+
+
 def _entrypoint_targets_path(target: str, path: str) -> bool:
     normalized_target = target.replace("\\", "/")
     return normalized_target == path or normalized_target.endswith(f"/{path}")
@@ -2628,6 +2849,10 @@ def _score_reading_order_node(
                 "source": "task_token_match",
             }
         )
+    route_score, route_evidence = _route_path_score(node, tokens, category)
+    if route_score > 0:
+        score += route_score
+        evidence.extend(route_evidence)
     if score <= 0:
         return 0, [], "task_token_match"
     if node["kind"] in _SYMBOL_NODE_KINDS:
@@ -2638,9 +2863,54 @@ def _score_reading_order_node(
         return score, evidence[:3], "config_matches_task"
     if category == "documentation":
         return score, evidence[:3], "documentation_matches_task"
+    if route_score > 0:
+        return score, evidence[:3], "route_path_matches_task"
     if node["kind"] in _SYMBOL_NODE_KINDS or node["kind"] in _SOURCE_MODULE_KINDS:
         return score, evidence[:3], "task_matches_symbols"
     return score, evidence[:3], "task_token_match"
+
+
+def _route_path_score(
+    node: dict[str, Any], tokens: tuple[str, ...], category: str
+) -> tuple[int, list[dict[str, Any]]]:
+    path = str(node.get("path") or "")
+    route_tokens = _route_path_tokens(path)
+    if category != "source" or not route_tokens or not _task_mentions_route(tokens):
+        return 0, []
+    matched = sorted(set(tokens) & set(route_tokens))
+    if not matched:
+        return 0, []
+    score = len(matched) * len(matched) * 70
+    if set(route_tokens).issubset(set(tokens)):
+        score += 40
+    return score, [
+        {
+            "field": "path.route_segments",
+            "matched_tokens": matched,
+            "node_id": node["id"],
+            "path": path,
+            "source": "route_path_match",
+        }
+    ]
+
+
+def _route_path_tokens(path: str) -> tuple[str, ...]:
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return ()
+    filename = parts[-1].casefold()
+    if filename not in {"page.jsx", "page.js", "page.ts", "page.tsx", "route.js", "route.ts"}:
+        return ()
+    ignored = {"app", "pages", "page", "route", "src"}
+    return tuple(
+        token
+        for token in _meaningful_tokens(" ".join(parts[:-1]))
+        if token not in ignored and not token.startswith("[") and not token.startswith("(")
+    )
+
+
+def _task_mentions_route(tokens: tuple[str, ...]) -> bool:
+    return bool(set(tokens) & {"navigation", "page", "path", "route", "url"})
 
 
 def _confidence_for_reading_score(score: int) -> str:
@@ -2699,10 +2969,11 @@ def _merge_evidence(
 
 def _preferred_reading_reason(current: str, candidate: str) -> str:
     priority = {
-        "task_matches_symbols": 0,
-        "config_matches_task": 1,
-        "documentation_matches_task": 2,
-        "task_token_match": 3,
+        "route_path_matches_task": 0,
+        "task_matches_symbols": 1,
+        "config_matches_task": 2,
+        "documentation_matches_task": 3,
+        "task_token_match": 4,
     }
     return candidate if priority.get(candidate, 100) < priority.get(current, 100) else current
 
@@ -2712,6 +2983,7 @@ def _ranking_reason(reason: str) -> str:
         "config_matches_task": "Task tokens matched indexed config or command metadata.",
         "documentation_matches_task": "Task tokens matched indexed documentation context.",
         "likely_related_test": "Likely related test from graph evidence.",
+        "route_path_matches_task": "Task tokens matched route-like file path segments.",
         "task_matches_symbols": "Task tokens matched indexed source symbols.",
         "task_token_match": "Task tokens matched indexed graph metadata.",
     }

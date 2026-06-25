@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feature/repolens-v0.2
+      - feature/repolens-v0.3
 
 jobs:
   release-gate:
@@ -55,3 +55,4 @@ jobs:
 
           cp -R tests/fixtures/dogfood/python-local-imports "$smoke_dir/python-local-imports"
           repolens index "$smoke_dir/python-local-imports"
+          repolens context "$smoke_dir/python-local-imports" "Fix service greeting behavior" --json

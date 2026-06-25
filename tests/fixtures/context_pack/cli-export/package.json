@@ -1,0 +1,7 @@
+{
+  "name": "invoice-export-fixture",
+  "scripts": {
+    "test": "pytest tests/test_cli_export.py",
+    "lint": "ruff check src tests"
+  }
+}

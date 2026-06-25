@@ -45,6 +45,7 @@ SECRET_KEY_TOKENS = (
 )
 SECRET_NAME_TOKENS = ("credential", "password", "passwd", "private-key", "private_key", "secret")
 SECRET_DIRECTORY_NAMES = frozenset({".secrets", "secrets"})
+SAFE_METADATA_KEYS = frozenset({"approx_token_estimate_divisor", "approx_tokens"})
 COMMAND_SECRET_OPTIONS = (
     "api-key",
     "apikey",
@@ -60,6 +61,8 @@ COMMAND_SECRET_OPTIONS = (
 def is_secret_key(key: str) -> bool:
     """Return whether a metadata key is high-risk for secret disclosure."""
     normalized = key.lower().replace("-", "_")
+    if normalized in SAFE_METADATA_KEYS:
+        return False
     return any(token in normalized for token in SECRET_KEY_TOKENS)
 
 

@@ -8,7 +8,7 @@ Make RepoLens the assistant's context budget manager.
 
 Release integration branch: `feature/repolens-v0.3`
 
-GitHub umbrella tracker: TBD
+GitHub umbrella tracker: #79
 
 ## Source Documents
 
@@ -21,21 +21,21 @@ GitHub umbrella tracker: TBD
 
 ## Release-Blocking P0 Work
 
-- [ ] Add Context Pack schema, ranking, handle, budget, disclosure-guard, and evaluation fixture contracts.
-- [ ] Add Context Pack service/model, deterministic Context Pack IDs, `get_task_context` MCP tool, and thin `repolens context` CLI.
-- [ ] Add early task redaction, no-snippet, stale/missing graph, stale-pack, ambiguity, broad-task, and focus-hint safety hardening.
-- [ ] Add evidence-gated support groups for tests, docs, configs, commands, Risk Signals, Deprioritized Context, and tiny Agent Guidance metadata.
-- [ ] Add derived Structural Summary helpers for Context Packs.
-- [ ] Add pack-scoped `expand_context` and `explain_relevance` MCP tools.
-- [ ] Add local Context Pack Evaluation fixtures, safety negative cases, and `repolens evaluate-context`.
-- [ ] Add v0.3 assistant docs, MCP examples, CLI examples, and known limitations.
+- [ ] #80 Add Context Pack schema, ranking, handle, budget, disclosure-guard, and evaluation fixture contracts.
+- [ ] #81 Add Context Pack service/model, deterministic Context Pack IDs, `get_task_context` MCP tool, and thin `repolens context` CLI.
+- [ ] #82 Add early task redaction, no-snippet, stale/missing graph, stale-pack, ambiguity, broad-task, and focus-hint safety hardening.
+- [ ] #83 Add evidence-gated support groups for tests, docs, configs, commands, Risk Signals, Deprioritized Context, and tiny Agent Guidance metadata.
+- [ ] #84 Add derived Structural Summary helpers for Context Packs.
+- [ ] #85 Add pack-scoped `expand_context` and `explain_relevance` MCP tools.
+- [ ] #86 Add local Context Pack Evaluation fixtures, safety negative cases, and `repolens evaluate-context`.
+- [ ] #87 Add v0.3 assistant docs, MCP examples, CLI examples, known limitations, and release-readiness evidence.
 
 ## Non-Blocking P1 Work
 
-- [ ] Improve generic package/workspace/framework navigation when evaluation shows gaps.
-- [ ] Add persisted Structural Summary caching if derived summaries are too slow or unstable.
+- [ ] #88 Improve generic package/workspace/framework navigation when evaluation shows gaps.
+- [ ] #89 Add persisted Structural Summary caching if derived summaries are too slow or unstable.
 - [ ] Add richer human formatting for `repolens context` if JSON/human parity becomes painful.
-- [ ] Expand Context Pack Evaluation corpora beyond the release-blocking representative fixtures.
+- [ ] #90 Expand Context Pack Evaluation corpora beyond the release-blocking representative fixtures.
 
 ## Dependency Notes
 
@@ -69,6 +69,16 @@ Do not cut a v0.3 release until all release-blocking P0 items above are complete
 - Full verification passes: `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy src/repolens`.
 - MCP smoke covers `get_task_context`, `expand_context`, and `explain_relevance`.
 - CLI smoke covers `repolens context` and `repolens evaluate-context`.
+
+## Release Evidence
+
+Latest issue #87 evidence captured on 2026-06-24:
+
+- Context Pack Evaluation: `uv run repolens evaluate-context --json` returned `ok: true`; expectation-based release gate passed; 11/11 cases passed.
+- CLI smoke: `uv run repolens index .` followed by `uv run repolens context . "Document Context Pack workflow" --json` returned `ok: true` with `context_pack_id`, bounded First-Read Files, likely tests, support metadata, expansion handles, freshness, limits, and truncation metadata.
+- MCP-backed follow-up smoke: direct service calls for `get_task_context`, `expand_context`, and `explain_relevance` all returned `ok: true` for one returned First-Read File handle.
+- Safety spot-check: smoke outputs used repo-relative paths and metadata; no source snippets were required or recorded in release docs.
+- #89 cache gate: current Context Pack Evaluation records no performance or stability finding that justifies persisted Structural Summary caching, so Structural Summaries remain derived on demand.
 
 ## Known Limitation Policy
 
