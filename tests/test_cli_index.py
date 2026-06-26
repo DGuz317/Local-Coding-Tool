@@ -88,6 +88,49 @@ def test_graph_index_is_bounded_landing_page_for_large_repository(tmp_path):
     assert sqlite_count == 125
 
 
+def test_graph_status_reports_graph_index_truncation(tmp_path):
+    _write_text(
+        tmp_path / "src" / "many_symbols.py",
+        "".join(
+            f"def symbol_{index:03}():\n    return {index}\n\n"
+            for index in range(GRAPH_INDEX_SECTION_BUDGETS["python_symbols"] + 25)
+        ),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    status = json.loads((tmp_path / ".repolens" / "graph-status.json").read_text())
+    graph_index = status["exports"]["graph_index"]
+
+    assert graph_index["path"] == ".repolens/graph-index.md"
+    assert graph_index["truncated"] is True
+    assert graph_index["max_total_chars"] == DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS
+    assert graph_index["artifact_reasons"] == []
+    assert graph_index["query_guidance"]
+    assert graph_index["sections"] == [
+        {
+            "name": "python_symbols",
+            "shown": GRAPH_INDEX_SECTION_BUDGETS["python_symbols"],
+            "total": GRAPH_INDEX_SECTION_BUDGETS["python_symbols"] + 25,
+            "reason": "section_row_budget",
+        }
+    ]
+
+
+def test_graph_status_reports_graph_index_not_truncated_for_small_repository(tmp_path):
+    _write_text(tmp_path / "app.py", "def app():\n    return 1\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    status = json.loads((tmp_path / ".repolens" / "graph-status.json").read_text())
+
+    assert status["exports"]["graph_index"]["truncated"] is False
+    assert status["exports"]["graph_index"]["artifact_reasons"] == []
+    assert status["exports"]["graph_index"]["sections"] == []
+
+
 def test_graph_index_omits_source_comments_and_agent_guidance_text(tmp_path):
     source_body = "THIS_SOURCE_BODY_MUST_NOT_APPEAR_IN_GRAPH_INDEX"
     raw_comment = "do not expose this raw comment"
