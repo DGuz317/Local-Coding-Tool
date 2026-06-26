@@ -452,12 +452,15 @@ def export_graph_artifacts(root: Path) -> tuple[str, ...]:
     artifact_dir = root / ARTIFACT_DIR_NAME
     try:
         snapshot = _load_snapshot(root)
+        graph_index_text = _graph_index_text(snapshot)
         exports = {
             "graph.json": _json_text(_graph_json_payload(snapshot)),
             "graph-lite.json": _json_text(_graph_lite_payload(snapshot)),
             "graph-report.md": _graph_report_text(snapshot),
-            "graph-index.md": _graph_index_text(snapshot),
-            "graph-status.json": _json_text(_graph_status_payload(snapshot)),
+            "graph-index.md": graph_index_text,
+            "graph-status.json": _json_text(
+                _graph_status_payload(snapshot, graph_index_text=graph_index_text)
+            ),
         }
         for filename in GRAPH_EXPORT_FILENAMES:
             _atomic_write_text(artifact_dir / filename, exports[filename])
@@ -4147,7 +4150,9 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+def _graph_status_payload(
+    snapshot: dict[str, Any], *, graph_index_text: str | None = None
+) -> dict[str, Any]:
     return {
         "artifact": "graph-status",
         "artifact_version": snapshot["artifact_version"],
@@ -4155,6 +4160,7 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "changes": _changes_payload(snapshot["file_changes"]),
         "counts": snapshot["counts"],
         "effective_config_hash": snapshot["metadata"].get("effective_config_hash"),
+        "exports": _exports_status_payload(snapshot, graph_index_text=graph_index_text),
         "freshness": _stored_freshness_payload(),
         "git": _git_metadata_from_metadata(snapshot["metadata"]).to_payload(),
         "limits": snapshot["limits"],
@@ -4168,6 +4174,51 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "skip_reasons": snapshot["skip_reasons"],
         "validation": _validation_payload(snapshot),
     }
+
+
+def _exports_status_payload(
+    snapshot: dict[str, Any], *, graph_index_text: str | None = None
+) -> dict[str, Any]:
+    graph_index_sections = _graph_index_truncated_sections(snapshot)
+    graph_index_artifact_reasons = _graph_index_artifact_truncation_reasons(graph_index_text)
+    return {
+        "graph_index": {
+            "path": f"{ARTIFACT_DIR_NAME}/graph-index.md",
+            "truncated": bool(graph_index_sections or graph_index_artifact_reasons),
+            "max_total_chars": DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS,
+            "artifact_reasons": graph_index_artifact_reasons,
+            "sections": graph_index_sections,
+            "query_guidance": (
+                "Use .repolens/graph.sqlite for complete rows, or inspect "
+                ".repolens/graph.json with targeted filters."
+            ),
+        }
+    }
+
+
+def _graph_index_artifact_truncation_reasons(graph_index_text: str | None) -> list[str]:
+    if graph_index_text is None:
+        return []
+    if GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS in graph_index_text:
+        return [GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS]
+    return []
+
+
+def _graph_index_truncated_sections(snapshot: dict[str, Any]) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = []
+    for section in GRAPH_INDEX_SECTION_BUDGETS:
+        truncation = graph_index_section_truncation(section, snapshot["counts"][section])
+        if not truncation["truncated"]:
+            continue
+        sections.append(
+            {
+                "name": section,
+                "shown": truncation["shown"],
+                "total": truncation["total"],
+                "reason": truncation["reason"],
+            }
+        )
+    return sections
 
 
 def _validation_payload(snapshot: dict[str, Any]) -> dict[str, Any]:

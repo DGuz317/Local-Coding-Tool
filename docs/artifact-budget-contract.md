@@ -45,4 +45,6 @@ Every truncated section must report section-level truncation metadata with:
 
 If the total character budget is reached, the artifact-level reason should be `total_character_budget`.
 
+`.repolens/graph-status.json` reports `exports.graph_index.truncated` and an `exports.graph_index.sections` list for capped sections. To inspect omitted rows, query `.repolens/graph.sqlite` for the complete section table or inspect `.repolens/graph.json` with a targeted filter instead of loading the bounded Markdown artifact.
+
 This metadata is a disclosure boundary, not a relevance claim. Omitted rows are lower-priority context to inspect later, not irrelevant or safe to ignore.
