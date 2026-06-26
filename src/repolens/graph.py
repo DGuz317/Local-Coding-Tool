@@ -4189,8 +4189,8 @@ def _exports_status_payload(
             "artifact_reasons": graph_index_artifact_reasons,
             "sections": graph_index_sections,
             "query_guidance": (
-                "Use .repolens/graph.sqlite for complete rows, or inspect "
-                ".repolens/graph.json with targeted filters."
+                "Use repolens search-graph <repo> <query> --kind symbol --limit 20 --json "
+                "for bounded omitted rows, or inspect .repolens/graph.sqlite with targeted filters."
             ),
         }
     }
@@ -5050,6 +5050,7 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         "## Query Guidance",
         "",
         "Use this file to choose where to inspect next. For complete facts, query `.repolens/graph.sqlite` or inspect `.repolens/graph.json` with targeted filters instead of loading this Markdown as a source dump.",
+        "Use `repolens search-graph . <query> --kind symbol --limit 20 --json` for omitted symbols, `--kind file` for file metadata, and `--kind command` for candidate command metadata.",
         "Run `repolens status .` for freshness and `repolens report .` for the broader human report.",
         "Candidate verification commands shown here are metadata only; RepoLens did not run them.",
         "",

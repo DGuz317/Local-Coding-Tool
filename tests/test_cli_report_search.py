@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from textwrap import dedent
 
 from typer.testing import CliRunner
 
 from repolens.cli import app
+from repolens.indexer import index_repository
 
 runner = CliRunner()
 
@@ -109,6 +111,80 @@ def test_search_truncates_long_previews_without_whole_file_output(tmp_path):
     assert match["preview_truncated_before"] is True
     assert match["preview_truncated_after"] is True
     assert line not in result.output
+
+
+def test_search_graph_returns_bounded_symbol_json_results(tmp_path):
+    _write_text(
+        tmp_path / "app.py",
+        dedent(
+            """
+            def alpha_one():
+                return 1
+
+            def alpha_two():
+                return 2
+
+            def alpha_three():
+                return 3
+            """
+        ).lstrip(),
+    )
+    index_repository(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["search-graph", str(tmp_path), "alpha", "--kind", "symbol", "--limit", "2", "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    matches = envelope["data"]["matches"]
+
+    assert envelope["ok"] is True
+    assert envelope["data"]["kind"] == "symbol"
+    assert envelope["limits"] == {"kind": "symbol", "max_results": 2}
+    assert envelope["pagination"]["returned"] == 2
+    assert envelope["pagination"]["total"] == 3
+    assert envelope["pagination"]["truncated"] is True
+    assert [match["node"]["label"] for match in matches] == ["alpha_one", "alpha_three"]
+    assert {match["node"]["kind"] for match in matches} == {"PythonFunction"}
+
+
+def test_search_graph_json_does_not_disclose_source_bodies(tmp_path):
+    source_body = "SECRET_BODY_SHOULD_NOT_APPEAR"
+    _write_text(
+        tmp_path / "app.py",
+        f"def public_target():\n    return {source_body!r}\n",
+    )
+    index_repository(tmp_path)
+
+    result = runner.invoke(app, ["search-graph", str(tmp_path), "public_target", "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert envelope["data"]["matches"][0]["node"]["label"] == "public_target"
+    assert source_body not in result.output
+
+
+def test_search_graph_returns_structured_no_match_output(tmp_path):
+    _write_text(tmp_path / "app.py", "def present():\n    return 1\n")
+    index_repository(tmp_path)
+
+    result = runner.invoke(app, ["search-graph", str(tmp_path), "missing", "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert envelope["ok"] is True
+    assert envelope["data"]["matches"] == []
+    assert envelope["data"]["total_matches"] == 0
+    assert envelope["data"]["no_match"] is True
+    assert envelope["pagination"] == {
+        "limit": 20,
+        "offset": 0,
+        "returned": 0,
+        "total": 0,
+        "truncated": False,
+    }
 
 
 def _write_text(path, content: str) -> None:
