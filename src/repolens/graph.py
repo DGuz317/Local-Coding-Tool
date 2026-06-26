@@ -9,11 +9,18 @@ import re
 import sqlite3
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.artifact_budget_contract import (
+    DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS,
+    GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS,
+    GRAPH_INDEX_SECTION_BUDGETS,
+    graph_index_section_truncation,
+)
 from repolens.config_index import (
     CONFIG_EXTRACTOR_VERSION,
     ConfigIndex,
@@ -71,6 +78,8 @@ GRAPH_EXPORT_FILENAMES = (
     "graph-status.json",
 )
 GRAPH_EXPORT_PATHS = tuple(f"{ARTIFACT_DIR_NAME}/{name}" for name in GRAPH_EXPORT_FILENAMES)
+FULL_GRAPH_INDEX_FILENAME = "graph-index-full.md"
+FULL_GRAPH_INDEX_PATH = f"{ARTIFACT_DIR_NAME}/{FULL_GRAPH_INDEX_FILENAME}"
 REQUIRED_GRAPH_ARTIFACTS = (GRAPH_STORE_PATH, *GRAPH_EXPORT_PATHS)
 
 REPOSITORY_ID = "repository:."
@@ -445,12 +454,15 @@ def export_graph_artifacts(root: Path) -> tuple[str, ...]:
     artifact_dir = root / ARTIFACT_DIR_NAME
     try:
         snapshot = _load_snapshot(root)
+        graph_index_text = _graph_index_text(snapshot)
         exports = {
             "graph.json": _json_text(_graph_json_payload(snapshot)),
             "graph-lite.json": _json_text(_graph_lite_payload(snapshot)),
             "graph-report.md": _graph_report_text(snapshot),
-            "graph-index.md": _graph_index_text(snapshot),
-            "graph-status.json": _json_text(_graph_status_payload(snapshot)),
+            "graph-index.md": graph_index_text,
+            "graph-status.json": _json_text(
+                _graph_status_payload(snapshot, graph_index_text=graph_index_text)
+            ),
         }
         for filename in GRAPH_EXPORT_FILENAMES:
             _atomic_write_text(artifact_dir / filename, exports[filename])
@@ -458,6 +470,20 @@ def export_graph_artifacts(root: Path) -> tuple[str, ...]:
         raise GraphExportError("graph_export_write_failed") from exc
 
     return GRAPH_EXPORT_PATHS
+
+
+def export_full_graph_index(root: Path) -> str:
+    """Write an explicit full graph index Markdown export."""
+    artifact_dir = root / ARTIFACT_DIR_NAME
+    try:
+        snapshot = _load_snapshot(root)
+        _atomic_write_text(
+            artifact_dir / FULL_GRAPH_INDEX_FILENAME, _graph_index_text(snapshot, full=True)
+        )
+    except (OSError, sqlite3.Error, GraphStoreError) as exc:
+        raise GraphExportError("full_graph_index_export_write_failed") from exc
+
+    return FULL_GRAPH_INDEX_PATH
 
 
 def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
@@ -4140,7 +4166,9 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+def _graph_status_payload(
+    snapshot: dict[str, Any], *, graph_index_text: str | None = None
+) -> dict[str, Any]:
     return {
         "artifact": "graph-status",
         "artifact_version": snapshot["artifact_version"],
@@ -4148,6 +4176,7 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "changes": _changes_payload(snapshot["file_changes"]),
         "counts": snapshot["counts"],
         "effective_config_hash": snapshot["metadata"].get("effective_config_hash"),
+        "exports": _exports_status_payload(snapshot, graph_index_text=graph_index_text),
         "freshness": _stored_freshness_payload(),
         "git": _git_metadata_from_metadata(snapshot["metadata"]).to_payload(),
         "limits": snapshot["limits"],
@@ -4161,6 +4190,51 @@ def _graph_status_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "skip_reasons": snapshot["skip_reasons"],
         "validation": _validation_payload(snapshot),
     }
+
+
+def _exports_status_payload(
+    snapshot: dict[str, Any], *, graph_index_text: str | None = None
+) -> dict[str, Any]:
+    graph_index_sections = _graph_index_truncated_sections(snapshot)
+    graph_index_artifact_reasons = _graph_index_artifact_truncation_reasons(graph_index_text)
+    return {
+        "graph_index": {
+            "path": f"{ARTIFACT_DIR_NAME}/graph-index.md",
+            "truncated": bool(graph_index_sections or graph_index_artifact_reasons),
+            "max_total_chars": DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS,
+            "artifact_reasons": graph_index_artifact_reasons,
+            "sections": graph_index_sections,
+            "query_guidance": (
+                "Use repolens search-graph <repo> <query> --kind symbol --limit 20 --json "
+                "for bounded omitted rows, or inspect .repolens/graph.sqlite with targeted filters."
+            ),
+        }
+    }
+
+
+def _graph_index_artifact_truncation_reasons(graph_index_text: str | None) -> list[str]:
+    if graph_index_text is None:
+        return []
+    if GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS in graph_index_text:
+        return [GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS]
+    return []
+
+
+def _graph_index_truncated_sections(snapshot: dict[str, Any]) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = []
+    for section in GRAPH_INDEX_SECTION_BUDGETS:
+        truncation = graph_index_section_truncation(section, snapshot["counts"][section])
+        if not truncation["truncated"]:
+            continue
+        sections.append(
+            {
+                "name": section,
+                "shown": truncation["shown"],
+                "total": truncation["total"],
+                "reason": truncation["reason"],
+            }
+        )
+    return sections
 
 
 def _validation_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -4973,519 +5047,628 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _graph_index_text(snapshot: dict[str, Any]) -> str:
+def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
     python = snapshot["python"]
     javascript = snapshot["javascript"]
     config = snapshot["config"]
     documentation = snapshot["documentation"]
+    original_section_budgets: dict[str, int] | None = None
+    if full:
+        original_section_budgets = dict(GRAPH_INDEX_SECTION_BUDGETS)
+        for section in GRAPH_INDEX_SECTION_BUDGETS:
+            GRAPH_INDEX_SECTION_BUDGETS[section] = max(
+                GRAPH_INDEX_SECTION_BUDGETS[section], snapshot["counts"][section]
+            )
     lines = [
-        "# RepoLens Graph Index",
+        "# RepoLens Full Graph Index" if full else "# RepoLens Graph Index",
+        "",
+        (
+            "This is an explicit full metadata export and may be large."
+            if full
+            else "This is a bounded navigation landing page, not a raw full graph dump."
+        ),
+        "SQLite and structured graph exports remain the complete graph source of truth.",
         "",
         f"Indexed at UTC: {snapshot['run']['indexed_at_utc']}",
+        f"Canonical graph hash: `{snapshot['metadata'].get('canonical_graph_hash', '')}`",
+        f"Schema: {snapshot['schema']['name']} v{snapshot['schema']['version']}",
+        (
+            "Artifact budget: unbounded explicit full export."
+            if full
+            else f"Artifact budget: {DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS} characters maximum."
+        ),
         "",
-        "## Directories",
+        "## Query Guidance",
         "",
-        "| Path | Node ID | Parent |",
-        "| --- | --- | --- |",
+        "Use this file to choose where to inspect next. For complete facts, query `.repolens/graph.sqlite` or inspect `.repolens/graph.json` with targeted filters instead of loading this Markdown as a source dump.",
+        "Use `repolens search-graph . <query> --kind symbol --limit 20 --json` for omitted symbols, `--kind file` for file metadata, and `--kind command` for candidate command metadata.",
+        "Run `repolens status .` for freshness and `repolens report .` for the broader human report.",
+        "Candidate verification commands shown here are metadata only; RepoLens did not run them.",
+        "",
+        "## Total Counts",
+        "",
+        "| Fact type | Total |",
+        "| --- | ---: |",
     ]
-    lines.extend(
-        f"| `{directory['path']}` | `{directory['node_id']}` | `{directory['parent_path'] or ''}` |"
-        for directory in snapshot["directories"]
-    )
-    lines.extend(
-        [
-            "",
-            "## Files",
-            "",
-            "| Path | Node ID | Size bytes | Parser status |",
-            "| --- | --- | ---: | --- |",
-        ]
-    )
-    lines.extend(
-        f"| `{file['path']}` | `{file['node_id']}` | {file['size_bytes']} | {file['parser_status']} |"
-        for file in snapshot["files"]
-    )
-    lines.extend(_documentation_index_lines(documentation))
-    lines.extend(
-        [
-            "",
-            "## Python Modules",
-            "",
-            "| Path | Node ID | Module | Parser status |",
-            "| --- | --- | --- | --- |",
-        ]
-    )
-    if python["modules"]:
-        lines.extend(
-            f"| `{module['path']}` | `{module['node_id']}` | `{module['module_name']}` | {module['parser_status']} |"
-            for module in python["modules"]
-        )
-    else:
-        lines.append("| Not detected |  |  | not_parsed |")
+    lines.extend(f"| `{key}` | {snapshot['counts'][key]} |" for key in sorted(snapshot["counts"]))
 
-    lines.extend(
-        [
-            "",
-            "## Python Symbols",
-            "",
-            "| Node ID | Path | Kind | Qualified name | Lines |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="directories",
+        title="Directories",
+        item_label="directories",
+        rows=snapshot["directories"],
+        headers=("Path", "Node ID", "Parent"),
+        row=lambda directory: (
+            f"`{_md_cell(directory['path'])}`",
+            f"`{_md_cell(directory['node_id'])}`",
+            f"`{_md_cell(directory['parent_path'] or '')}`",
+        ),
     )
-    if python["symbols"]:
-        lines.extend(
-            "| "
-            f"`{symbol['id']}` | "
-            f"`{symbol['path']}` | "
-            f"{symbol['kind']} | "
-            f"`{symbol['qualified_name']}` | "
-            f"{symbol['start_line']}-{symbol['end_line']} |"
-            for symbol in python["symbols"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Python Imports",
-            "",
-            "| Fact ID | Path | Import | Root | Classification | Line |",
-            "| --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="files",
+        title="Files",
+        item_label="files",
+        rows=snapshot["files"],
+        headers=("Path", "Node ID", "Size bytes", "Parser status"),
+        row=lambda file: (
+            f"`{_md_cell(file['path'])}`",
+            f"`{_md_cell(file['node_id'])}`",
+            str(file["size_bytes"]),
+            str(file["parser_status"]),
+        ),
     )
-    if python["imports"]:
-        lines.extend(
-            "| "
-            f"`{import_fact['id']}` | "
-            f"`{import_fact['path']}` | "
-            f"`{_python_import_display(import_fact)}` | "
-            f"`{import_fact['root_name']}` | "
-            f"{import_fact['classification']} | "
-            f"{import_fact['line']} |"
-            for import_fact in python["imports"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## Python Packages",
-            "",
-            "| Node ID | Name | Classification | Inferred |",
-            "| --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="documentation_files",
+        title="Documentation Files",
+        item_label="documentation files",
+        rows=documentation["files"],
+        headers=("Path", "Node ID", "Kind", "Importance", "Parser status", "Title"),
+        row=lambda markdown: (
+            f"`{_md_cell(markdown['path'])}`",
+            f"`{_md_cell(markdown['node_id'])}`",
+            str(markdown["doc_kind"]),
+            str(markdown["importance"]),
+            str(markdown["parser_status"]),
+            _graph_index_cell(markdown["title"] or ""),
+        ),
     )
-    if python["packages"]:
-        lines.extend(
-            "| "
-            f"`{package['id']}` | "
-            f"`{package['name']}` | "
-            f"{package['classification']} | "
-            f"{package['inferred']} |"
-            for package in python["packages"]
-        )
-    else:
-        lines.append("| Not detected |  |  | false |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript Modules",
-            "",
-            "| Path | Node ID | Module | Extension | Parser status |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="markdown_headings",
+        title="Markdown Headings",
+        item_label="Markdown headings",
+        rows=documentation["headings"],
+        headers=("Node ID", "Path", "Heading ID", "Level", "Line"),
+        row=lambda heading: (
+            f"`{_md_cell(heading['id'])}`",
+            f"`{_md_cell(heading['path'])}`",
+            f"`{_md_cell(heading['heading_id'])}`",
+            str(heading["level"]),
+            str(heading["line"]),
+        ),
     )
-    if javascript["modules"]:
-        lines.extend(
-            "| "
-            f"`{module['path']}` | "
-            f"`{module['node_id']}` | "
-            f"`{module['module_name']}` | "
-            f"`{module['extension']}` | "
-            f"{module['parser_status']} |"
-            for module in javascript["modules"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  | not_parsed |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript Symbols",
-            "",
-            "| Node ID | Path | Kind | Qualified name | Lines |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="markdown_links",
+        title="Markdown Links",
+        item_label="Markdown links",
+        rows=documentation["links"],
+        headers=("Fact ID", "Path", "Target", "Fragment", "Line"),
+        row=lambda link: (
+            f"`{_md_cell(link['id'])}`",
+            f"`{_md_cell(link['path'])}`",
+            f"`{_md_cell(link['target_path'])}`",
+            f"`{_md_cell(link['target_fragment'] or '')}`",
+            str(link["line"]),
+        ),
     )
-    if javascript["symbols"]:
-        lines.extend(
-            "| "
-            f"`{symbol['id']}` | "
-            f"`{symbol['path']}` | "
-            f"{symbol['kind']} | "
-            f"`{symbol['qualified_name']}` | "
-            f"{symbol['start_line']}-{symbol['end_line']} |"
-            for symbol in javascript["symbols"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript Imports",
-            "",
-            "| Fact ID | Path | Kind | Specifier | Root | Classification | Resolved path | Resolution | Line |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="markdown_path_mentions",
+        title="Markdown Path Mentions",
+        item_label="Markdown path mentions",
+        rows=documentation["path_mentions"],
+        headers=("Fact ID", "Path", "Mention", "Target", "Line"),
+        row=lambda mention: (
+            f"`{_md_cell(mention['id'])}`",
+            f"`{_md_cell(mention['path'])}`",
+            f"`{_md_cell(mention['mentioned_path'])}`",
+            f"`{_md_cell(mention['target_path'])}`",
+            str(mention["line"]),
+        ),
     )
-    if javascript["imports"]:
-        lines.extend(
-            "| "
-            f"`{import_fact['id']}` | "
-            f"`{import_fact['path']}` | "
-            f"{import_fact['kind']} | "
-            f"`{import_fact['specifier']}` | "
-            f"`{import_fact['root_name'] or ''}` | "
-            f"{import_fact['classification']} | "
-            f"`{import_fact['resolved_path'] or ''}` | "
-            f"{import_fact['resolution_status']} | "
-            f"{import_fact['line']} |"
-            for import_fact in javascript["imports"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript Packages",
-            "",
-            "| Node ID | Name | Classification |",
-            "| --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="markdown_code_fences",
+        title="Markdown Code Fences",
+        item_label="Markdown code fences",
+        rows=documentation["code_fences"],
+        headers=("Node ID", "Path", "Language", "Lines"),
+        row=lambda fence: (
+            f"`{_md_cell(fence['id'])}`",
+            f"`{_md_cell(fence['path'])}`",
+            f"`{_md_cell(fence['language'] or '')}`",
+            f"{fence['start_line']}-{fence['end_line'] or ''}",
+        ),
     )
-    if javascript["packages"]:
-        lines.extend(
-            f"| `{package['id']}` | `{package['name']}` | {package['classification']} |"
-            for package in javascript["packages"]
-        )
-    else:
-        lines.append("| Not detected |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript Exports",
-            "",
-            "| Fact ID | Path | Kind | Exported name | Local name | Line |",
-            "| --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="documentation_tagged_comments",
+        title="Documentation Tagged Comments",
+        item_label="documentation tagged comments",
+        rows=documentation["tagged_comments"],
+        headers=("Node ID", "Path", "Language", "Syntax", "Tag", "Line"),
+        row=lambda comment: (
+            f"`{_md_cell(comment['id'])}`",
+            f"`{_md_cell(comment['path'])}`",
+            str(comment["language"]),
+            str(comment["syntax"]),
+            str(comment["tag"]),
+            str(comment["line"]),
+        ),
     )
-    if javascript["exports"]:
-        lines.extend(
-            "| "
-            f"`{export['id']}` | "
-            f"`{export['path']}` | "
-            f"{export['kind']} | "
-            f"`{export['exported_name']}` | "
-            f"`{export['local_name'] or ''}` | "
-            f"{export['line']} |"
-            for export in javascript["exports"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## JavaScript CommonJS Assignments",
-            "",
-            "| Fact ID | Path | Kind | Exported name | Assigned name | Line |",
-            "| --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="skills",
+        title="Skills",
+        item_label="skills",
+        rows=documentation["skills"],
+        headers=("Node ID", "Path", "Name"),
+        row=lambda skill: (
+            f"`{_md_cell(skill['id'])}`",
+            f"`{_md_cell(skill['path'])}`",
+            f"`{_md_cell(skill['name'])}`",
+        ),
     )
-    if javascript["commonjs_assignments"]:
-        lines.extend(
-            "| "
-            f"`{assignment['id']}` | "
-            f"`{assignment['path']}` | "
-            f"{assignment['kind']} | "
-            f"`{assignment['exported_name']}` | "
-            f"`{assignment['assigned_name'] or ''}` | "
-            f"{assignment['line']} |"
-            for assignment in javascript["commonjs_assignments"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Files",
-            "",
-            "| Path | Node ID | Kind | Format | Parser status | Top-level keys |",
-            "| --- | --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_modules",
+        title="Python Modules",
+        item_label="Python modules",
+        rows=python["modules"],
+        headers=("Path", "Node ID", "Module", "Parser status"),
+        row=lambda module: (
+            f"`{_md_cell(module['path'])}`",
+            f"`{_md_cell(module['node_id'])}`",
+            f"`{_md_cell(module['module_name'])}`",
+            str(module["parser_status"]),
+        ),
     )
-    if config["config_files"]:
-        lines.extend(
-            "| "
-            f"`{config_file['path']}` | "
-            f"`{config_file['node_id']}` | "
-            f"{config_file['config_kind']} | "
-            f"{config_file['format']} | "
-            f"{config_file['parser_status']} | "
-            f"{_md_cell(_join_list(config_file['top_level_keys']))} |"
-            for config_file in config["config_files"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  | not_parsed |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Package Managers",
-            "",
-            "| Node ID | Source | Ecosystem | Manager | Evidence |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_symbols",
+        title="Python Symbols",
+        item_label="Python symbols",
+        rows=python["symbols"],
+        headers=("Node ID", "Path", "Kind", "Qualified name", "Lines"),
+        row=lambda symbol: (
+            f"`{_md_cell(symbol['id'])}`",
+            f"`{_md_cell(symbol['path'])}`",
+            str(symbol["kind"]),
+            f"`{_md_cell(symbol['qualified_name'])}`",
+            f"{symbol['start_line']}-{symbol['end_line']}",
+        ),
     )
-    if config["package_managers"]:
-        lines.extend(
-            "| "
-            f"`{manager['id']}` | "
-            f"`{manager['source_path']}` | "
-            f"{manager['ecosystem']} | "
-            f"`{manager['name']}` | "
-            f"{manager['evidence_kind']} |"
-            for manager in config["package_managers"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Packages",
-            "",
-            "| Node ID | Source | Ecosystem | Classification | Name | Dependency type | Version |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_imports",
+        title="Python Imports",
+        item_label="Python imports",
+        rows=python["imports"],
+        headers=("Fact ID", "Path", "Import", "Root", "Classification", "Line"),
+        row=lambda import_fact: (
+            f"`{_md_cell(import_fact['id'])}`",
+            f"`{_md_cell(import_fact['path'])}`",
+            f"`{_graph_index_cell(_python_import_display(import_fact))}`",
+            f"`{_md_cell(import_fact['root_name'])}`",
+            str(import_fact["classification"]),
+            str(import_fact["line"]),
+        ),
     )
-    if config["packages"]:
-        lines.extend(
-            "| "
-            f"`{package['id']}` | "
-            f"`{package['source_path']}` | "
-            f"{package['ecosystem']} | "
-            f"{package['classification']} | "
-            f"`{package['name']}` | "
-            f"{package['dependency_type']} | "
-            f"{_md_cell(package['version_constraint'] or '')} |"
-            for package in config["packages"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Package Roots",
-            "",
-            "| Node ID | Source | Ecosystem | Name | Root |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_packages",
+        title="Python Packages",
+        item_label="Python packages",
+        rows=python["packages"],
+        headers=("Node ID", "Name", "Classification", "Inferred"),
+        row=lambda package: (
+            f"`{_md_cell(package['id'])}`",
+            f"`{_md_cell(package['name'])}`",
+            str(package["classification"]),
+            str(package["inferred"]),
+        ),
     )
-    if config["package_roots"]:
-        lines.extend(
-            "| "
-            f"`{package_root['id']}` | "
-            f"`{package_root['source_path']}` | "
-            f"{package_root['ecosystem']} | "
-            f"`{package_root['name']}` | "
-            f"`{package_root['path']}` |"
-            for package_root in config["package_roots"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Lockfiles",
-            "",
-            "| Node ID | Path | Ecosystem | Manager | Format |",
-            "| --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_tagged_comments",
+        title="Python Tagged Comments",
+        item_label="Python tagged comments",
+        rows=python["tagged_comments"],
+        headers=("Node ID", "Path", "Tag", "Line"),
+        row=lambda comment: (
+            f"`{_md_cell(comment['id'])}`",
+            f"`{_md_cell(comment['path'])}`",
+            str(comment["tag"]),
+            str(comment["line"]),
+        ),
     )
-    if config["lockfiles"]:
-        lines.extend(
-            "| "
-            f"`{lockfile['id']}` | "
-            f"`{lockfile['path']}` | "
-            f"{lockfile['ecosystem']} | "
-            f"{lockfile['manager']} | "
-            f"{lockfile['format']} |"
-            for lockfile in config["lockfiles"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Commands",
-            "",
-            "| Node ID | Path | Source | Name | Purpose | Command | Not run | Auto-run recommended |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_calls",
+        title="Python Same-Module Calls",
+        item_label="Python same-module calls",
+        rows=python["calls"],
+        headers=("Fact ID", "Path", "Caller ID", "Callee ID", "Callee", "Line"),
+        row=lambda call: (
+            f"`{_md_cell(call['id'])}`",
+            f"`{_md_cell(call['path'])}`",
+            f"`{_md_cell(call['caller_id'])}`",
+            f"`{_md_cell(call['callee_id'])}`",
+            f"`{_md_cell(call['callee_name'])}`",
+            str(call["line"]),
+        ),
     )
-    if config["commands"]:
-        lines.extend(
-            "| "
-            f"`{command['id']}` | "
-            f"`{command['path']}` | "
-            f"{command['source']} | "
-            f"`{command['name']}` | "
-            f"{command['purpose']} | "
-            f"`{_md_cell(command['command'])}` | "
-            f"{command['not_run']} | "
-            f"{command['auto_run_recommended']} |"
-            for command in config["commands"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |  | true | false |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Entrypoints",
-            "",
-            "| Node ID | Path | Kind | Name | Target | Evidence | Line |",
-            "| --- | --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="python_parse_errors",
+        title="Python Parse Errors",
+        item_label="Python parse errors",
+        rows=python["parse_errors"],
+        headers=("Node ID", "Path", "Line", "Column"),
+        row=lambda error: (
+            f"`{_md_cell(error['id'])}`",
+            f"`{_md_cell(error['path'])}`",
+            str(error["line"] or ""),
+            str(error["column"] or ""),
+        ),
     )
-    if config["entrypoints"]:
-        lines.extend(
-            "| "
-            f"`{entrypoint['id']}` | "
-            f"`{entrypoint['path']}` | "
-            f"{entrypoint['kind']} | "
-            f"`{entrypoint['name']}` | "
-            f"`{_md_cell(entrypoint['target'])}` | "
-            f"{_md_cell(entrypoint['evidence'])} | "
-            f"{entrypoint['line'] or ''} |"
-            for entrypoint in config["entrypoints"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Config Parse Errors",
-            "",
-            "| Node ID | Path | Message |",
-            "| --- | --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_modules",
+        title="JavaScript Modules",
+        item_label="JavaScript modules",
+        rows=javascript["modules"],
+        headers=("Path", "Node ID", "Module", "Extension", "Parser status"),
+        row=lambda module: (
+            f"`{_md_cell(module['path'])}`",
+            f"`{_md_cell(module['node_id'])}`",
+            f"`{_md_cell(module['module_name'])}`",
+            f"`{_md_cell(module['extension'])}`",
+            str(module["parser_status"]),
+        ),
     )
-    if config["parse_errors"]:
-        lines.extend(
-            f"| `{error['id']}` | `{error['path']}` | {error['message']} |"
-            for error in config["parse_errors"]
-        )
-    else:
-        lines.append("| Not detected |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Python Tagged Comments",
-            "",
-            "| Node ID | Path | Tag | Text | Line |",
-            "| --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_symbols",
+        title="JavaScript Symbols",
+        item_label="JavaScript symbols",
+        rows=javascript["symbols"],
+        headers=("Node ID", "Path", "Kind", "Qualified name", "Lines"),
+        row=lambda symbol: (
+            f"`{_md_cell(symbol['id'])}`",
+            f"`{_md_cell(symbol['path'])}`",
+            str(symbol["kind"]),
+            f"`{_md_cell(symbol['qualified_name'])}`",
+            f"{symbol['start_line']}-{symbol['end_line']}",
+        ),
     )
-    if python["tagged_comments"]:
-        lines.extend(
-            "| "
-            f"`{comment['id']}` | "
-            f"`{comment['path']}` | "
-            f"{comment['tag']} | "
-            f"{_md_cell(comment['text'])} | "
-            f"{comment['line']} |"
-            for comment in python["tagged_comments"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## Python Same-Module Calls",
-            "",
-            "| Fact ID | Path | Caller ID | Callee ID | Callee | Line |",
-            "| --- | --- | --- | --- | --- | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_imports",
+        title="JavaScript Imports",
+        item_label="JavaScript imports",
+        rows=javascript["imports"],
+        headers=(
+            "Fact ID",
+            "Path",
+            "Kind",
+            "Specifier",
+            "Root",
+            "Classification",
+            "Resolved path",
+            "Resolution",
+            "Line",
+        ),
+        row=lambda import_fact: (
+            f"`{_md_cell(import_fact['id'])}`",
+            f"`{_md_cell(import_fact['path'])}`",
+            str(import_fact["kind"]),
+            f"`{_graph_index_cell(import_fact['specifier'])}`",
+            f"`{_md_cell(import_fact['root_name'] or '')}`",
+            str(import_fact["classification"]),
+            f"`{_md_cell(import_fact['resolved_path'] or '')}`",
+            str(import_fact["resolution_status"]),
+            str(import_fact["line"]),
+        ),
     )
-    if python["calls"]:
-        lines.extend(
-            "| "
-            f"`{call['id']}` | "
-            f"`{call['path']}` | "
-            f"`{call['caller_id']}` | "
-            f"`{call['callee_id']}` | "
-            f"`{call['callee_name']}` | "
-            f"{call['line']} |"
-            for call in python["calls"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "## Python Parse Errors",
-            "",
-            "| Node ID | Path | Message | Line | Column |",
-            "| --- | --- | --- | ---: | ---: |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_packages",
+        title="JavaScript Packages",
+        item_label="JavaScript packages",
+        rows=javascript["packages"],
+        headers=("Node ID", "Name", "Classification"),
+        row=lambda package: (
+            f"`{_md_cell(package['id'])}`",
+            f"`{_md_cell(package['name'])}`",
+            str(package["classification"]),
+        ),
     )
-    if python["parse_errors"]:
-        lines.extend(
-            "| "
-            f"`{error['id']}` | "
-            f"`{error['path']}` | "
-            f"{_md_cell(error['message'])} | "
-            f"{error['line'] or ''} | "
-            f"{error['column'] or ''} |"
-            for error in python["parse_errors"]
-        )
-    else:
-        lines.append("| Not detected |  |  |  |  |")
-
-    lines.extend(
-        [
-            "",
-            "## Skipped Paths",
-            "",
-            "| Path | Reason |",
-            "| --- | --- |",
-        ]
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_exports",
+        title="JavaScript Exports",
+        item_label="JavaScript exports",
+        rows=javascript["exports"],
+        headers=("Fact ID", "Path", "Kind", "Exported name", "Local name", "Line"),
+        row=lambda export: (
+            f"`{_md_cell(export['id'])}`",
+            f"`{_md_cell(export['path'])}`",
+            str(export["kind"]),
+            f"`{_md_cell(export['exported_name'])}`",
+            f"`{_md_cell(export['local_name'] or '')}`",
+            str(export["line"]),
+        ),
     )
-    if snapshot["skipped_paths"]:
-        lines.extend(
-            f"| `{skipped['path']}` | {skipped['reason']} |"
-            for skipped in snapshot["skipped_paths"]
-        )
-    else:
-        lines.append("| None | none |")
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_commonjs_assignments",
+        title="JavaScript CommonJS Assignments",
+        item_label="JavaScript CommonJS assignments",
+        rows=javascript["commonjs_assignments"],
+        headers=("Fact ID", "Path", "Kind", "Exported name", "Assigned name", "Line"),
+        row=lambda assignment: (
+            f"`{_md_cell(assignment['id'])}`",
+            f"`{_md_cell(assignment['path'])}`",
+            str(assignment["kind"]),
+            f"`{_md_cell(assignment['exported_name'])}`",
+            f"`{_md_cell(assignment['assigned_name'] or '')}`",
+            str(assignment["line"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_files",
+        title="Config Files",
+        item_label="config files",
+        rows=config["config_files"],
+        headers=("Path", "Node ID", "Kind", "Format", "Parser status", "Top-level keys"),
+        row=lambda config_file: (
+            f"`{_md_cell(config_file['path'])}`",
+            f"`{_md_cell(config_file['node_id'])}`",
+            str(config_file["config_kind"]),
+            str(config_file["format"]),
+            str(config_file["parser_status"]),
+            _graph_index_cell(_join_list(config_file["top_level_keys"])),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_package_managers",
+        title="Config Package Managers",
+        item_label="config package managers",
+        rows=config["package_managers"],
+        headers=("Node ID", "Source", "Ecosystem", "Manager", "Evidence"),
+        row=lambda manager: (
+            f"`{_md_cell(manager['id'])}`",
+            f"`{_md_cell(manager['source_path'])}`",
+            str(manager["ecosystem"]),
+            f"`{_md_cell(manager['name'])}`",
+            str(manager["evidence_kind"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_packages",
+        title="Config Packages",
+        item_label="config packages",
+        rows=config["packages"],
+        headers=(
+            "Node ID",
+            "Source",
+            "Ecosystem",
+            "Classification",
+            "Name",
+            "Dependency type",
+            "Version",
+        ),
+        row=lambda package: (
+            f"`{_md_cell(package['id'])}`",
+            f"`{_md_cell(package['source_path'])}`",
+            str(package["ecosystem"]),
+            str(package["classification"]),
+            f"`{_md_cell(package['name'])}`",
+            str(package["dependency_type"]),
+            _graph_index_cell(package["version_constraint"] or ""),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_package_roots",
+        title="Config Package Roots",
+        item_label="config package roots",
+        rows=config["package_roots"],
+        headers=("Node ID", "Source", "Ecosystem", "Name", "Root"),
+        row=lambda package_root: (
+            f"`{_md_cell(package_root['id'])}`",
+            f"`{_md_cell(package_root['source_path'])}`",
+            str(package_root["ecosystem"]),
+            f"`{_md_cell(package_root['name'])}`",
+            f"`{_md_cell(package_root['path'])}`",
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_workspaces",
+        title="Config Workspaces",
+        item_label="config workspaces",
+        rows=config["workspaces"],
+        headers=("Node ID", "Source", "Ecosystem", "Path", "Pattern", "Evidence"),
+        row=lambda workspace: (
+            f"`{_md_cell(workspace['id'])}`",
+            f"`{_md_cell(workspace['source_path'])}`",
+            str(workspace["ecosystem"]),
+            f"`{_md_cell(workspace['path'])}`",
+            f"`{_graph_index_cell(workspace['pattern'])}`",
+            str(workspace["evidence_kind"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_lockfiles",
+        title="Config Lockfiles",
+        item_label="config lockfiles",
+        rows=config["lockfiles"],
+        headers=("Node ID", "Path", "Ecosystem", "Manager", "Format"),
+        row=lambda lockfile: (
+            f"`{_md_cell(lockfile['id'])}`",
+            f"`{_md_cell(lockfile['path'])}`",
+            str(lockfile["ecosystem"]),
+            str(lockfile["manager"]),
+            str(lockfile["format"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_commands",
+        title="Config Commands",
+        item_label="config commands",
+        rows=config["commands"],
+        headers=(
+            "Node ID",
+            "Path",
+            "Source",
+            "Name",
+            "Purpose",
+            "Command",
+            "Not run",
+            "Auto-run recommended",
+        ),
+        row=lambda command: (
+            f"`{_md_cell(command['id'])}`",
+            f"`{_md_cell(command['path'])}`",
+            str(command["source"]),
+            f"`{_md_cell(command['name'])}`",
+            str(command["purpose"]),
+            f"`{_graph_index_cell(command['command'])}`",
+            str(command["not_run"]),
+            str(command["auto_run_recommended"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_entrypoints",
+        title="Config Entrypoints",
+        item_label="config entrypoints",
+        rows=config["entrypoints"],
+        headers=("Node ID", "Path", "Kind", "Name", "Target", "Evidence", "Line"),
+        row=lambda entrypoint: (
+            f"`{_md_cell(entrypoint['id'])}`",
+            f"`{_md_cell(entrypoint['path'])}`",
+            str(entrypoint["kind"]),
+            f"`{_md_cell(entrypoint['name'])}`",
+            f"`{_graph_index_cell(entrypoint['target'])}`",
+            _graph_index_cell(entrypoint["evidence"]),
+            str(entrypoint["line"] or ""),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="config_parse_errors",
+        title="Config Parse Errors",
+        item_label="config parse errors",
+        rows=config["parse_errors"],
+        headers=("Node ID", "Path"),
+        row=lambda error: (f"`{_md_cell(error['id'])}`", f"`{_md_cell(error['path'])}`"),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="skipped_paths",
+        title="Skipped Paths",
+        item_label="skipped paths",
+        rows=snapshot["skipped_paths"],
+        headers=("Path", "Reason"),
+        row=lambda skipped: (f"`{_md_cell(skipped['path'])}`", str(skipped["reason"])),
+    )
     lines.append("")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if original_section_budgets is not None:
+        GRAPH_INDEX_SECTION_BUDGETS.update(original_section_budgets)
+    if full:
+        return text
+    return _apply_graph_index_character_budget(text)
+
+
+def _append_graph_index_section(
+    lines: list[str],
+    *,
+    section_key: str,
+    title: str,
+    item_label: str,
+    rows: list[dict[str, Any]],
+    headers: tuple[str, ...],
+    row: Callable[[dict[str, Any]], tuple[str, ...]],
+) -> None:
+    cap = GRAPH_INDEX_SECTION_BUDGETS[section_key]
+    truncation = graph_index_section_truncation(section_key, len(rows))
+    shown = min(len(rows), cap)
+    total = len(rows)
+    lines.extend(
+        [
+            "",
+            f"## {title}",
+            "",
+            f"Showing {shown} of {total} {item_label}.",
+            _graph_index_next_step(title),
+        ]
+    )
+    if truncation["truncated"]:
+        omitted = total - shown
+        lines.append(
+            f"Truncated: {omitted} lower-priority rows omitted because of {truncation['reason']}."
+        )
+        lines.append(f"Truncation: shown={shown} total={total} reason={truncation['reason']}.")
+    lines.extend(["", _graph_index_table_header(headers)])
+    if rows:
+        lines.extend(_graph_index_table_row(row(item)) for item in rows[:shown])
+    else:
+        lines.append(_graph_index_table_row(("Not detected", *([""] * (len(headers) - 1)))))
+
+
+def _graph_index_next_step(title: str) -> str:
+    return (
+        "Next step: query `.repolens/graph.sqlite` for complete rows from this section, "
+        f"or search `.repolens/graph.json` for `{title}` facts with a targeted filter."
+    )
+
+
+def _graph_index_table_header(headers: tuple[str, ...]) -> str:
+    return "| " + " | ".join(headers) + " |\n| " + " | ".join("---" for _ in headers) + " |"
+
+
+def _graph_index_table_row(cells: tuple[str, ...]) -> str:
+    return "| " + " | ".join(_md_cell(cell) for cell in cells) + " |"
+
+
+def _graph_index_cell(value: object, *, max_chars: int = 160) -> str:
+    cell = _md_cell(value)
+    if len(cell) <= max_chars:
+        return cell
+    return f"{cell[: max_chars - 13]}...<truncated>"
+
+
+def _apply_graph_index_character_budget(text: str) -> str:
+    if len(text) <= DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS:
+        return text
+    notice = (
+        "\n\nArtifact truncated because of "
+        f"{GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS}; query `.repolens/graph.sqlite` for complete facts.\n"
+    )
+    return text[: DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS - len(notice)].rstrip() + notice
 
 
 def _documentation_report_lines(documentation: dict[str, Any]) -> list[str]:

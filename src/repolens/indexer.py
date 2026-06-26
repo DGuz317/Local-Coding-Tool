@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from repolens.graph import (
+    FULL_GRAPH_INDEX_PATH,
     GRAPH_EXPORT_PATHS,
     GRAPH_STORE_PATH,
     FileChange,
@@ -16,6 +17,7 @@ from repolens.graph import (
     GraphExportError,
     GraphStoreError,
     SelectiveUpdatePlan,
+    export_full_graph_index,
     inspect_graph_artifacts,
     plan_selective_update,
     rebuild_graph_artifacts,
@@ -42,6 +44,7 @@ class IndexResult:
     scan_artifact: str = SCAN_ARTIFACT_PATH
     graph_store: str = GRAPH_STORE_PATH
     graph_exports: tuple[str, ...] = GRAPH_EXPORT_PATHS
+    warnings: tuple[str, ...] = ()
 
     def to_cli_data(self) -> dict[str, object]:
         scan_data = self.scan.to_artifact_dict()
@@ -85,6 +88,7 @@ def index_repository(
     *,
     file_changes: tuple[FileChange, ...] = (),
     parser_backend: ParserBackendOption = "stable",
+    full_graph_index: bool = False,
 ) -> IndexResult:
     """Run the safe discovery index path for ``repo_path`` and write bootstrap artifacts."""
     try:
@@ -107,9 +111,17 @@ def index_repository(
         rebuild_graph_artifacts(
             root, scan, file_changes=file_changes, parser_backend=parser_backend
         )
+        graph_exports = GRAPH_EXPORT_PATHS
+        warnings: tuple[str, ...] = ()
+        if full_graph_index:
+            full_index_path = export_full_graph_index(root)
+            graph_exports = (*graph_exports, full_index_path)
+            warnings = (
+                f"Full graph index export may be large; RepoLens wrote {FULL_GRAPH_INDEX_PATH}.",
+            )
     except (GraphStoreError, GraphExportError) as exc:
         raise RepoLensIndexError(str(exc)) from exc
-    return IndexResult(root=root, scan=scan)
+    return IndexResult(root=root, scan=scan, graph_exports=graph_exports, warnings=warnings)
 
 
 def update_repository(

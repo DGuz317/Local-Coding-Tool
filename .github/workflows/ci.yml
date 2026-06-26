@@ -1,11 +1,16 @@
 name: CI
 
 on:
-  pull_request:
   push:
     branches:
       - main
       - feature/repolens-v0.3
+      - feature/repolens-v0.3.1
+  pull_request:
+    branches:
+      - main
+      - feature/repolens-v0.3
+      - feature/repolens-v0.3.1
 
 jobs:
   release-gate:
@@ -27,9 +32,9 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --all-extras --dev --locked
 
-      - name: Run Ruff check
+      - name: Run Ruff lint
         run: uv run ruff check .
 
       - name: Run Ruff format check
@@ -38,21 +43,35 @@ jobs:
       - name: Run mypy
         run: uv run mypy src/repolens
 
-      - name: Run pytest
+      - name: Run graph-index budget regression tests
+        run: uv run pytest tests/test_artifact_budget_contract.py tests/test_synthetic_large_repo_fixture.py
+
+      - name: Run Context Pack tests
+        run: uv run pytest tests/test_context_pack_contract.py tests/test_context_pack_service.py tests/test_context_evaluation.py
+
+      - name: Run full test suite
         run: uv run pytest
 
+      - name: Run Context Pack evaluation
+        run: uv run repolens evaluate-context --manifest tests/fixtures/context_pack/evaluation_manifest.json --json
+
       - name: Build package
-        run: uv build
+        run: uv build --out-dir "${RUNNER_TEMP}/repolens-dist" --clear
 
-      - name: Run isolated install smoke
-        shell: bash
+      - name: Create clean install environment
+        run: python -m venv /tmp/repolens-smoke
+
+      - name: Install built wheel
+        run: /tmp/repolens-smoke/bin/python -m pip install "${RUNNER_TEMP}"/repolens-dist/*.whl
+
+      - name: Smoke installed CLI
         run: |
-          smoke_dir="$(mktemp -d)"
-          uv venv "$smoke_dir/.venv"
-          source "$smoke_dir/.venv/bin/activate"
-          uv pip install dist/*.whl
-          repolens --help
+          smoke_parent="${RUNNER_TEMP}/repolens-fixtures"
+          smoke_fixture="${smoke_parent}/happy-path"
+          mkdir -p "${smoke_parent}"
+          cp -R tests/fixtures/context_pack/happy-path "${smoke_fixture}"
 
-          cp -R tests/fixtures/dogfood/python-local-imports "$smoke_dir/python-local-imports"
-          repolens index "$smoke_dir/python-local-imports"
-          repolens context "$smoke_dir/python-local-imports" "Fix service greeting behavior" --json
+          /tmp/repolens-smoke/bin/repolens --help
+          /tmp/repolens-smoke/bin/repolens index "${smoke_fixture}"
+          /tmp/repolens-smoke/bin/repolens status "${smoke_fixture}" --json
+          /tmp/repolens-smoke/bin/repolens context "${smoke_fixture}" "Find auth-related files" --json

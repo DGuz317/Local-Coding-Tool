@@ -15,6 +15,7 @@ from repolens.context_pack import get_task_context, human_context_pack
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
 from repolens.mcp_server import run_mcp_server
+from repolens.query import QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT, GraphQueryService
 from repolens.report import RepoLensReportError, read_graph_report
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
@@ -55,10 +56,19 @@ def index(
             help="Parser backend to use: stable or experimental.",
         ),
     ] = "stable",
+    full_index: Annotated[
+        bool,
+        typer.Option(
+            "--full-index",
+            help="Also write .repolens/graph-index-full.md; this may be large.",
+        ),
+    ] = False,
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
-        result = index_repository(repo_path, parser_backend=parser_backend)
+        result = index_repository(
+            repo_path, parser_backend=parser_backend, full_graph_index=full_index
+        )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
@@ -87,7 +97,7 @@ def index(
                     "data": data,
                     "limits": {"max_file_size_bytes": result.scan.max_file_size_bytes},
                     "ok": True,
-                    "warnings": [],
+                    "warnings": list(result.warnings),
                 },
                 indent=2,
                 sort_keys=True,
@@ -110,6 +120,8 @@ def index(
         raise typer.Exit(1)
     for graph_export in graph_exports:
         typer.echo(f"- {graph_export}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
 
 
 @app.command()
@@ -403,6 +415,81 @@ def search(
         )
         typer.echo(f"{match.path}:{match.line}:{match.column}: {match.preview}{truncated_marker}")
     for warning in warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
+@app.command("search-graph")
+def search_graph(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path whose graph metadata should be searched.",
+        ),
+    ],
+    query: Annotated[str, typer.Argument(help="Non-empty graph metadata query.")],
+    kind: Annotated[
+        str,
+        typer.Option(
+            "--kind",
+            help="Metadata kind to search: all, symbol, file, or command.",
+        ),
+    ] = "all",
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=QUERY_MAX_LIMIT,
+            help="Maximum number of graph matches to return.",
+        ),
+    ] = QUERY_DEFAULT_LIMIT,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Search existing graph metadata without reading repository source files."""
+    envelope = GraphQueryService(repo_path).search_graph(query, kind=kind, max_results=limit)
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False):
+            raise typer.Exit(1)
+        return
+
+    if not envelope.get("ok", False):
+        error = envelope.get("error", {})
+        message = error.get("message") if isinstance(error, dict) else None
+        typer.echo(f"Graph search failed: {message or 'unknown error'}", err=True)
+        raise typer.Exit(1)
+
+    data = envelope["data"]
+    pagination = envelope.get("pagination", {})
+    matches = data.get("matches", []) if isinstance(data, dict) else []
+    total = data.get("total_matches", 0) if isinstance(data, dict) else 0
+    returned = (
+        pagination.get("returned", len(matches)) if isinstance(pagination, dict) else len(matches)
+    )
+    typer.echo(
+        f"Found {total} graph matches for {json.dumps(query)} "
+        f"in {data.get('kind', 'all')} metadata (showing {returned})."
+    )
+    if isinstance(pagination, dict) and pagination.get("truncated"):
+        typer.echo(f"Results truncated at {pagination.get('limit', limit)} matches.")
+    if data.get("no_match"):
+        typer.echo("No graph metadata matches found.")
+    for match in matches:
+        node = match.get("node", {}) if isinstance(match, dict) else {}
+        node_id = node.get("id", "")
+        node_kind = node.get("kind", "")
+        label = node.get("label", "")
+        path = node.get("path") or ""
+        typer.echo(f"{node_kind}: {label} ({node_id}) {path}".rstrip())
+    for warning in envelope.get("warnings", []):
         typer.echo(f"Warning: {warning}", err=True)
 
 

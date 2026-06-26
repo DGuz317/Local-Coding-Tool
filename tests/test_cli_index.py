@@ -8,6 +8,10 @@ import pytest
 from typer.testing import CliRunner
 
 import repolens.graph as graph
+from repolens.artifact_budget_contract import (
+    DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS,
+    GRAPH_INDEX_SECTION_BUDGETS,
+)
 from repolens.cli import app
 from repolens.indexer import ARTIFACT_GITIGNORE_CONTENT, RepoLensIndexError, index_repository
 
@@ -55,6 +59,145 @@ def test_index_creates_graph_store_and_exports(tmp_path):
     assert "Graph store: .repolens/graph.sqlite" in result.output
     for artifact in GRAPH_ARTIFACTS:
         assert (tmp_path / ".repolens" / artifact).exists(), artifact
+
+
+def test_graph_index_is_bounded_landing_page_for_large_repository(tmp_path):
+    for index in range(GRAPH_INDEX_SECTION_BUDGETS["javascript_symbols"] + 25):
+        _write_text(
+            tmp_path / "src" / f"module_{index:03}.ts",
+            f"export function symbol{index:03}() {{ return {index}; }}\n",
+        )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    graph_index = tmp_path / ".repolens" / "graph-index.md"
+    text = graph_index.read_text(encoding="utf-8")
+
+    assert graph_index.stat().st_size <= DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS
+    assert "bounded navigation landing page" in text
+    assert "repolens search-graph . <query> --kind symbol --limit 20 --json" in text
+    assert "--kind file" in text
+    assert "--kind command" in text
+    assert "## Total Counts" in text
+    assert "## JavaScript Symbols" in text
+    assert "Showing 100 of 125 JavaScript symbols." in text
+    assert "Truncated: 25 lower-priority rows omitted because of section_row_budget." in text
+    assert "Next step:" in text
+    assert text.count("| `javascript_symbol:") == GRAPH_INDEX_SECTION_BUDGETS["javascript_symbols"]
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        sqlite_count = connection.execute("SELECT COUNT(*) FROM javascript_symbols").fetchone()[0]
+    assert sqlite_count == 125
+
+
+def test_default_index_does_not_create_full_graph_index_export(tmp_path):
+    _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert ".repolens/graph-index-full.md" not in envelope["data"]["graph_exports"]
+    assert not (tmp_path / ".repolens" / "graph-index-full.md").exists()
+
+
+def test_explicit_full_index_export_writes_clearly_named_unbounded_metadata(tmp_path):
+    raw_comment = "do not expose this raw comment in the full index"
+    raw_guidance = "do not expose this guidance in the full index"
+    for index in range(GRAPH_INDEX_SECTION_BUDGETS["javascript_symbols"] + 25):
+        _write_text(
+            tmp_path / "src" / f"module_{index:03}.ts",
+            f"// TODO: {raw_comment}\nexport function symbol{index:03}() {{ return {index}; }}\n",
+        )
+    _write_text(tmp_path / "AGENTS.md", f"# Agent Notes\n\n{raw_guidance}\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path), "--full-index", "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    full_index = tmp_path / ".repolens" / "graph-index-full.md"
+    text = full_index.read_text(encoding="utf-8")
+
+    assert ".repolens/graph-index-full.md" in envelope["data"]["graph_exports"]
+    assert envelope["warnings"] == [
+        "Full graph index export may be large; RepoLens wrote .repolens/graph-index-full.md."
+    ]
+    assert "# RepoLens Full Graph Index" in text
+    assert "explicit full metadata export" in text
+    assert "Showing 125 of 125 JavaScript symbols." in text
+    assert "Truncated:" not in text
+    assert text.count("| `javascript_symbol:") == 125
+    assert raw_comment not in text
+    assert raw_guidance not in text
+
+
+def test_graph_status_reports_graph_index_truncation(tmp_path):
+    _write_text(
+        tmp_path / "src" / "many_symbols.py",
+        "".join(
+            f"def symbol_{index:03}():\n    return {index}\n\n"
+            for index in range(GRAPH_INDEX_SECTION_BUDGETS["python_symbols"] + 25)
+        ),
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    status = json.loads((tmp_path / ".repolens" / "graph-status.json").read_text())
+    graph_index = status["exports"]["graph_index"]
+
+    assert graph_index["path"] == ".repolens/graph-index.md"
+    assert graph_index["truncated"] is True
+    assert graph_index["max_total_chars"] == DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS
+    assert graph_index["artifact_reasons"] == []
+    assert graph_index["query_guidance"]
+    assert graph_index["sections"] == [
+        {
+            "name": "python_symbols",
+            "shown": GRAPH_INDEX_SECTION_BUDGETS["python_symbols"],
+            "total": GRAPH_INDEX_SECTION_BUDGETS["python_symbols"] + 25,
+            "reason": "section_row_budget",
+        }
+    ]
+
+
+def test_graph_status_reports_graph_index_not_truncated_for_small_repository(tmp_path):
+    _write_text(tmp_path / "app.py", "def app():\n    return 1\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    status = json.loads((tmp_path / ".repolens" / "graph-status.json").read_text())
+
+    assert status["exports"]["graph_index"]["truncated"] is False
+    assert status["exports"]["graph_index"]["artifact_reasons"] == []
+    assert status["exports"]["graph_index"]["sections"] == []
+
+
+def test_graph_index_omits_source_comments_and_agent_guidance_text(tmp_path):
+    source_body = "THIS_SOURCE_BODY_MUST_NOT_APPEAR_IN_GRAPH_INDEX"
+    raw_comment = "do not expose this raw comment"
+    raw_guidance = "do not expose this agent guidance text"
+    _write_text(
+        tmp_path / "src" / "app.py",
+        f"# TODO: {raw_comment}\ndef app():\n    return {source_body!r}\n",
+    )
+    _write_text(tmp_path / "AGENTS.md", f"# Agent Notes\n\n{raw_guidance}\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    text = (tmp_path / ".repolens" / "graph-index.md").read_text(encoding="utf-8")
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+
+    assert source_body not in text
+    assert raw_comment not in text
+    assert raw_guidance not in text
+    assert "TODO" in text
+    assert any(
+        comment["text"] == raw_comment for comment in graph_json["python"]["tagged_comments"]
+    )
 
 
 def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):

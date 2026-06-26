@@ -54,6 +54,42 @@ def test_readme_covers_release_readiness_topics() -> None:
         assert phrase in readme
 
 
+def test_ci_runs_v0_3_1_graph_index_and_context_pack_gates() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "feature/repolens-v0.3.1" in workflow
+    assert "Run graph-index budget regression tests" in workflow
+    assert "tests/test_artifact_budget_contract.py" in workflow
+    assert "tests/test_synthetic_large_repo_fixture.py" in workflow
+    assert "Run Context Pack tests" in workflow
+    assert "tests/test_context_pack_contract.py" in workflow
+    assert "tests/test_context_pack_service.py" in workflow
+    assert "tests/test_context_evaluation.py" in workflow
+    assert "Run full test suite" in workflow
+    assert "repolens evaluate-context" in workflow
+
+
+def test_release_notes_document_v0_3_1_graph_index_policy() -> None:
+    release_notes = (ROOT / "docs" / "releases" / "v0.3.1.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    contract = (ROOT / "docs" / "artifact-budget-contract.md").read_text(encoding="utf-8")
+
+    combined = "\n".join((release_notes, readme, contract))
+
+    for required in (
+        "graph-index.md",
+        "bounded navigation",
+        "SQLite remains the complete graph source of truth",
+        "shown",
+        "total",
+        "reason",
+        "repolens search-graph",
+        "full or sharded Markdown export",
+        "should not mirror full source",
+    ):
+        assert required in combined
+
+
 def test_dogfood_reports_define_process_and_release_blocker() -> None:
     process = (ROOT / "docs" / "dogfood" / "README.md").read_text(encoding="utf-8")
     report = (ROOT / "docs" / "dogfood" / "2026-06-22-v0.2-dogfood.md").read_text(encoding="utf-8")

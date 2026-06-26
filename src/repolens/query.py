@@ -47,9 +47,14 @@ _SYMBOL_NODE_KINDS = {
     "JavaScriptArrowFunction",
     "JavaScriptClass",
     "JavaScriptFunction",
-    "JavaScriptInterface",
-    "JavaScriptTypeAlias",
     "Method",
+    "PythonAsyncFunction",
+    "PythonAsyncMethod",
+    "PythonClass",
+    "PythonFunction",
+    "PythonMethod",
+    "TypeScriptInterface",
+    "TypeScriptTypeAlias",
 }
 _EXACT_MATCH_SCORE = 850
 _AMBIGUOUS_SCORE_DELTA = 80
@@ -152,6 +157,11 @@ _CONFIG_NODE_KINDS = {
 }
 _DOCUMENTATION_NODE_KINDS = {"MarkdownFile", "MarkdownHeading", "Skill"}
 _SOURCE_MODULE_KINDS = {"JavaScriptModule", "PythonModule"}
+GRAPH_SEARCH_KIND_FILTERS = {
+    "command": ("CandidateCommand",),
+    "file": ("File",),
+    "symbol": tuple(sorted(_SYMBOL_NODE_KINDS)),
+}
 _FILE_ANALYSIS_NODE_KINDS = {
     "ConfigFile",
     "JavaScriptModule",
@@ -366,13 +376,23 @@ class GraphQueryService:
         self,
         query: str,
         *,
+        kind: str | None = None,
         max_results: int = QUERY_DEFAULT_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Search graph metadata fields only; never read repository source text."""
         limit = _clamp_limit(max_results)
         normalized_offset = max(0, offset)
-        limits = {"max_results": limit}
+        normalized_kind = _normalize_graph_search_kind(kind)
+        limits: dict[str, Any] = {"max_results": limit}
+        if normalized_kind is not None:
+            limits["kind"] = normalized_kind
+        if normalized_kind == "invalid":
+            return _error_envelope(
+                code="invalid_kind",
+                message="Graph search kind must be one of: command, file, symbol.",
+                limits=limits,
+            )
         if not query.strip():
             return _error_envelope(
                 code="empty_query",
@@ -385,7 +405,7 @@ class GraphQueryService:
             return self._missing_graph_envelope(status, limits=limits)
 
         with self._connect() as connection:
-            matches = self._search_matches(connection, query)
+            matches = self._search_matches(connection, query, kind=normalized_kind)
 
         page = matches[normalized_offset : normalized_offset + limit]
         pagination = _pagination(
@@ -396,7 +416,9 @@ class GraphQueryService:
         )
         data = {
             "ambiguous": _is_ambiguous(matches),
+            "kind": normalized_kind or "all",
             "matches": page,
+            "no_match": not matches,
             "query": query,
             "total_matches": len(matches),
         }
@@ -1177,15 +1199,24 @@ class GraphQueryService:
         files.sort(key=lambda item: (_important_file_priority(item), str(item["path"])))
         return files
 
-    def _search_matches(self, connection: sqlite3.Connection, query: str) -> list[dict[str, Any]]:
+    def _search_matches(
+        self,
+        connection: sqlite3.Connection,
+        query: str,
+        *,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
         query_tokens = _tokens(query)
         normalized_query = _normalize(query)
         exported_symbols = self._exported_javascript_symbols(connection)
+        allowed_node_kinds = set(GRAPH_SEARCH_KIND_FILTERS.get(kind or "", ()))
         nodes = [
             _node_payload(row) for row in connection.execute("SELECT * FROM nodes ORDER BY id")
         ]
         matches: list[dict[str, Any]] = []
         for node in nodes:
+            if allowed_node_kinds and node["kind"] not in allowed_node_kinds:
+                continue
             score, matched_fields = _score_node(
                 node,
                 query=query,
@@ -3404,6 +3435,15 @@ def _pagination(*, limit: int, offset: int, returned: int, total: int) -> dict[s
 
 def _clamp_limit(value: int) -> int:
     return min(max(1, value), QUERY_MAX_LIMIT)
+
+
+def _normalize_graph_search_kind(kind: str | None) -> str | None:
+    if kind is None or not kind.strip() or kind.strip().casefold() == "all":
+        return None
+    normalized = kind.strip().casefold()
+    if normalized in GRAPH_SEARCH_KIND_FILTERS:
+        return normalized
+    return "invalid"
 
 
 def _envelope(
