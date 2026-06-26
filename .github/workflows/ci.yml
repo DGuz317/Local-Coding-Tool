@@ -43,7 +43,13 @@ jobs:
       - name: Run mypy
         run: uv run mypy src/repolens
 
-      - name: Run tests
+      - name: Run graph-index budget regression tests
+        run: uv run pytest tests/test_artifact_budget_contract.py tests/test_synthetic_large_repo_fixture.py
+
+      - name: Run Context Pack tests
+        run: uv run pytest tests/test_context_pack_contract.py tests/test_context_pack_service.py tests/test_context_evaluation.py
+
+      - name: Run full test suite
         run: uv run pytest
 
       - name: Run Context Pack evaluation
