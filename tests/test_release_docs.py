@@ -69,6 +69,27 @@ def test_ci_runs_v0_3_1_graph_index_and_context_pack_gates() -> None:
     assert "repolens evaluate-context" in workflow
 
 
+def test_release_notes_document_v0_3_1_graph_index_policy() -> None:
+    release_notes = (ROOT / "docs" / "releases" / "v0.3.1.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    contract = (ROOT / "docs" / "artifact-budget-contract.md").read_text(encoding="utf-8")
+
+    combined = "\n".join((release_notes, readme, contract))
+
+    for required in (
+        "graph-index.md",
+        "bounded navigation",
+        "SQLite remains the complete graph source of truth",
+        "shown",
+        "total",
+        "reason",
+        "repolens search-graph",
+        "full or sharded Markdown export",
+        "should not mirror full source",
+    ):
+        assert required in combined
+
+
 def test_dogfood_reports_define_process_and_release_blocker() -> None:
     process = (ROOT / "docs" / "dogfood" / "README.md").read_text(encoding="utf-8")
     report = (ROOT / "docs" / "dogfood" / "2026-06-22-v0.2-dogfood.md").read_text(encoding="utf-8")

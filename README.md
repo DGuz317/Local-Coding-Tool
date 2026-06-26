@@ -329,7 +329,17 @@ That directory can contain metadata such as:
 
 Do not commit, publish, upload, or share `.repolens/` unless you have reviewed it and are comfortable exposing repository metadata.
 
-Default Markdown artifacts such as `.repolens/graph-index.md` are bounded navigation views, not full graph dumps. SQLite remains the full graph source of truth. The artifact budget contract and truncation metadata rules live in `docs/artifact-budget-contract.md`.
+Default Markdown artifacts such as `.repolens/graph-index.md` are bounded navigation views, not full graph dumps. SQLite remains the complete graph source of truth. The artifact budget contract and truncation metadata rules live in `docs/artifact-budget-contract.md`.
+
+When `graph-index.md` omits rows, inspect `.repolens/graph-status.json` for `exports.graph_index.truncated` and per-section `shown`, `total`, and `reason` values. Retrieve omitted graph facts with bounded graph metadata queries instead of opening or generating huge Markdown:
+
+```bash
+uv run repolens search-graph . auth --kind symbol --limit 20 --json
+uv run repolens search-graph . login --kind file --limit 20 --json
+uv run repolens search-graph . test --kind command --limit 20 --json
+```
+
+If deeper inspection is still needed, query `.repolens/graph.sqlite` or inspect `.repolens/graph.json` with targeted filters. Full or sharded Markdown index export is not enabled by default; if a future release adds it, that export must preserve the same no whole-source disclosure boundary and should not mirror full source files into generated Markdown.
 
 ## Troubleshooting
 
