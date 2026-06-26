@@ -76,6 +76,9 @@ def test_graph_index_is_bounded_landing_page_for_large_repository(tmp_path):
 
     assert graph_index.stat().st_size <= DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS
     assert "bounded navigation landing page" in text
+    assert "repolens search-graph . <query> --kind symbol --limit 20 --json" in text
+    assert "--kind file" in text
+    assert "--kind command" in text
     assert "## Total Counts" in text
     assert "## JavaScript Symbols" in text
     assert "Showing 100 of 125 JavaScript symbols." in text
