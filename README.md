@@ -165,6 +165,8 @@ uv run repolens mcp /absolute/path/to/repo
 
 Important: `repolens mcp` is not an interactive terminal command. It waits for JSON-RPC messages from an MCP client. If you run it manually, it should appear to sit there silently.
 
+## Assistant Prompt Guidance
+
 Recommended assistant prompt:
 
 ```text
@@ -290,7 +292,9 @@ docker run --rm -i \
 
 The `--user "$(id -u):$(id -g)"` part helps avoid root-owned `.repolens/` files on your host machine.
 
-## What RepoLens Is Allowed To Do
+## Artifact Privacy
+
+### What RepoLens Is Allowed To Do
 
 RepoLens is designed to be safe and read-oriented:
 
@@ -324,6 +328,8 @@ That directory can contain metadata such as:
 - capped reports and indexes.
 
 Do not commit, publish, upload, or share `.repolens/` unless you have reviewed it and are comfortable exposing repository metadata.
+
+Default Markdown artifacts such as `.repolens/graph-index.md` are bounded navigation views, not full graph dumps. SQLite remains the full graph source of truth. The artifact budget contract and truncation metadata rules live in `docs/artifact-budget-contract.md`.
 
 ## Troubleshooting
 
@@ -379,6 +385,10 @@ Release-prep guidance lives in:
 
 - `docs/release-readiness.md`
 - `docs/release-checklist.md`
+
+## Human Release Checkpoint
+
+Before release, run the full verification gate, review generated artifact behavior on representative repositories, and confirm release-readiness evidence in `docs/release-readiness.md`.
 
 ## Roadmap And Non-Goals
 
