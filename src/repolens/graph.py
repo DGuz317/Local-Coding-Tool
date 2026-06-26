@@ -16,15 +16,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from repolens.artifact_budget_contract import (
-<<<<<<< HEAD
-    GRAPH_INDEX_BUDGET_REASON_SECTION_ROWS,
-    GRAPH_INDEX_SECTION_BUDGETS,
-=======
     DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS,
     GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS,
     GRAPH_INDEX_SECTION_BUDGETS,
     graph_index_section_truncation,
->>>>>>> 6fa6cc2 (exports: bound graph index landing page (#106))
 )
 from repolens.config_index import (
     CONFIG_EXTRACTOR_VERSION,
@@ -5517,95 +5512,6 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         row=lambda skipped: (f"`{_md_cell(skipped['path'])}`", str(skipped["reason"])),
     )
     lines.append("")
-<<<<<<< HEAD
-    return "\n".join(_apply_graph_index_section_budgets(lines))
-
-
-_GRAPH_INDEX_SECTION_TITLES = {
-    "Directories": "directories",
-    "Files": "files",
-    "Documentation Files": "documentation_files",
-    "Markdown Headings": "markdown_headings",
-    "Markdown Links": "markdown_links",
-    "Markdown Path Mentions": "markdown_path_mentions",
-    "Markdown Code Fences": "markdown_code_fences",
-    "Documentation Tagged Comments": "documentation_tagged_comments",
-    "Skills": "skills",
-    "Python Modules": "python_modules",
-    "Python Symbols": "python_symbols",
-    "Python Imports": "python_imports",
-    "Python Packages": "python_packages",
-    "Python Tagged Comments": "python_tagged_comments",
-    "Python Same-Module Calls": "python_calls",
-    "Python Parse Errors": "python_parse_errors",
-    "JavaScript Modules": "javascript_modules",
-    "JavaScript Symbols": "javascript_symbols",
-    "JavaScript Imports": "javascript_imports",
-    "JavaScript Packages": "javascript_packages",
-    "JavaScript Exports": "javascript_exports",
-    "JavaScript CommonJS Assignments": "javascript_commonjs_assignments",
-    "Config Files": "config_files",
-    "Config Package Managers": "config_package_managers",
-    "Config Packages": "config_packages",
-    "Config Package Roots": "config_package_roots",
-    "Config Workspaces": "config_workspaces",
-    "Config Lockfiles": "config_lockfiles",
-    "Config Commands": "config_commands",
-    "Config Entrypoints": "config_entrypoints",
-    "Config Parse Errors": "config_parse_errors",
-    "Skipped Paths": "skipped_paths",
-}
-
-
-def _apply_graph_index_section_budgets(lines: list[str]) -> list[str]:
-    """Cap table rows in graph-index.md while preserving the SQLite source of truth."""
-    output: list[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        output.append(line)
-        if not line.startswith("## "):
-            index += 1
-            continue
-
-        section_key = _GRAPH_INDEX_SECTION_TITLES.get(line.removeprefix("## ").strip())
-        if section_key is None or section_key not in GRAPH_INDEX_SECTION_BUDGETS:
-            index += 1
-            continue
-
-        index += 1
-        while index < len(lines) and not lines[index].startswith("## "):
-            if _is_markdown_table_separator(lines[index]):
-                output.append(lines[index])
-                index += 1
-                rows: list[str] = []
-                while index < len(lines) and lines[index].startswith("|"):
-                    rows.append(lines[index])
-                    index += 1
-
-                cap = GRAPH_INDEX_SECTION_BUDGETS[section_key]
-                output.extend(rows[:cap])
-                if len(rows) > cap:
-                    output.append(
-                        "> Truncation: "
-                        f"shown={cap} "
-                        f"total={len(rows)} "
-                        f"reason={GRAPH_INDEX_BUDGET_REASON_SECTION_ROWS}"
-                    )
-                continue
-
-            output.append(lines[index])
-            index += 1
-
-    return output
-
-
-def _is_markdown_table_separator(line: str) -> bool:
-    if not line.startswith("|"):
-        return False
-    cells = [cell.strip() for cell in line.strip("|").split("|")]
-    return bool(cells) and all(cell and set(cell) <= {"-", ":"} for cell in cells)
-=======
     return _apply_graph_index_character_budget("\n".join(lines))
 
 
@@ -5637,6 +5543,7 @@ def _append_graph_index_section(
         lines.append(
             f"Truncated: {omitted} lower-priority rows omitted because of {truncation['reason']}."
         )
+        lines.append(f"Truncation: shown={shown} total={total} reason={truncation['reason']}.")
     lines.extend(["", _graph_index_table_header(headers)])
     if rows:
         lines.extend(_graph_index_table_row(row(item)) for item in rows[:cap])
@@ -5674,7 +5581,6 @@ def _apply_graph_index_character_budget(text: str) -> str:
         f"{GRAPH_INDEX_BUDGET_REASON_TOTAL_CHARS}; query `.repolens/graph.sqlite` for complete facts.\n"
     )
     return text[: DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS - len(notice)].rstrip() + notice
->>>>>>> 6fa6cc2 (exports: bound graph index landing page (#106))
 
 
 def _documentation_report_lines(documentation: dict[str, Any]) -> list[str]:
