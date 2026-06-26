@@ -56,10 +56,19 @@ def index(
             help="Parser backend to use: stable or experimental.",
         ),
     ] = "stable",
+    full_index: Annotated[
+        bool,
+        typer.Option(
+            "--full-index",
+            help="Also write .repolens/graph-index-full.md; this may be large.",
+        ),
+    ] = False,
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
-        result = index_repository(repo_path, parser_backend=parser_backend)
+        result = index_repository(
+            repo_path, parser_backend=parser_backend, full_graph_index=full_index
+        )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
@@ -88,7 +97,7 @@ def index(
                     "data": data,
                     "limits": {"max_file_size_bytes": result.scan.max_file_size_bytes},
                     "ok": True,
-                    "warnings": [],
+                    "warnings": list(result.warnings),
                 },
                 indent=2,
                 sort_keys=True,
@@ -111,6 +120,8 @@ def index(
         raise typer.Exit(1)
     for graph_export in graph_exports:
         typer.echo(f"- {graph_export}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
 
 
 @app.command()

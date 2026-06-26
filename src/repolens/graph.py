@@ -78,6 +78,8 @@ GRAPH_EXPORT_FILENAMES = (
     "graph-status.json",
 )
 GRAPH_EXPORT_PATHS = tuple(f"{ARTIFACT_DIR_NAME}/{name}" for name in GRAPH_EXPORT_FILENAMES)
+FULL_GRAPH_INDEX_FILENAME = "graph-index-full.md"
+FULL_GRAPH_INDEX_PATH = f"{ARTIFACT_DIR_NAME}/{FULL_GRAPH_INDEX_FILENAME}"
 REQUIRED_GRAPH_ARTIFACTS = (GRAPH_STORE_PATH, *GRAPH_EXPORT_PATHS)
 
 REPOSITORY_ID = "repository:."
@@ -468,6 +470,20 @@ def export_graph_artifacts(root: Path) -> tuple[str, ...]:
         raise GraphExportError("graph_export_write_failed") from exc
 
     return GRAPH_EXPORT_PATHS
+
+
+def export_full_graph_index(root: Path) -> str:
+    """Write an explicit full graph index Markdown export."""
+    artifact_dir = root / ARTIFACT_DIR_NAME
+    try:
+        snapshot = _load_snapshot(root)
+        _atomic_write_text(
+            artifact_dir / FULL_GRAPH_INDEX_FILENAME, _graph_index_text(snapshot, full=True)
+        )
+    except (OSError, sqlite3.Error, GraphStoreError) as exc:
+        raise GraphExportError("full_graph_index_export_write_failed") from exc
+
+    return FULL_GRAPH_INDEX_PATH
 
 
 def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
@@ -5031,21 +5047,36 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _graph_index_text(snapshot: dict[str, Any]) -> str:
+def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
     python = snapshot["python"]
     javascript = snapshot["javascript"]
     config = snapshot["config"]
     documentation = snapshot["documentation"]
+    original_section_budgets: dict[str, int] | None = None
+    if full:
+        original_section_budgets = dict(GRAPH_INDEX_SECTION_BUDGETS)
+        for section in GRAPH_INDEX_SECTION_BUDGETS:
+            GRAPH_INDEX_SECTION_BUDGETS[section] = max(
+                GRAPH_INDEX_SECTION_BUDGETS[section], snapshot["counts"][section]
+            )
     lines = [
-        "# RepoLens Graph Index",
+        "# RepoLens Full Graph Index" if full else "# RepoLens Graph Index",
         "",
-        "This is a bounded navigation landing page, not a raw full graph dump.",
+        (
+            "This is an explicit full metadata export and may be large."
+            if full
+            else "This is a bounded navigation landing page, not a raw full graph dump."
+        ),
         "SQLite and structured graph exports remain the complete graph source of truth.",
         "",
         f"Indexed at UTC: {snapshot['run']['indexed_at_utc']}",
         f"Canonical graph hash: `{snapshot['metadata'].get('canonical_graph_hash', '')}`",
         f"Schema: {snapshot['schema']['name']} v{snapshot['schema']['version']}",
-        f"Artifact budget: {DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS} characters maximum.",
+        (
+            "Artifact budget: unbounded explicit full export."
+            if full
+            else f"Artifact budget: {DEFAULT_GRAPH_INDEX_MAX_TOTAL_CHARS} characters maximum."
+        ),
         "",
         "## Query Guidance",
         "",
@@ -5564,7 +5595,12 @@ def _graph_index_text(snapshot: dict[str, Any]) -> str:
         row=lambda skipped: (f"`{_md_cell(skipped['path'])}`", str(skipped["reason"])),
     )
     lines.append("")
-    return _apply_graph_index_character_budget("\n".join(lines))
+    text = "\n".join(lines)
+    if original_section_budgets is not None:
+        GRAPH_INDEX_SECTION_BUDGETS.update(original_section_budgets)
+    if full:
+        return text
+    return _apply_graph_index_character_budget(text)
 
 
 def _append_graph_index_section(
@@ -5598,7 +5634,7 @@ def _append_graph_index_section(
         lines.append(f"Truncation: shown={shown} total={total} reason={truncation['reason']}.")
     lines.extend(["", _graph_index_table_header(headers)])
     if rows:
-        lines.extend(_graph_index_table_row(row(item)) for item in rows[:cap])
+        lines.extend(_graph_index_table_row(row(item)) for item in rows[:shown])
     else:
         lines.append(_graph_index_table_row(("Not detected", *([""] * (len(headers) - 1)))))
 

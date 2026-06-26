@@ -91,6 +91,47 @@ def test_graph_index_is_bounded_landing_page_for_large_repository(tmp_path):
     assert sqlite_count == 125
 
 
+def test_default_index_does_not_create_full_graph_index_export(tmp_path):
+    _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    assert ".repolens/graph-index-full.md" not in envelope["data"]["graph_exports"]
+    assert not (tmp_path / ".repolens" / "graph-index-full.md").exists()
+
+
+def test_explicit_full_index_export_writes_clearly_named_unbounded_metadata(tmp_path):
+    raw_comment = "do not expose this raw comment in the full index"
+    raw_guidance = "do not expose this guidance in the full index"
+    for index in range(GRAPH_INDEX_SECTION_BUDGETS["javascript_symbols"] + 25):
+        _write_text(
+            tmp_path / "src" / f"module_{index:03}.ts",
+            f"// TODO: {raw_comment}\nexport function symbol{index:03}() {{ return {index}; }}\n",
+        )
+    _write_text(tmp_path / "AGENTS.md", f"# Agent Notes\n\n{raw_guidance}\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path), "--full-index", "--json"])
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    full_index = tmp_path / ".repolens" / "graph-index-full.md"
+    text = full_index.read_text(encoding="utf-8")
+
+    assert ".repolens/graph-index-full.md" in envelope["data"]["graph_exports"]
+    assert envelope["warnings"] == [
+        "Full graph index export may be large; RepoLens wrote .repolens/graph-index-full.md."
+    ]
+    assert "# RepoLens Full Graph Index" in text
+    assert "explicit full metadata export" in text
+    assert "Showing 125 of 125 JavaScript symbols." in text
+    assert "Truncated:" not in text
+    assert text.count("| `javascript_symbol:") == 125
+    assert raw_comment not in text
+    assert raw_guidance not in text
+
+
 def test_graph_status_reports_graph_index_truncation(tmp_path):
     _write_text(
         tmp_path / "src" / "many_symbols.py",

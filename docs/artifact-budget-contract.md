@@ -57,6 +57,8 @@ uv run repolens search-graph . login --kind file --limit 20 --json
 uv run repolens search-graph . test --kind command --limit 20 --json
 ```
 
-Full or sharded Markdown export is optional follow-up behavior, not the default artifact contract. If added, it must keep deterministic budgets, truncation metadata, and no whole-source disclosure protections.
+Full Markdown export is explicit follow-up behavior, not the default artifact contract. Use `repolens index <repo> --full-index` only when offline browsing or debugging needs a complete metadata index. It writes `.repolens/graph-index-full.md`, may be large on large repositories, and must keep no whole-source disclosure protections: no full source files, source snippets, code bodies, raw comments, raw Agent Guidance instruction text, secret-like task text, or absolute host paths.
+
+Sharded Markdown export remains optional future behavior. If added, it must be explicit, clearly named, include a table of contents, and preserve the same disclosure protections.
 
 This metadata is a disclosure boundary, not a relevance claim. Omitted rows are lower-priority context to inspect later, not irrelevant or safe to ignore.
