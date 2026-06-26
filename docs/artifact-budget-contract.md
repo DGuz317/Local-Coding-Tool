@@ -8,6 +8,8 @@ SQLite remains the full graph source of truth. Default Markdown artifacts are bo
 
 Use `.repolens/graph.sqlite` and SQLite-backed RepoLens query surfaces for complete graph detail. The default `graph-index.md` should help an assistant orient quickly, then move to targeted queries or file reads when more detail is needed.
 
+Generated Markdown must remain orientation metadata. It should not mirror full source files, source snippets, code bodies, raw comments, raw Agent Guidance instruction text, secret-like task text, or absolute host paths.
+
 ## Default `graph-index.md` Budget
 
 The centralized constants live in `src/repolens/artifact_budget_contract.py`.
@@ -45,6 +47,16 @@ Every truncated section must report section-level truncation metadata with:
 
 If the total character budget is reached, the artifact-level reason should be `total_character_budget`.
 
-`.repolens/graph-status.json` reports `exports.graph_index.truncated` and an `exports.graph_index.sections` list for capped sections. To inspect omitted rows, query `.repolens/graph.sqlite` for the complete section table or inspect `.repolens/graph.json` with a targeted filter instead of loading the bounded Markdown artifact.
+`.repolens/graph-status.json` reports `exports.graph_index.truncated` and an `exports.graph_index.sections` list for capped sections. To inspect omitted rows, use bounded graph metadata search, query `.repolens/graph.sqlite` for the complete section table, or inspect `.repolens/graph.json` with a targeted filter instead of loading the bounded Markdown artifact.
+
+Examples:
+
+```bash
+uv run repolens search-graph . auth --kind symbol --limit 20 --json
+uv run repolens search-graph . login --kind file --limit 20 --json
+uv run repolens search-graph . test --kind command --limit 20 --json
+```
+
+Full or sharded Markdown export is optional follow-up behavior, not the default artifact contract. If added, it must keep deterministic budgets, truncation metadata, and no whole-source disclosure protections.
 
 This metadata is a disclosure boundary, not a relevance claim. Omitted rows are lower-priority context to inspect later, not irrelevant or safe to ignore.
