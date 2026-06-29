@@ -1,0 +1,3 @@
+# Store ambiguous v0.4 relationships as candidates, not graph edges
+
+RepoLens v0.4 stores ambiguous package, workspace, import, and ownership relationships as bounded Relationship Candidates with evidence labels rather than as low-confidence graph edges. This keeps graph traversal, ownership, and impact analysis grounded in evidence-backed relationships while still giving Context Packs enough orientation to surface ambiguity and graph-quality warnings. Warning-only ambiguity would hide useful evidence, while low-confidence edges would make uncertain package/import relationships look traversable.

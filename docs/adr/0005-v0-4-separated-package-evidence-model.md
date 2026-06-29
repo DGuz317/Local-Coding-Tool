@@ -1,0 +1,3 @@
+# Separate package identity, membership, ownership, and resolution evidence
+
+RepoLens v0.4 keeps Package Identity, Workspace Membership, Package Ownership, Package Dependency, Local Resolution, and Relationship Candidates as separate evidence concepts. This avoids turning folder conventions, import resolution, lockfile entries, or fuzzy matches into ownership claims while still letting Context Packs surface useful package/workspace orientation. The simpler alternatives of nearest-folder ownership everywhere, lockfile-derived ownership, or low-confidence graph edges would make package/workspace guidance look more certain than the graph evidence supports.

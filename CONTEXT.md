@@ -32,6 +32,10 @@ _Avoid_: Serialized item payload, session handle, source-bearing handle
 A deterministic summary of repository structure for a repo, package, directory, file, symbol, or test group, built from graph facts, relationships, reasons, and freshness signals rather than generated prose or source excerpts.
 _Avoid_: AI summary, source excerpt, prose digest
 
+**Docs/Config Orientation**:
+Structured metadata that helps an assistant navigate documentation and configuration tasks through paths, links, mentions, package references, commands, ownership facts, and warnings. It excludes paragraph excerpts, raw comments, raw instruction text, and raw configuration value dumps.
+_Avoid_: Documentation excerpt, config preview, instruction dump
+
 **Context Budget**:
 The bounded size contract for assistant-facing context, enforced with deterministic item and character caps and reported with approximate token estimates. It is not tied to a model-specific tokenizer.
 _Avoid_: Exact token contract, unlimited context, model-specific budget
@@ -84,6 +88,38 @@ _Avoid_: Blanket redaction, raw secret exposure
 A repository area identified as a package or workspace from explicit package/config evidence. RepoLens does not treat conventional directory names alone as package boundaries.
 _Avoid_: Monorepo folder guess, implicit workspace
 
+**Package Identity**:
+A package's explicit name and ecosystem as declared by repository package or configuration evidence. It identifies a package fact without proving which files the package owns.
+_Avoid_: Folder name identity, inferred package name
+
+**Workspace Membership**:
+An explicit relationship showing that a package belongs to a workspace because workspace configuration and package identity evidence agree. A workspace declaration alone is scope evidence, not confirmed ownership or membership.
+_Avoid_: Monorepo convention, workspace guess
+
+**Workspace Package Import**:
+A package-style import whose target may be a local workspace package when explicit package and workspace evidence supports that relationship. If package entrypoint evidence is missing or ambiguous, RepoLens treats the relationship as candidate orientation rather than guessing a file.
+_Avoid_: External-only package import, convention-guessed local import
+
+**Package Entrypoint Evidence**:
+Explicit package metadata that identifies a package-facing file without executing package-manager, bundler, framework, or runtime resolution. Complex or environment-specific entrypoint rules remain candidate context rather than definitive Local Resolution.
+_Avoid_: Runtime entrypoint, bundler-resolved entrypoint
+
+**Package Reference**:
+An exact graph-backed mention of a known package identity or declared dependency in documentation or configuration metadata. It provides navigation context without surrounding prose or raw configuration values.
+_Avoid_: Fuzzy package mention, semantic entity extraction
+
+**Package Dependency**:
+An explicit manifest relationship from one package identity to another package name. It becomes a local package relationship only when the dependency name uniquely matches a local Package Identity.
+_Avoid_: Folder-inferred dependency, lockfile-only local dependency
+
+**Lockfile Evidence**:
+Supporting package or dependency metadata from a lockfile. It can strengthen package relationship evidence but does not establish local package ownership without explicit package boundary evidence.
+_Avoid_: Lockfile-owned package, primary ownership proof
+
+**Package Ownership**:
+An evidence-backed relationship between a repository path and the package boundary that owns it. The nearest explicit package root owns paths in a clean nested boundary chain; conflicting or colliding candidates stay unresolved rather than choosing a definitive owner.
+_Avoid_: Nearest-folder ownership, import-implied ownership
+
 **Dogfooding Report**:
 A release-readiness record from running RepoLens on representative local repositories, capturing graph quality issues, resolver misses, performance problems, and user experience friction. It is paired with distilled regression fixtures rather than vendored repository snapshots.
 _Avoid_: Vendored repo fixture, anecdotal test run
@@ -104,13 +140,25 @@ _Avoid_: Artifact hash, timestamp-sensitive hash
 The check that generated graph artifacts satisfy hard structural and safety invariants before replacing the previous graph. Expected incompleteness is reported as quality warnings rather than corruption.
 _Avoid_: Best-effort write, completeness guarantee
 
+**Graph Quality Warning**:
+A recoverable structured metadata notice that graph facts are incomplete, ambiguous, or limited by unsupported repository structure. It uses stable warning codes and bounded metadata; it does not mean the graph artifact is corrupt or that the user's code is risky.
+_Avoid_: Validation failure, risk signal, corrupt graph
+
 **Resolution Strategy**:
 The canonical reason RepoLens believes a relationship or candidate connects two repository facts. Successful strategies may support graph edges; fuzzy strategies remain candidates only.
 _Avoid_: Resolver status, arbitrary strategy name
 
+**Relationship Candidate**:
+A bounded, evidence-labeled possible relationship that is useful for orientation but not trusted enough to become a graph edge. It may be surfaced in Context Packs without participating in definitive traversal or ownership claims.
+_Avoid_: Low-confidence edge, hidden maybe-edge
+
 **Local Resolution**:
 Deterministic resolution of a reference to a scanner-approved file or symbol inside the analyzed repository. It does not emulate runtime loaders, installed environments, or framework-specific magic.
 _Avoid_: Runtime resolution, environment-dependent import
+
+**Alias Resolution Scope**:
+The explicit configuration boundary within which an import alias may be used for Local Resolution. Alias evidence outside the applicable scope remains candidate context rather than a global rule.
+_Avoid_: Global alias table, framework magic alias
 
 **Related Test**:
 A test file connected to a target by direct reference or deterministic path/name similarity. The relationship is confidence-scored and does not prove full behavioral coverage.
@@ -119,6 +167,10 @@ _Avoid_: Covering test, guaranteed regression test
 **Candidate Verification Command**:
 A declared repository command that may help a human or assistant verify work after review. RepoLens records it as not run and does not recommend automatic execution.
 _Avoid_: Recommended command, executed check
+
+**Command Risk Bucket**:
+A conservative classification of a Candidate Verification Command's likely verification usefulness and execution risk. It is separate from command purpose and does not make the command safe to run automatically.
+_Avoid_: Auto-run approval, command recommendation
 
 **No Whole-Source Disclosure**:
 The safety guarantee that RepoLens does not expose complete source files through artifacts or MCP tools. Scanner-approved text search may read live files but returns only bounded sanitized previews.
