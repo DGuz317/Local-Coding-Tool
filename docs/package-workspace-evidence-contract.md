@@ -22,6 +22,20 @@ Resolution Strategy names how a fact was resolved, such as exact explicit packag
 
 Alias Resolution Scope is the directory subtree controlled by the applicable `tsconfig.json` or `jsconfig.json`. Aliases outside that scope must not create definitive edges.
 
+## Supported JS/TS Workspace Package Import Resolution
+
+RepoLens resolves a package-style JavaScript or TypeScript import to a local workspace package entrypoint only when all evidence is unique and explicit:
+
+- the importing file belongs to an explicit JavaScript package root;
+- that package manifest declares a dependency on the imported package name;
+- exactly one local JavaScript package identity matches the imported package name;
+- both the importing and target package roots are within explicit workspace scope;
+- the target package has exactly one scanner-approved JS/TS entrypoint path from supported simple package entrypoint metadata such as string `exports`, `main`, `module`, or `browser`.
+
+When those checks pass, RepoLens records the import as `local_resolved` with `resolved_workspace_package` and emits an `IMPORTS` edge to the scanner-approved module path using `workspace_package_import` evidence.
+
+RepoLens does not resolve missing entrypoints, complex entrypoint maps, ambiguous package identities, ambiguous entrypoint targets, undeclared dependencies, or package names that only resemble directory names.
+
 ## Default Rule
 
 ```text

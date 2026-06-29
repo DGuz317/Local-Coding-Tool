@@ -895,6 +895,172 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
     assert "docker_cmd" in graph_index
 
 
+def test_index_resolves_js_workspace_package_imports_from_explicit_evidence(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "workspace-root",
+              "private": true,
+              "workspaces": ["packages/*"]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "@demo/app",
+              "dependencies": {"@demo/lib": "workspace:*"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "lib" / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "@demo/lib",
+              "exports": "./src/index.ts"
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        "import { value } from '@demo/lib';\nexport const appValue = value;\n",
+    )
+    _write_text(tmp_path / "packages" / "lib" / "src" / "index.ts", "export const value = 1;\n")
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        import_rows = list(
+            connection.execute(
+                """
+                SELECT specifier, classification, resolved_path, resolution_status
+                FROM javascript_imports
+                ORDER BY path, line
+                """
+            )
+        )
+        edges = list(
+            connection.execute(
+                """
+                SELECT source_id, target_id, kind, resolution_strategy, evidence_json, metadata_json
+                FROM edges
+                WHERE kind = 'IMPORTS'
+                ORDER BY source_id, target_id
+                """
+            )
+        )
+
+    assert (
+        "@demo/lib",
+        "local_resolved",
+        "packages/lib/src/index.ts",
+        "resolved_workspace_package",
+    ) in import_rows
+    assert any(
+        source_id == "javascript_module:packages/app/src/main.ts"
+        and target_id == "javascript_module:packages/lib/src/index.ts"
+        and strategy == "workspace_package_import"
+        and '"dependency_source_path":"packages/app/package.json"' in evidence_json
+        and '"entrypoint_source_path":"packages/lib/package.json"' in evidence_json
+        and '"package_name":"@demo/lib"' in metadata_json
+        for source_id, target_id, _, strategy, evidence_json, metadata_json in edges
+    )
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    assert any(
+        import_fact["specifier"] == "@demo/lib"
+        and import_fact["classification"] == "local_resolved"
+        and import_fact["resolved_path"] == "packages/lib/src/index.ts"
+        and import_fact["resolution_status"] == "resolved_workspace_package"
+        for import_fact in graph_json["javascript"]["imports"]
+    )
+
+
+def test_index_does_not_resolve_ambiguous_js_workspace_package_identity(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "workspace-root",
+              "private": true,
+              "workspaces": ["packages/*"]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "@demo/app",
+              "dependencies": {"@demo/lib": "workspace:*"}
+            }
+            """
+        ).lstrip(),
+    )
+    for package_path in ("lib-a", "lib-b"):
+        _write_text(
+            tmp_path / "packages" / package_path / "package.json",
+            dedent(
+                r"""
+                {
+                  "name": "@demo/lib",
+                  "exports": "./src/index.ts"
+                }
+                """
+            ).lstrip(),
+        )
+        _write_text(
+            tmp_path / "packages" / package_path / "src" / "index.ts",
+            "export const value = 1;\n",
+        )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        "import { value } from '@demo/lib';\nexport const appValue = value;\n",
+    )
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        import_rows = list(
+            connection.execute(
+                """
+                SELECT specifier, classification, resolved_path, resolution_status
+                FROM javascript_imports
+                ORDER BY path, line
+                """
+            )
+        )
+        local_edges = list(
+            connection.execute(
+                """
+                SELECT target_id, resolution_strategy
+                FROM edges
+                WHERE kind = 'IMPORTS'
+                  AND source_id = 'javascript_module:packages/app/src/main.ts'
+                  AND target_id LIKE 'javascript_module:%'
+                ORDER BY target_id
+                """
+            )
+        )
+
+    assert ("@demo/lib", "third_party", None, "external") in import_rows
+    assert local_edges == []
+
+
 def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_path):
     _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
     _write_text(
