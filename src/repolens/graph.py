@@ -63,7 +63,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 12
+GRAPH_SCHEMA_VERSION = 13
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -873,6 +873,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             command TEXT NOT NULL,
             purpose TEXT NOT NULL,
+            risk_bucket TEXT NOT NULL,
             not_run INTEGER NOT NULL,
             auto_run_recommended INTEGER NOT NULL,
             group_path TEXT NOT NULL,
@@ -1451,6 +1452,7 @@ def _file_signatures_by_path(
                 "name": command.name,
                 "not_run": command.not_run,
                 "purpose": command.purpose,
+                "risk_bucket": command.risk_bucket,
                 "source": command.source,
                 "group_kind": command.group_kind,
                 "group_path": command.group_path,
@@ -1860,6 +1862,7 @@ def _insert_nodes(
                         "command": command.command,
                         "not_run": command.not_run,
                         "purpose": command.purpose,
+                        "risk_bucket": command.risk_bucket,
                         "source": command.source,
                         "group_kind": command.group_kind,
                         "group_path": command.group_path,
@@ -2512,13 +2515,14 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
             name,
             command,
             purpose,
+            risk_bucket,
             not_run,
             auto_run_recommended,
             group_path,
             group_kind,
             group_source_path
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2528,6 +2532,7 @@ def _insert_config_tables(connection: sqlite3.Connection, config_index: ConfigIn
                 command.name,
                 redact_command(command.command),
                 command.purpose,
+                command.risk_bucket,
                 int(command.not_run),
                 int(command.auto_run_recommended),
                 command.group_path,
@@ -3001,6 +3006,7 @@ def _insert_edges(
                 "group_source_path": command.group_source_path,
                 "not_run": command.not_run,
                 "purpose": command.purpose,
+                "risk_bucket": command.risk_bucket,
                 "source": command.source,
             },
         )
@@ -4146,6 +4152,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                         name,
                         command,
                         purpose,
+                        risk_bucket,
                         not_run,
                         auto_run_recommended,
                         group_path,
@@ -4506,6 +4513,7 @@ def _config_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "not_run": command["not_run"],
                 "path": command["path"],
                 "purpose": command["purpose"],
+                "risk_bucket": command["risk_bucket"],
                 "source": command["source"],
                 "group_kind": command["group_kind"],
                 "group_path": command["group_path"],
@@ -5145,8 +5153,8 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             "",
             "## Config Commands",
             "",
-            "| Path | Source | Name | Purpose | Command | Not run | Auto-run recommended |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Path | Source | Name | Purpose | Risk bucket | Command | Not run | Auto-run recommended |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     if config["commands"]:
@@ -5156,13 +5164,14 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
             f"{command['source']} | "
             f"`{command['name']}` | "
             f"{command['purpose']} | "
+            f"{command['risk_bucket']} | "
             f"`{_md_cell(command['command'])}` | "
             f"{command['not_run']} | "
             f"{command['auto_run_recommended']} |"
             for command in config["commands"]
         )
     else:
-        lines.append("| Not detected |  |  |  |  | true | false |")
+        lines.append("| Not detected |  |  |  |  |  | true | false |")
 
     lines.extend(
         [
@@ -5795,6 +5804,7 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             "Source",
             "Name",
             "Purpose",
+            "Risk bucket",
             "Command",
             "Not run",
             "Auto-run recommended",
@@ -5805,6 +5815,7 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             str(command["source"]),
             f"`{_md_cell(command['name'])}`",
             str(command["purpose"]),
+            str(command["risk_bucket"]),
             f"`{_graph_index_cell(command['command'])}`",
             str(command["not_run"]),
             str(command["auto_run_recommended"]),

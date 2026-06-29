@@ -661,13 +661,17 @@ def _command_item(
         "command": str(item.get("command", "")),
         "confidence": str(item.get("confidence", "high")),
         "evidence": [{"source": "config_commands"}],
+        "found": True,
         "freshness": dict(freshness),
         "handle": _hash_id("item", {"context_pack_id": context_pack_id, "identity": identity}),
         "kind": "candidate_verification_command",
         "name": str(item.get("name", "")),
         "not_run": True,
         "path": path,
+        "purpose": str(item.get("purpose", "unknown")),
         "reason": "Candidate verification command from repository config; not run.",
+        "risk_bucket": str(item.get("risk_bucket", "unknown")),
+        "run": False,
     }
 
 

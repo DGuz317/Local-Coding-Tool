@@ -104,6 +104,10 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
 
     command = pack["candidate_verification_commands"][0]
     assert command["path"] == "package.json"
+    assert command["purpose"] == "lint"
+    assert command["risk_bucket"] == "quality_check_likely"
+    assert command["found"] is True
+    assert command["run"] is False
     assert command["not_run"] is True
     assert command["auto_run_recommended"] is False
 

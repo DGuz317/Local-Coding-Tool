@@ -108,6 +108,7 @@ def test_config_index_extracts_javascript_manifests_lockfiles_commands_and_entry
               "scripts": {
                 "test": "VITE_TOKEN=abc vitest --run --token super-secret",
                 "lint": "eslint .",
+                "build": "npm run build",
                 "deploy": "npm publish --otp 123456",
                 "start": "vite --host 0.0.0.0"
               },
@@ -140,11 +141,15 @@ def test_config_index_extracts_javascript_manifests_lockfiles_commands_and_entry
 
     commands = {command.name: command for command in config_index.commands}
     assert commands["test"].purpose == "test"
+    assert commands["test"].risk_bucket == "verification_likely"
     assert commands["test"].not_run is True
     assert "super-secret" not in commands["test"].command
     assert "abc" not in commands["test"].command
     assert "<redacted>" in commands["test"].command
+    assert commands["lint"].risk_bucket == "quality_check_likely"
+    assert commands["build"].risk_bucket == "build_likely"
     assert commands["deploy"].purpose == "deploy"
+    assert commands["deploy"].risk_bucket == "risky_or_external"
     assert commands["deploy"].auto_run_recommended is False
     assert "123456" not in commands["deploy"].command
 
@@ -201,6 +206,9 @@ def test_config_index_extracts_docker_make_ci_precommit_and_task_commands(tmp_pa
             test:
 	uv run pytest
 
+            verify:
+	make test
+
             deploy-prod:
 	./scripts/deploy.sh
             """
@@ -248,15 +256,17 @@ def test_config_index_extracts_docker_make_ci_precommit_and_task_commands(tmp_pa
     config_index = extract_config_index(tmp_path, scan_repository(tmp_path).files)
 
     command_facts = {
-        (command.source, command.name, command.purpose) for command in config_index.commands
+        (command.source, command.name, command.purpose, command.risk_bucket)
+        for command in config_index.commands
     }
-    assert ("make_target", "test", "test") in command_facts
-    assert ("make_target", "deploy-prod", "deploy") in command_facts
-    assert ("github_actions", "ci:1", "test") in command_facts
-    assert ("github_actions", "ci:2", "lint") in command_facts
-    assert ("pre_commit", "pre-commit", "lint") in command_facts
-    assert ("taskfile", "test", "test") in command_facts
-    assert ("taskfile", "lint", "lint") in command_facts
+    assert ("make_target", "test", "test", "verification_likely") in command_facts
+    assert ("make_target", "verify", "unknown", "verification_likely") in command_facts
+    assert ("make_target", "deploy-prod", "deploy", "risky_or_external") in command_facts
+    assert ("github_actions", "ci:1", "test", "verification_likely") in command_facts
+    assert ("github_actions", "ci:2", "lint", "quality_check_likely") in command_facts
+    assert ("pre_commit", "pre-commit", "lint", "quality_check_likely") in command_facts
+    assert ("taskfile", "test", "test", "verification_likely") in command_facts
+    assert ("taskfile", "lint", "lint", "quality_check_likely") in command_facts
     assert all(command.not_run for command in config_index.commands)
 
     entrypoints = {(entrypoint.kind, entrypoint.target) for entrypoint in config_index.entrypoints}

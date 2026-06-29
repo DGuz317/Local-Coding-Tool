@@ -141,6 +141,7 @@ class ConfigCommandFact:
     name: str
     command: str
     purpose: str
+    risk_bucket: str
     not_run: bool
     auto_run_recommended: bool
     group_path: str
@@ -308,6 +309,7 @@ def extract_config_index(root: Path, files: tuple[ScannedFile, ...]) -> ConfigIn
             name=name,
             command=sanitized,
             purpose=_classify_command_purpose(name, sanitized),
+            risk_bucket=_classify_command_risk_bucket(name, sanitized),
             not_run=True,
             auto_run_recommended=False,
             group_path=_file_directory(source_path),
@@ -1383,6 +1385,7 @@ def _commands_grouped_by_nearest_root(
                 name=command.name,
                 command=command.command,
                 purpose=command.purpose,
+                risk_bucket=command.risk_bucket,
                 not_run=command.not_run,
                 auto_run_recommended=command.auto_run_recommended,
                 group_path=nearest_root.path,
@@ -1556,6 +1559,65 @@ def _classify_command_purpose(name: str, command: str) -> str:
         return "install"
     if any(token in haystack for token in ("start", "serve", "dev")):
         return "run"
+    return "unknown"
+
+
+def _classify_command_risk_bucket(name: str, command: str) -> str:
+    haystack = f"{name} {command}".lower()
+    if any(
+        token in haystack
+        for token in (
+            "deploy",
+            "publish",
+            "release",
+            "upload",
+            "docker push",
+            "terraform apply",
+            "terraform destroy",
+            "kubectl apply",
+            "kubectl delete",
+            "helm upgrade",
+            "rm -rf",
+            "curl ",
+            "wget ",
+            "ssh ",
+            "scp ",
+        )
+    ):
+        return "risky_or_external"
+    if any(
+        token in haystack
+        for token in (
+            "test",
+            "verify",
+            "pytest",
+            "vitest",
+            "jest",
+            "unittest",
+            "go test",
+            "cargo test",
+        )
+    ):
+        return "verification_likely"
+    if any(
+        token in haystack
+        for token in (
+            "lint",
+            "typecheck",
+            "type-check",
+            "ruff check",
+            "ruff format --check",
+            "eslint",
+            "prettier --check",
+            "mypy",
+            "pyright",
+            "tsc",
+            "pre-commit",
+        )
+    ):
+        return "quality_check_likely"
+    if any(token in haystack for token in ("build", "npm pack", "uv build", "python -m build")):
+        return "build_likely"
     return "unknown"
 
 

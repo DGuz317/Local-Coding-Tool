@@ -111,7 +111,7 @@ _ENTRYPOINT_KIND_PRIORITY = {
 _IMPACT_EDGE_KINDS = {"CALLS", "IMPORTS"}
 _RELATED_TEST_EDGE_KINDS = {"RELATED_TEST"}
 _RELATED_DOC_EDGE_KINDS = {"LINKS_TO_FILE", "MENTIONS_FILE"}
-_VERIFICATION_PURPOSES = {"lint", "test", "typecheck"}
+_VERIFICATION_RISK_BUCKETS = {"quality_check_likely", "verification_likely"}
 _TEST_PATH_TOKENS = {"spec", "test", "tests"}
 _CONFIG_TASK_TOKENS = {
     "build",
@@ -1144,6 +1144,7 @@ class GraphQueryService:
                     name,
                     command,
                     purpose,
+                    risk_bucket,
                     not_run,
                     auto_run_recommended,
                     group_path,
@@ -2054,6 +2055,7 @@ class GraphQueryService:
                     name,
                     command,
                     purpose,
+                    risk_bucket,
                     not_run,
                     auto_run_recommended,
                     group_path,
@@ -2067,7 +2069,7 @@ class GraphQueryService:
         related = set(related_config_paths)
         commands = []
         for row in rows:
-            if row["purpose"] not in _VERIFICATION_PURPOSES:
+            if row["risk_bucket"] not in _VERIFICATION_RISK_BUCKETS:
                 continue
             if related and row["path"] not in related:
                 continue
@@ -3289,6 +3291,7 @@ def _command_payload(row: dict[str, Any]) -> dict[str, Any]:
         "auto_run_recommended": bool(row["auto_run_recommended"]),
         "command": row["command"],
         "confidence": "high",
+        "found": True,
         "id": row["id"],
         "group_kind": row["group_kind"],
         "group_path": row["group_path"],
@@ -3297,6 +3300,8 @@ def _command_payload(row: dict[str, Any]) -> dict[str, Any]:
         "not_run": bool(row["not_run"]),
         "path": row["path"],
         "purpose": row["purpose"],
+        "risk_bucket": row["risk_bucket"],
+        "run": False,
         "source": row["source"],
     }
 

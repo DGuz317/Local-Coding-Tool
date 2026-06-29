@@ -234,7 +234,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "12"
+    assert metadata["schema_version"] == "13"
     assert len(metadata["canonical_graph_hash"]) == 64
     assert json.loads(metadata["graph_quality_warnings"]) == []
     assert "effective_config_hash" in metadata
@@ -697,7 +697,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "12"
+    assert metadata["schema_version"] == "13"
     assert (
         "@/components/App",
         None,
@@ -820,7 +820,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
         commands = list(
             connection.execute(
                 """
-                SELECT source, name, purpose, command, not_run, auto_run_recommended
+                SELECT source, name, purpose, risk_bucket, command, not_run, auto_run_recommended
                 FROM config_commands
                 ORDER BY source, name
                 """
@@ -848,7 +848,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "12"
+    assert metadata["schema_version"] == "13"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -861,17 +861,19 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
         source == "package_script"
         and name == "test"
         and purpose == "test"
+        and risk_bucket == "verification_likely"
         and "super-secret" not in command
         and not_run == 1
-        for source, name, purpose, command, not_run, _ in commands
+        for source, name, purpose, risk_bucket, command, not_run, _ in commands
     )
     assert any(
         source == "package_script"
         and name == "deploy"
         and purpose == "deploy"
+        and risk_bucket == "risky_or_external"
         and auto_run_recommended == 0
         and "123456" not in command
-        for source, name, purpose, command, _, auto_run_recommended in commands
+        for source, name, purpose, risk_bucket, command, _, auto_run_recommended in commands
     )
     assert ("test", ".", "package_root", "package.json") in command_groups
     assert ("python_console_script", "acme", "acme.cli:main") in entrypoints
@@ -1172,7 +1174,7 @@ def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_pat
             connection.execute("SELECT name, description, path FROM skills ORDER BY name")
         )
 
-    assert metadata["schema_version"] == "12"
+    assert metadata["schema_version"] == "13"
     assert (
         "README.md",
         "readme",
