@@ -254,6 +254,19 @@ def test_impact_analysis_returns_affected_context_and_verification_commands(tmp_
         "typecheck",
     ]
     assert all(command["not_run"] for command in result["data"]["candidate_verification_commands"])
+    assert all(
+        command["found"] is True for command in result["data"]["candidate_verification_commands"]
+    )
+    assert all(
+        command["run"] is False for command in result["data"]["candidate_verification_commands"]
+    )
+    assert [
+        command["risk_bucket"] for command in result["data"]["candidate_verification_commands"]
+    ] == [
+        "quality_check_likely",
+        "verification_likely",
+        "quality_check_likely",
+    ]
     assert result["evidence"][-1] == {"source": "graph_metadata", "tool": "impact_analysis"}
 
 
@@ -350,6 +363,10 @@ def test_reading_order_command_context_is_sanitized_filtered_and_bounded(tmp_pat
     assert all(command["not_run"] for command in commands)
     assert all(command["auto_run_recommended"] is False for command in commands)
     assert commands[2]["command"] == "API_KEY=<redacted> tsc --token <redacted>"
+    assert {command["risk_bucket"] for command in commands} == {
+        "quality_check_likely",
+        "verification_likely",
+    }
 
     limited = service.suggest_reading_order("fix package typecheck command", max_files=2)
     assert len(limited["data"]["candidate_verification_commands"]) == 2

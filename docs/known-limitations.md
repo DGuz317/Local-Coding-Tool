@@ -31,7 +31,7 @@ These limitations are acceptable for v0.3 when they remain explicit, safe, and n
 ## Command And Config Limits
 
 - Candidate commands are recorded as not run. RepoLens never executes package scripts, Make targets, documentation commands, deploy commands, or publish commands.
-- Command purpose detection is conservative. Dogfooding found `make verify` classified as `unknown` in a fixture.
+- Command purpose and risk-bucket detection are conservative. Unknown commands remain candidates only when bounded local evidence supports them.
 - Declarative command strings embedded in arbitrary config files may not be promoted into command facts.
 
 ## Artifact And Privacy Limits

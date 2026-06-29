@@ -52,7 +52,7 @@ Default budgets are explicit and deterministic:
 - total character cap: 12,000
 - approximate token estimate divisor: 4
 
-Likely tests are grouped separately and should not consume the default First-Read File budget unless the task is test-focused. Candidate verification commands must be marked not run and must not be recommended for automatic execution. Agent Guidance may expose only bounded metadata such as path, kind, freshness, and reason.
+Likely tests are grouped separately and should not consume the default First-Read File budget unless the task is test-focused. Candidate verification commands must be marked not run, must not be recommended for automatic execution, and may expose a separate `risk_bucket` such as `verification_likely`, `quality_check_likely`, `build_likely`, `risky_or_external`, or `unknown`. Agent Guidance may expose only bounded metadata such as path, kind, freshness, and reason.
 
 ## Ranking
 
