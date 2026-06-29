@@ -104,6 +104,7 @@ HASH_FIELDS = (
     "line_range",
 )
 PARSER_ERROR_WARNING = "Parser errors detected in the live graph overlay."
+UNRESOLVED_JAVASCRIPT_IMPORT_WARNING = "graph_quality:javascript_unresolved_import_relationships"
 MAX_EDGE_EVIDENCE_ITEMS = 20
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -6127,6 +6128,18 @@ def _quality_warnings(connection: sqlite3.Connection) -> list[str]:
     )
     if parse_error_count:
         warnings.append(PARSER_ERROR_WARNING)
+    unresolved_js_import_count = _single_count(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM javascript_imports
+        WHERE resolution_status LIKE 'unresolved_%'
+        """,
+    )
+    if unresolved_js_import_count:
+        warnings.append(
+            f"{UNRESOLVED_JAVASCRIPT_IMPORT_WARNING}:count={unresolved_js_import_count}"
+        )
     return warnings
 
 
@@ -6145,6 +6158,11 @@ def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
 
 def _table_count(connection: sqlite3.Connection, table: str) -> int:
     row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    return int(row[0] if row is not None else 0)
+
+
+def _single_count(connection: sqlite3.Connection, sql: str) -> int:
+    row = connection.execute(sql).fetchone()
     return int(row[0] if row is not None else 0)
 
 

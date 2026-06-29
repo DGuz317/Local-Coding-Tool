@@ -840,7 +840,13 @@ class GraphQueryService:
                 "package_boundaries": self._package_boundaries_for_paths(
                     connection, normalized_paths
                 ),
+                "relationship_candidates": self._relationship_candidates_for_paths(
+                    connection, normalized_paths
+                ),
                 "structural_summaries": self._structural_summaries_for_paths(
+                    connection, normalized_paths
+                ),
+                "workspace_memberships": self._workspace_memberships_for_paths(
                     connection, normalized_paths
                 ),
             }
@@ -2290,6 +2296,96 @@ class GraphQueryService:
                 "path": package_root,
             }
         return boundaries
+
+    def _workspace_memberships_for_paths(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        rows = _rows_to_dicts(
+            connection.execute(
+                """
+                SELECT
+                    root.name AS package_name,
+                    root.ecosystem AS ecosystem,
+                    root.path AS package_root,
+                    root.source_path AS package_source_path,
+                    workspace.path AS workspace_path,
+                    workspace.source_path AS workspace_source_path,
+                    workspace.evidence_kind AS evidence_kind
+                FROM config_package_roots AS root
+                JOIN config_workspaces AS workspace
+                  ON root.ecosystem = workspace.ecosystem
+                 AND root.path = workspace.path
+                ORDER BY root.path, root.name, workspace.source_path
+                """
+            )
+        )
+        memberships: dict[str, dict[str, Any]] = {}
+        for path in sorted(paths):
+            candidates = [row for row in rows if _path_is_under(path, str(row["package_root"]))]
+            if not candidates:
+                continue
+            candidates.sort(
+                key=lambda row: (
+                    -_path_depth(str(row["package_root"])),
+                    str(row["package_root"]),
+                    str(row["package_name"]),
+                )
+            )
+            owner = candidates[0]
+            memberships[path] = {
+                "confidence": "high",
+                "ecosystem": str(owner["ecosystem"]),
+                "evidence": [
+                    {
+                        "package_source_path": str(owner["package_source_path"]),
+                        "source": "config_workspaces",
+                        "workspace_source_path": str(owner["workspace_source_path"]),
+                    }
+                ],
+                "package_name": str(owner["package_name"]),
+                "package_root": str(owner["package_root"]),
+                "resolution_strategy": "explicit_workspace_and_package_identity",
+                "workspace_path": str(owner["workspace_path"]),
+            }
+        return memberships
+
+    def _relationship_candidates_for_paths(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not paths:
+            return {}
+        placeholders = ",".join("?" for _ in paths)
+        rows = _rows_to_dicts(
+            connection.execute(
+                f"""
+                SELECT path, specifier, resolution_status, line
+                FROM javascript_imports
+                WHERE path IN ({placeholders})
+                  AND resolution_status LIKE 'unresolved_%'
+                ORDER BY path, line, specifier
+                """,
+                paths,
+            )
+        )
+        candidates: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            path = str(row["path"])
+            candidates.setdefault(path, []).append(
+                {
+                    "confidence": "low",
+                    "evidence": [
+                        {
+                            "line": row["line"],
+                            "source": "javascript_imports",
+                        }
+                    ],
+                    "kind": "relationship_candidate",
+                    "relationship": "local_resolution",
+                    "resolution_status": str(row["resolution_status"]),
+                    "specifier": str(row["specifier"]),
+                }
+            )
+        return candidates
 
 
 def _empty_impact_data(

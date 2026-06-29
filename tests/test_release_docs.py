@@ -167,3 +167,26 @@ def test_v0_4_release_tracker_locks_scope_and_gates() -> None:
         assert required in tracker
 
     assert "docs/repolens-v0.4-release-tracker.md" in plan
+
+
+def test_package_workspace_evidence_contract_is_documented() -> None:
+    contract = (ROOT / "docs" / "package-workspace-evidence-contract.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "Package Identity",
+        "Workspace Membership",
+        "Package Ownership",
+        "Package Dependency",
+        "Local Resolution",
+        "Relationship Candidate",
+        "Graph Quality Warning",
+        "Resolution Strategy",
+        "Alias Resolution Scope",
+        "unique explicit evidence -> graph edge or ownership fact",
+        "multiple plausible matches -> relationship candidate + graph-quality warning",
+        "no evidence -> unresolved",
+        "must not surface source snippets",
+    ):
+        assert required in contract
