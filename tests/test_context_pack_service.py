@@ -10,6 +10,7 @@ from repolens.context_pack import expand_context, explain_relevance, get_task_co
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION, DEFAULT_CONTEXT_PACK_BUDGET
 from repolens.indexer import index_repository
 from repolens.mcp_server import RepoLensMcpTools
+from repolens.query import GraphQueryService
 
 runner = CliRunner()
 
@@ -266,6 +267,126 @@ def test_context_pack_does_not_infer_package_boundary_from_directory_name(tmp_pa
     first_read = envelope["data"]["first_read_files"][0]
     assert first_read["path"] == "src/auth/login.ts"
     assert "package_boundary" not in first_read
+
+
+def test_context_pack_surfaces_package_workspace_contract_tracer(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            """
+            {
+              "name": "workspace-root",
+              "private": true,
+              "workspaces": ["workspaces/acme-app"]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "workspaces" / "acme-app" / "package.json",
+        dedent(
+            """
+            {
+              "name": "@demo/app",
+              "dependencies": {
+                "@demo/missing": "workspace:*"
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "paths": {
+                  "@missing/*": ["workspaces/acme-app/src/missing/*"]
+                }
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "workspaces" / "acme-app" / "src" / "main.ts",
+        dedent(
+            """
+            import missing from "@missing/thing";
+
+            export function appMain() {
+              return missing;
+            }
+            """
+        ).lstrip(),
+    )
+    index_repository(tmp_path)
+
+    query_metadata = GraphQueryService(tmp_path).context_pack_file_metadata(
+        ["workspaces/acme-app/src/main.ts"]
+    )
+    envelope = get_task_context(tmp_path, "appMain package workspace")
+
+    assert query_metadata["ok"] is True
+    query_data = query_metadata["data"]
+    assert sorted(query_data) == [
+        "package_boundaries",
+        "relationship_candidates",
+        "structural_summaries",
+        "workspace_memberships",
+    ]
+    assert "workspaces/acme-app/src/main.ts" in query_data["workspace_memberships"]
+    assert "workspaces/acme-app/src/main.ts" in query_data["relationship_candidates"]
+    assert envelope["ok"] is True
+    assert any(
+        warning.startswith("graph_quality:javascript_unresolved_import_relationships")
+        for warning in envelope["warnings"]
+    )
+    serialized = json.dumps(envelope)
+    assert str(tmp_path) not in serialized
+    assert "return missing" not in serialized
+
+    first_read = envelope["data"]["first_read_files"][0]
+    assert first_read["path"] == "workspaces/acme-app/src/main.ts"
+    assert first_read["package_boundary"] == {
+        "confidence": "high",
+        "ecosystem": "javascript",
+        "evidence": [
+            {
+                "package_root": "workspaces/acme-app",
+                "source": "config_package_roots",
+                "source_path": "workspaces/acme-app/package.json",
+            }
+        ],
+        "name": "@demo/app",
+        "path": "workspaces/acme-app",
+    }
+    assert first_read["workspace_membership"] == {
+        "confidence": "high",
+        "ecosystem": "javascript",
+        "evidence": [
+            {
+                "package_source_path": "workspaces/acme-app/package.json",
+                "source": "config_workspaces",
+                "workspace_source_path": "package.json",
+            }
+        ],
+        "package_name": "@demo/app",
+        "package_root": "workspaces/acme-app",
+        "resolution_strategy": "explicit_workspace_and_package_identity",
+        "workspace_path": "workspaces/acme-app",
+    }
+    assert first_read["relationship_candidates"] == [
+        {
+            "confidence": "low",
+            "evidence": [{"line": 1, "source": "javascript_imports"}],
+            "kind": "relationship_candidate",
+            "relationship": "local_resolution",
+            "resolution_status": "unresolved_missing_alias",
+            "specifier": "@missing/thing",
+        }
+    ]
 
 
 def test_expand_context_is_pack_scoped_bounded_and_source_free(tmp_path):

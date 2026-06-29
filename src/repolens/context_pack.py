@@ -637,6 +637,14 @@ def _attach_file_metadata(
     package_boundary = _mapping(package_boundaries.get(path))
     if package_boundary:
         item["package_boundary"] = package_boundary
+    workspace_memberships = _mapping(file_metadata.get("workspace_memberships"))
+    workspace_membership = _mapping(workspace_memberships.get(path))
+    if workspace_membership:
+        item["workspace_membership"] = workspace_membership
+    relationship_candidates = _mapping(file_metadata.get("relationship_candidates"))
+    candidates = _sequence(relationship_candidates.get(path))
+    if candidates:
+        item["relationship_candidates"] = candidates
 
 
 def _command_item(
