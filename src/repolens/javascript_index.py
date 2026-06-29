@@ -327,9 +327,13 @@ def _module_name(path: str) -> str:
 
 @dataclass(frozen=True)
 class _TypeScriptAliasRule:
+    config_path: str
+    scope_dir: str
     alias_prefix: str
     target_prefixes: tuple[str, ...]
     status: str
+    match_kind: str
+    resolution_kind: str
 
 
 @dataclass(frozen=True)
@@ -793,9 +797,17 @@ def _resolve_import_specifier(
     if specifier.startswith("."):
         return _resolve_relative_specifier(source_path, specifier, javascript_paths)
 
-    alias_resolution = _resolve_alias_specifier(specifier, alias_rules, javascript_paths)
+    alias_resolution = _resolve_alias_specifier(
+        source_path, specifier, alias_rules, javascript_paths
+    )
     if alias_resolution is not None:
         return alias_resolution
+
+    base_url_resolution = _resolve_base_url_specifier(
+        source_path, specifier, alias_rules, javascript_paths
+    )
+    if base_url_resolution is not None:
+        return base_url_resolution
 
     node_builtin = _node_builtin_name(specifier)
     if node_builtin is not None:
@@ -830,20 +842,29 @@ def _resolve_relative_specifier(
 
 
 def _resolve_alias_specifier(
+    source_path: str,
     specifier: str,
     alias_rules: tuple[_TypeScriptAliasRule, ...],
     javascript_paths: frozenset[str],
 ) -> _ImportResolution | None:
-    matches = tuple(rule for rule in alias_rules if specifier.startswith(rule.alias_prefix))
-    if not matches:
+    alias_rules = tuple(rule for rule in alias_rules if rule.resolution_kind == "path_alias")
+    repository_matches = tuple(rule for rule in alias_rules if _alias_rule_matches(rule, specifier))
+    if not repository_matches:
         return None
+    matches = tuple(
+        rule
+        for rule in repository_matches
+        if _typescript_config_scope_applies(source_path, rule.scope_dir)
+    )
+    if not matches:
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_out_of_scope_alias")
 
-    if any(rule.status == "complex" for rule in matches):
+    if any(rule.status in {"complex", "unsupported"} for rule in matches):
         return _ImportResolution(None, "local_unresolved", None, "unresolved_complex_alias")
 
     candidate_paths: set[str] = set()
     for rule in matches:
-        suffix = specifier.removeprefix(rule.alias_prefix)
+        suffix = specifier.removeprefix(rule.alias_prefix) if rule.match_kind == "prefix" else ""
         for target_prefix in rule.target_prefixes:
             candidate_paths.update(
                 _module_path_candidates(_join_repo_path(target_prefix, suffix), javascript_paths)
@@ -859,6 +880,50 @@ def _resolve_alias_specifier(
     if len(candidate_paths) > 1:
         return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_alias")
     return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_alias")
+
+
+def _resolve_base_url_specifier(
+    source_path: str,
+    specifier: str,
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> _ImportResolution | None:
+    scoped_rules = tuple(
+        rule
+        for rule in alias_rules
+        if rule.resolution_kind == "base_url"
+        and _typescript_config_scope_applies(source_path, rule.scope_dir)
+    )
+    if not scoped_rules:
+        return None
+
+    candidate_paths: set[str] = set()
+    for rule in scoped_rules:
+        for target_prefix in rule.target_prefixes:
+            candidate_paths.update(
+                _module_path_candidates(_join_repo_path(target_prefix, specifier), javascript_paths)
+            )
+
+    if len(candidate_paths) == 1:
+        return _ImportResolution(
+            None,
+            "local_resolved",
+            next(iter(candidate_paths)),
+            "resolved_base_url",
+        )
+    if len(candidate_paths) > 1:
+        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_base_url")
+    return None
+
+
+def _alias_rule_matches(rule: _TypeScriptAliasRule, specifier: str) -> bool:
+    if rule.match_kind == "exact":
+        return specifier == rule.alias_prefix
+    return specifier.startswith(rule.alias_prefix)
+
+
+def _typescript_config_scope_applies(source_path: str, scope_dir: str) -> bool:
+    return scope_dir == "" or source_path == scope_dir or source_path.startswith(f"{scope_dir}/")
 
 
 def _load_typescript_alias_rules(
@@ -892,19 +957,62 @@ def _load_typescript_alias_rules(
         for alias_pattern, target_patterns in sorted(paths.items()):
             if not isinstance(alias_pattern, str):
                 continue
-            alias_prefix = _simple_alias_prefix(alias_pattern)
-            if alias_prefix is None:
+            alias_match = _alias_match(alias_pattern)
+            if alias_match is None:
+                alias_prefix = _unsupported_alias_prefix(alias_pattern)
+                if alias_prefix is None:
+                    continue
+                rules.append(
+                    _TypeScriptAliasRule(
+                        config_path=config_file.path,
+                        scope_dir=config_dir,
+                        alias_prefix=alias_prefix,
+                        target_prefixes=(),
+                        status="unsupported",
+                        match_kind="prefix",
+                        resolution_kind="path_alias",
+                    )
+                )
                 continue
+            alias_prefix, match_kind = alias_match
 
-            target_prefixes = _target_prefixes(config_dir, base_url, target_patterns)
+            target_prefixes = _target_prefixes(config_dir, base_url, target_patterns, match_kind)
             rules.append(
                 _TypeScriptAliasRule(
+                    config_path=config_file.path,
+                    scope_dir=config_dir,
                     alias_prefix=alias_prefix,
                     target_prefixes=target_prefixes,
                     status="deterministic" if len(target_prefixes) == 1 else "complex",
+                    match_kind=match_kind,
+                    resolution_kind="path_alias",
                 )
             )
-    return tuple(sorted(rules, key=lambda rule: (rule.alias_prefix, rule.target_prefixes)))
+        base_url_prefix = _normalize_repo_path(config_dir, base_url)
+        if base_url_prefix is not None:
+            rules.append(
+                _TypeScriptAliasRule(
+                    config_path=config_file.path,
+                    scope_dir=config_dir,
+                    alias_prefix="",
+                    target_prefixes=(base_url_prefix,),
+                    status="deterministic",
+                    match_kind="prefix",
+                    resolution_kind="base_url",
+                )
+            )
+    return tuple(
+        sorted(
+            rules,
+            key=lambda rule: (
+                rule.scope_dir,
+                rule.resolution_kind,
+                rule.alias_prefix,
+                rule.target_prefixes,
+                rule.config_path,
+            ),
+        )
+    )
 
 
 def _read_json_config(root: Path, path: str) -> object | None:
@@ -1001,26 +1109,46 @@ def _strip_json_trailing_commas(source: str) -> str:
     return "".join(characters)
 
 
-def _simple_alias_prefix(pattern: str) -> str | None:
+def _alias_match(pattern: str) -> tuple[str, str] | None:
     normalized = pattern.replace("\\", "/")
+    if "*" not in normalized:
+        return (normalized, "exact") if normalized else None
     if normalized.count("*") != 1 or not normalized.endswith("*"):
         return None
     prefix = normalized[:-1]
+    return (prefix, "prefix") if prefix else None
+
+
+def _unsupported_alias_prefix(pattern: str) -> str | None:
+    normalized = pattern.replace("\\", "/")
+    if not normalized:
+        return None
+    if "*" not in normalized:
+        return normalized
+    prefix = normalized.split("*", maxsplit=1)[0]
     return prefix or None
 
 
-def _target_prefixes(config_dir: str, base_url: str, target_patterns: object) -> tuple[str, ...]:
+def _target_prefixes(
+    config_dir: str, base_url: str, target_patterns: object, match_kind: str
+) -> tuple[str, ...]:
     if not isinstance(target_patterns, list) or len(target_patterns) != 1:
         return ()
     target_pattern = target_patterns[0]
     if not isinstance(target_pattern, str):
         return ()
-    target_prefix = _simple_target_prefix(config_dir, base_url, target_pattern)
+    target_prefix = _simple_target_prefix(config_dir, base_url, target_pattern, match_kind)
     return () if target_prefix is None else (target_prefix,)
 
 
-def _simple_target_prefix(config_dir: str, base_url: str, pattern: str) -> str | None:
+def _simple_target_prefix(
+    config_dir: str, base_url: str, pattern: str, match_kind: str
+) -> str | None:
     normalized = pattern.replace("\\", "/")
+    if match_kind == "exact":
+        if "*" in normalized:
+            return None
+        return _normalize_repo_path(config_dir, base_url, normalized)
     if normalized.count("*") != 1 or not normalized.endswith("*"):
         return None
     return _normalize_repo_path(config_dir, base_url, normalized[:-1])

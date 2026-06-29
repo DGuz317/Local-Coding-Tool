@@ -305,6 +305,103 @@ def test_javascript_index_leaves_complex_aliases_unresolved_without_packages(tmp
     assert javascript_index.packages == ()
 
 
+def test_javascript_index_scopes_typescript_path_aliases_to_config_subtree(tmp_path):
+    _write_text(
+        tmp_path / "packages" / "app" / "tsconfig.json",
+        '{"compilerOptions":{"baseUrl":".","paths":{"@app/*":["src/*"]}}}\n',
+    )
+    _write_text(tmp_path / "packages" / "app" / "src" / "feature.ts", "export const feature = 1;\n")
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        'import { feature } from "@app/feature";\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "other" / "src" / "main.ts",
+        'import { feature } from "@app/feature";\n',
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    imports = {(item.path, item.specifier): item for item in javascript_index.imports}
+    in_scope = imports[("packages/app/src/main.ts", "@app/feature")]
+    out_of_scope = imports[("packages/other/src/main.ts", "@app/feature")]
+    assert in_scope.classification == "local_resolved"
+    assert in_scope.resolved_path == "packages/app/src/feature.ts"
+    assert in_scope.resolution_status == "resolved_alias"
+    assert out_of_scope.classification == "local_unresolved"
+    assert out_of_scope.resolved_path is None
+    assert out_of_scope.resolution_status == "unresolved_out_of_scope_alias"
+
+
+def test_javascript_index_resolves_exact_path_aliases_and_base_url_imports(tmp_path):
+    _write_text(
+        tmp_path / "app" / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "baseUrl": "src",
+                "paths": {
+                  "@settings": ["config/settings.ts"]
+                }
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "app" / "src" / "config" / "settings.ts", "export const settings = {};\n"
+    )
+    _write_text(tmp_path / "app" / "src" / "shared" / "format.ts", "export const format = '';\n")
+    _write_text(
+        tmp_path / "app" / "src" / "main.ts",
+        dedent(
+            """
+            import { settings } from "@settings";
+            import { format } from "shared/format";
+            import React from "react";
+            """
+        ).lstrip(),
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    imports = {item.specifier: item for item in javascript_index.imports}
+    assert imports["@settings"].resolved_path == "app/src/config/settings.ts"
+    assert imports["@settings"].resolution_status == "resolved_alias"
+    assert imports["shared/format"].resolved_path == "app/src/shared/format.ts"
+    assert imports["shared/format"].resolution_status == "resolved_base_url"
+    assert imports["react"].classification == "third_party"
+    assert imports["react"].resolution_status == "external"
+
+
+def test_javascript_index_marks_ambiguous_scoped_alias_matches_unresolved(tmp_path):
+    _write_text(
+        tmp_path / "tsconfig.json",
+        '{"compilerOptions":{"paths":{"@/*":["src/*"]}}}\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "tsconfig.json",
+        '{"compilerOptions":{"paths":{"@/*":["src/*"]}}}\n',
+    )
+    _write_text(tmp_path / "src" / "shared" / "format.ts", "export const format = 1;\n")
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "shared" / "format.ts",
+        "export const format = 2;\n",
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        'import { format } from "@/shared/format";\n',
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    import_fact = javascript_index.imports[0]
+    assert import_fact.classification == "local_unresolved"
+    assert import_fact.resolved_path is None
+    assert import_fact.resolution_status == "unresolved_ambiguous_alias"
+
+
 def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_path):
     _write_text(
         tmp_path / "src" / "module.ts",
