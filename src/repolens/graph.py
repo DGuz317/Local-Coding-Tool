@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -33,6 +34,7 @@ from repolens.documentation_index import (
 )
 from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
+    JAVASCRIPT_RESOLUTION_SUFFIXES,
     JAVASCRIPT_SOURCE_SUFFIXES,
     JavaScriptIndex,
     javascript_module_node_id,
@@ -284,6 +286,19 @@ class _EdgeFact:
     confidence: str
     resolution_strategy: str
     evidence: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _WorkspacePackageResolution:
+    package_name: str
+    dependency_source_path: str
+    entrypoint_kind: str
+    entrypoint_source_path: str
+    entrypoint_target: str
+    package_root: str
+    resolved_path: str
+    workspace_path: str
+    workspace_source_path: str
 
 
 def rebuild_graph_artifacts(
@@ -3092,7 +3107,64 @@ def _insert_edges(
     javascript_import_specifiers: dict[tuple[str, str, str, str], set[str]] = {}
     javascript_import_statuses: dict[tuple[str, str, str, str], set[str]] = {}
     javascript_import_facts: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    workspace_package_resolutions = _workspace_package_import_resolutions(
+        javascript_index,
+        config_index,
+    )
+    connection.executemany(
+        """
+        UPDATE javascript_imports
+        SET classification = 'local_resolved',
+            resolved_path = ?,
+            resolution_status = 'resolved_workspace_package'
+        WHERE id = ?
+        """,
+        (
+            (resolution.resolved_path, import_id)
+            for import_id, resolution in sorted(workspace_package_resolutions.items())
+        ),
+    )
     for javascript_import in javascript_index.imports:
+        workspace_resolution = workspace_package_resolutions.get(javascript_import.id)
+        if workspace_resolution is not None:
+            target_id = javascript_module_node_id(workspace_resolution.resolved_path)
+            javascript_import_key = (
+                javascript_import.module_node_id,
+                target_id,
+                workspace_resolution.resolved_path,
+                "local_resolved",
+            )
+            javascript_import_edges.setdefault(javascript_import_key, []).append(
+                javascript_import.line
+            )
+            javascript_import_edge_ids.setdefault(javascript_import_key, []).append(
+                javascript_import.id
+            )
+            javascript_import_specifiers.setdefault(javascript_import_key, set()).add(
+                javascript_import.specifier
+            )
+            javascript_import_statuses.setdefault(javascript_import_key, set()).add(
+                "resolved_workspace_package"
+            )
+            javascript_import_facts.setdefault(javascript_import_key, []).append(
+                {
+                    "dependency_source_path": workspace_resolution.dependency_source_path,
+                    "entrypoint_kind": workspace_resolution.entrypoint_kind,
+                    "entrypoint_source_path": workspace_resolution.entrypoint_source_path,
+                    "entrypoint_target": workspace_resolution.entrypoint_target,
+                    "id": javascript_import.id,
+                    "kind": javascript_import.kind,
+                    "line": javascript_import.line,
+                    "package_name": workspace_resolution.package_name,
+                    "package_root": workspace_resolution.package_root,
+                    "resolved_path": workspace_resolution.resolved_path,
+                    "resolution_status": "resolved_workspace_package",
+                    "specifier": javascript_import.specifier,
+                    "workspace_path": workspace_resolution.workspace_path,
+                    "workspace_source_path": workspace_resolution.workspace_source_path,
+                }
+            )
+            continue
         if javascript_import.resolved_path is not None:
             target_id = javascript_module_node_id(javascript_import.resolved_path)
             javascript_import_key = (
@@ -3172,6 +3244,23 @@ def _insert_edges(
             metadata["resolved_path"] = target_name
         else:
             metadata["root_name"] = target_name
+        if (
+            "resolved_workspace_package"
+            in javascript_import_statuses[(source_id, target_id, target_name, classification)]
+        ):
+            package_names = sorted(
+                {
+                    str(fact["package_name"])
+                    for fact in javascript_import_facts[
+                        (source_id, target_id, target_name, classification)
+                    ]
+                    if "package_name" in fact
+                }
+            )
+            if len(package_names) == 1:
+                metadata["package_name"] = package_names[0]
+            elif package_names:
+                metadata["package_names"] = package_names
         add_edge(
             source_id,
             target_id,
@@ -3537,6 +3626,8 @@ def _python_relative_base_parts(
 
 
 def _javascript_import_confidence(classification: str, statuses: set[str]) -> str:
+    if classification == "local_resolved" and "resolved_workspace_package" in statuses:
+        return "high"
     if classification == "local_resolved" and "resolved_alias" in statuses:
         return "medium"
     return "high"
@@ -3549,13 +3640,16 @@ def _javascript_import_resolution_strategy(classification: str, statuses: set[st
             strategies.append("path_alias_import")
         if "resolved_relative" in statuses:
             strategies.append("local_import")
+        if "resolved_workspace_package" in statuses:
+            strategies.append("workspace_package_import")
         return "+".join(sorted(strategies)) if strategies else "local_import"
     return _import_resolution_strategy(classification)
 
 
 def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
+    evidence = []
+    for fact in sorted(facts, key=lambda item: (item["line"], item["id"])):
+        item = {
             "import_id": fact["id"],
             "kind": "javascript_import",
             "line": fact["line"],
@@ -3564,8 +3658,164 @@ def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, A
             "specifier": fact["specifier"],
             "statement_kind": fact["kind"],
         }
-        for fact in sorted(facts, key=lambda item: (item["line"], item["id"]))
-    ][:MAX_EDGE_EVIDENCE_ITEMS]
+        for key in (
+            "dependency_source_path",
+            "entrypoint_kind",
+            "entrypoint_source_path",
+            "entrypoint_target",
+            "package_name",
+            "package_root",
+            "workspace_path",
+            "workspace_source_path",
+        ):
+            if key in fact:
+                item[key] = fact[key]
+        evidence.append(item)
+    return evidence[:MAX_EDGE_EVIDENCE_ITEMS]
+
+
+def _workspace_package_import_resolutions(
+    javascript_index: JavaScriptIndex,
+    config_index: ConfigIndex,
+) -> dict[str, _WorkspacePackageResolution]:
+    javascript_paths = frozenset(module.path for module in javascript_index.modules)
+    package_roots = tuple(
+        root for root in config_index.package_roots if root.ecosystem == "javascript"
+    )
+    roots_by_name: dict[str, list[Any]] = {}
+    for package_root in package_roots:
+        roots_by_name.setdefault(package_root.name, []).append(package_root)
+
+    workspaces = tuple(
+        workspace for workspace in config_index.workspaces if workspace.ecosystem == "javascript"
+    )
+    dependencies_by_source: dict[str, set[str]] = {}
+    for package in config_index.packages:
+        if package.ecosystem != "javascript" or package.classification != "external":
+            continue
+        dependencies_by_source.setdefault(package.source_path, set()).add(package.name)
+
+    entrypoints_by_source: dict[str, list[Any]] = {}
+    for entrypoint in config_index.entrypoints:
+        if entrypoint.kind in {"package_export", "package_main"}:
+            entrypoints_by_source.setdefault(entrypoint.path, []).append(entrypoint)
+
+    resolutions: dict[str, _WorkspacePackageResolution] = {}
+    for import_fact in javascript_index.imports:
+        if import_fact.resolved_path is not None or import_fact.root_name is None:
+            continue
+        importer_root = _nearest_javascript_package_root(import_fact.path, package_roots)
+        if importer_root is None:
+            continue
+        if import_fact.root_name not in dependencies_by_source.get(
+            importer_root.source_path, set()
+        ):
+            continue
+        importer_workspace = _workspace_membership_for_package_root(importer_root.path, workspaces)
+        if importer_workspace is None:
+            continue
+
+        target_roots = roots_by_name.get(import_fact.root_name, [])
+        if len(target_roots) != 1:
+            continue
+        target_root = target_roots[0]
+        target_workspace = _workspace_membership_for_package_root(target_root.path, workspaces)
+        if target_workspace is None:
+            continue
+
+        entrypoints = []
+        for entrypoint in entrypoints_by_source.get(target_root.source_path, []):
+            resolved_path = _resolve_javascript_package_entrypoint_path(
+                target_root.path,
+                entrypoint.target,
+                javascript_paths,
+            )
+            if resolved_path is not None:
+                entrypoints.append((entrypoint, resolved_path))
+        resolved_paths = {resolved_path for _, resolved_path in entrypoints}
+        if len(resolved_paths) != 1:
+            continue
+        resolved_path = next(iter(resolved_paths))
+        matching_entrypoints = [
+            entrypoint for entrypoint, path in entrypoints if path == resolved_path
+        ]
+        chosen_entrypoint = sorted(
+            matching_entrypoints,
+            key=lambda entrypoint: (entrypoint.kind, entrypoint.name, entrypoint.target),
+        )[0]
+        resolutions[import_fact.id] = _WorkspacePackageResolution(
+            package_name=target_root.name,
+            dependency_source_path=importer_root.source_path,
+            entrypoint_kind=chosen_entrypoint.kind,
+            entrypoint_source_path=chosen_entrypoint.path,
+            entrypoint_target=chosen_entrypoint.target,
+            package_root=target_root.path,
+            resolved_path=resolved_path,
+            workspace_path=target_workspace.path,
+            workspace_source_path=target_workspace.source_path,
+        )
+    return resolutions
+
+
+def _nearest_javascript_package_root(path: str, package_roots: tuple[Any, ...]) -> Any | None:
+    candidates = [root for root in package_roots if _path_is_under(path, root.path)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda root: len(() if root.path == "." else root.path.split("/")))
+
+
+def _workspace_membership_for_package_root(path: str, workspaces: tuple[Any, ...]) -> Any | None:
+    matches = [
+        workspace for workspace in workspaces if _workspace_scope_matches(path, workspace.path)
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _workspace_scope_matches(path: str, workspace_path: str) -> bool:
+    if any(character in workspace_path for character in "*?["):
+        return fnmatch.fnmatchcase(path, workspace_path)
+    return path == workspace_path or _path_is_under(path, workspace_path)
+
+
+def _resolve_javascript_package_entrypoint_path(
+    package_root: str,
+    target: str,
+    javascript_paths: frozenset[str],
+) -> str | None:
+    stripped = target.strip()
+    if not stripped or stripped.startswith(("/", "http://", "https://")):
+        return None
+    if any(character in stripped for character in "*?["):
+        return None
+    candidate = _join_posix(package_root, stripped)
+    candidates = [candidate]
+    if PurePosixPath(candidate).suffix == "":
+        candidates.extend(f"{candidate}{suffix}" for suffix in JAVASCRIPT_RESOLUTION_SUFFIXES)
+        candidates.extend(
+            _join_posix(candidate, f"index{suffix}") for suffix in JAVASCRIPT_RESOLUTION_SUFFIXES
+        )
+    matches = [path for path in candidates if path in javascript_paths]
+    unique_matches = sorted(set(matches))
+    return unique_matches[0] if len(unique_matches) == 1 else None
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    return root == "." or path == root or path.startswith(f"{root}/")
+
+
+def _join_posix(*parts: str) -> str:
+    cleaned = []
+    for part in parts:
+        if not part or part == ".":
+            continue
+        normalized = part.strip().strip("/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized:
+            cleaned.append(normalized)
+    return "/".join(cleaned) if cleaned else "."
 
 
 def _dedupe_json_like(values: list[Any]) -> list[Any]:
