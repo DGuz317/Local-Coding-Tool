@@ -1,88 +1,287 @@
-# AGENTS.md
+# [AGENTS.md](http://AGENTS.md)
 
-## Skills
+## Project Overview
 
-- Shared Agent Skills live in `.agents/skills`; do not copy their full content here.
-- OpenCode: load the relevant skill before implementation.
-- Codex or other agents: read `.agents/skills/<skill>/SKILL.md` and referenced files.
-- Use:
-  - `grill-with-docs` when requirements are unclear (upgrade version of `grill-me`).
-  - `to-prd` to turn agreed requirements into a PRD.
-  - `to-issues` to break plans into vertical slices.
-  - `tdd` for red-green-refactor implementation.
-  - `diagnose` for bugs, failing tests, and regressions.
-  - `zoom-out` for unfamiliar code.
-  - `improve-codebase-architecture` for deeper refactors.
-  - `triage` for issue workflows.
+RepoLens MCP is a local-first repository intelligence backend for AI coding assistants.
 
-## Project Context
+The tool indexes a repository, builds deterministic graph artifacts under `.repolens`, and exposes read-only MCP tools so assistants can understand repo structure, related files, likely impact, candidate verification commands, and bounded Context Packs before opening source files.
 
-- This repository is implementing **RepoLens MCP v0.3**.
-- v0.3 theme: **Make RepoLens the assistant's context budget manager.**
-- The active release integration branch is `feature/repolens-v0.3`.
-- The GitHub umbrella tracker is `#79`.
-- Work is organized as issue slices `#80` through `#90`.
-- Each implementation branch should target exactly one issue or explicitly approved sub-issue.
-- Keep v0.3 focused on task-scoped Context Packs and assistant context economy.
-- Do not add AI/LLM-required graph generation, embeddings, telemetry, hosted services, browser UI, HTTP API, write-capable MCP tools, automatic code editing, or runtime network calls during indexing.
-
-## v0.3 Product Boundary
-
-Context Packs are the primary v0.3 product surface.
-
-A Context Pack is:
+RepoLens must remain:
 
 - deterministic;
-- stateless;
-- task-scoped;
-- bounded by explicit item and character budgets;
-- graph-derived;
-- file-centric;
-- evidence-backed;
-- orientation-only;
-- safe for assistant-facing MCP and CLI output.
+- local-first;
+- metadata-oriented;
+- safe by default;
+- read-only through MCP;
+- useful for reducing assistant token usage and file exploration.
 
-A Context Pack is not:
+## Current Release Focus: v0.4
 
-- a source preview bundle;
-- a full context dump;
-- an AI-generated semantic summary;
-- an embedding/vector search result;
-- a runtime reachability claim;
-- a persisted assistant session;
-- a write/edit plan;
-- proof that lower-priority context is irrelevant.
+v0.4 theme:
 
-## Repo Shape
-
-- Python package source lives under `src/repolens`.
-- Tests live under `tests`.
-- Docs live under `docs`.
-- ADRs live under `docs/adr`.
-- The CLI command is `repolens`.
-- Project metadata is in `pyproject.toml`.
-- Dependency/environment management uses `uv`.
-- `uv.lock` should be committed.
-- `.venv/` must not be committed.
-- RepoLens generated artifacts live under `.repolens/` and must not be committed.
-- `.repolens/` is local cache/output, not source.
-
-## Runtime And Tooling
-
-- Python baseline is `>=3.11`.
-- Use `uv` for project commands.
-- Do not assume bare `python`, `pytest`, `ruff`, or `mypy` points at the correct environment.
-- Prefer `uv run ...` commands.
-
-## Common Commands
-
-Set up or refresh the environment:
-
-```bash
-uv sync
+```text
+Make RepoLens trustworthy across package/workspace repositories.
 ```
 
-Run the full verification gate:
+The main implementation goal is to improve graph facts that Context Packs depend on, especially for JavaScript and TypeScript package/workspace repositories.
+
+v0.4 work should improve:
+
+- explicit package and workspace evidence;
+- JavaScript and TypeScript workspace import resolution;
+- TypeScript `tsconfig.json` path and `baseUrl` alias resolution;
+- package ownership facts in graph output and Context Packs;
+- ambiguity handling through candidates and warnings;
+- docs/config task orientation without excerpts;
+- Candidate Verification Command classification;
+- expanded evaluation fixtures and expectation gates.
+
+
+
+## Non-Negotiable Product Boundaries
+
+Do not add any of the following unless a maintainer explicitly changes the product boundary:
+
+- hosted service;
+- telemetry;
+- browser UI or graph visualization;
+- embeddings or vector search;
+- LLM-generated graph facts;
+- runtime package-manager, bundler, compiler, or framework execution during indexing;
+- runtime package registry lookups;
+- write-capable MCP tools;
+- persisted assistant sessions or server-side assistant memory;
+- whole-source disclosure;
+- source snippets;
+- code bodies;
+- function signatures in assistant-facing Context Pack output;
+- paragraph excerpts;
+- raw comments;
+- raw Agent Guidance instruction text.
+
+RepoLens may emit compact metadata, paths, node names, evidence labels, line ranges, warnings, and bounded orientation facts.
+
+## v0.4 Evidence Rules
+
+Prefer being incomplete over being wrong.
+
+Package/workspace ownership must only appear when backed by explicit graph evidence.
+
+Acceptable evidence sources include:
+
+- `package.json` package identity;
+- workspace declarations;
+- package manager workspace config;
+- explicit local package entrypoint metadata;
+- supported lockfile evidence only when it clearly maps to local workspace packages;
+- scoped `tsconfig.json` `paths` and `baseUrl` evidence.
+
+Do not infer package ownership from directory names alone.
+
+Examples of unsafe inference:
+
+```text
+packages/foo -> package foo
+apps/web -> package web
+src/lib -> package lib
+```
+
+These may become candidates, but not definitive ownership facts, unless explicit package/config evidence supports them.
+
+## Resolution Rules
+
+When implementing or modifying resolvers:
+
+- resolve only from deterministic local evidence;
+- keep unresolved imports unresolved when evidence is insufficient;
+- preserve ambiguous relationships as bounded candidates;
+- emit graph-quality warnings for unsupported, ambiguous, or unresolved resolver cases;
+- do not create false definitive graph edges;
+- do not silently pick one candidate from multiple plausible matches.
+
+Use this default behavior:
+
+```text
+unique explicit evidence -> graph edge
+multiple plausible matches -> candidates + warning
+unsupported pattern -> warning
+no evidence -> unresolved
+```
+
+
+
+## Context Pack Rules
+
+Context Packs are assistant-facing orientation artifacts, not source mirrors.
+
+Context Packs may include:
+
+- relevant files;
+- package/workspace ownership facts;
+- mentioned paths;
+- related configs;
+- package references;
+- command metadata;
+- graph-quality warnings;
+- reasons and evidence labels;
+- bounded reading order.
+
+Context Packs must not include:
+
+- source code snippets;
+- code bodies;
+- raw Markdown paragraphs;
+- raw config values when unnecessary;
+- raw comments;
+- raw Agent Guidance text;
+- large Markdown dumps.
+
+For docs/config tasks, prefer structured metadata such as:
+
+```text
+mentioned path -> resolved file
+config file -> related package/tool/command
+package reference -> evidence-backed package node or candidate
+command -> found/not run + risk bucket
+warning -> unresolved/ambiguous/unsupported case
+```
+
+
+
+## Candidate Verification Command Rules
+
+RepoLens finds commands. It does not run them.
+
+All Candidate Verification Commands must remain clearly marked as:
+
+```text
+found: true
+run: false
+```
+
+Classify command risk separately from command purpose.
+
+Recommended risk buckets:
+
+```text
+verification_likely
+quality_check_likely
+build_likely
+risky_or_external
+unknown
+```
+
+Examples:
+
+```text
+pytest                 -> verification_likely
+uv run pytest          -> verification_likely
+npm test               -> verification_likely
+make test              -> verification_likely
+make verify            -> verification_likely
+ruff check .           -> quality_check_likely
+mypy src/repolens      -> quality_check_likely
+npm run build          -> build_likely
+uv build               -> build_likely
+npm publish            -> risky_or_external
+docker push            -> risky_or_external
+terraform apply        -> risky_or_external
+unknown custom command -> unknown
+```
+
+Do not recommend automatic execution of deploy, publish, release, destructive, infrastructure-mutating, or external side-effect commands.
+
+## Issue Workflow
+
+Work one GitHub issue slice at a time.
+
+Do not start a blocked issue.
+
+Expected v0.4 issue flow:
+
+```text
+1 -> 2
+2 -> 3
+2 -> 4
+2 -> 7
+3,4 -> 5
+5,7 -> 6
+3,4,5,6,7 -> 8
+8 -> 9
+```
+
+Issue 1 and Issue 9 are HITL slices.
+
+Issue 2 defines the core package evidence contract. Treat it as the foundation for all downstream v0.4 work. Downstream implementation should not proceed until the Issue 2 contract is merged and accepted.
+
+Use `ready-for-agent` only when an issue is unblocked and has complete acceptance criteria.
+
+## Implementation Style
+
+Keep changes small and vertical.
+
+Prefer:
+
+- explicit contracts;
+- typed data structures;
+- deterministic ordering;
+- narrow fixtures;
+- expectation-based tests;
+- simple explainable algorithms;
+- warning/candidate output over guessing.
+
+Avoid:
+
+- broad refactors;
+- hidden behavior changes;
+- new runtime dependencies without justification;
+- large parser rewrites;
+- speculative framework support;
+- source-content mirroring;
+- changing public artifact shape without tests.
+
+CLI handlers should stay thin. Put reusable behavior in framework-independent services.
+
+MCP tools must remain read-only.
+
+Generated artifacts must be deterministic and portable across machines.
+
+Use repo-relative POSIX paths in artifacts and MCP responses.
+
+Do not expose absolute paths unless they are internal-only.
+
+## Testing Expectations
+
+Add or update tests for every behavior change.
+
+v0.4 tests should cover:
+
+- explicit package identity;
+- workspace membership;
+- package ownership;
+- workspace package imports;
+- package entrypoint evidence;
+- TypeScript path aliases;
+- `baseUrl` alias resolution;
+- unresolved alias warnings;
+- ambiguous package ownership;
+- relationship candidates;
+- graph-quality warnings;
+- docs/config orientation;
+- command risk buckets;
+- Context Pack no-disclosure behavior;
+- evaluation expectation gates;
+- v0.3 and v0.3.1 regression protection.
+
+Prefer fixture repositories that are minimal and purpose-built.
+
+Tests should assert observable behavior, not incidental implementation details.
+
+## Verification Commands
+
+Run focused tests while developing.
+
+Before considering a v0.4 implementation slice complete, run the relevant subset of:
 
 ```bash
 uv run pytest
@@ -91,277 +290,88 @@ uv run ruff format --check .
 uv run mypy src/repolens
 ```
 
-Run the existing CLI:
+Before release readiness, the full recommended gate is:
 
 ```bash
-uv run repolens --help
-uv run repolens status .
-uv run repolens index <fixture-or-repo-path>
-uv run repolens report <fixture-or-repo-path>
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src/repolens
+uv run repolens evaluate-context --json
+uv build --out-dir /tmp/repolens-dist --clear
 ```
 
-Run v0.3 CLI surfaces after their slices land:
+If a command cannot be run in the current environment, report it clearly with the reason.
 
-```bash
-uv run repolens context <fixture-or-repo-path> "Fix the auth timeout bug" --json
-uv run repolens evaluate-context <fixture-or-repo-path> --json
-```
+## Documentation Expectations
 
-Check that read-like status does not mutate the repo:
+Update docs when behavior changes.
 
-```bash
-test ! -d .repolens && echo "OK: status did not mutate repo"
-```
+For v0.4, docs should clearly explain:
 
-## v0.3 Issue Order
+- package/workspace evidence rules;
+- supported JS/TS workspace resolution cases;
+- supported TypeScript alias cases;
+- ambiguity and graph-quality warnings;
+- command risk buckets;
+- Context Pack disclosure boundaries;
+- known limitations.
 
-Follow the release tracker unless a maintainer explicitly changes the dependency order.
+Known limitations are acceptable. Silent overclaiming is not.
 
-Release-blocking P0 path:
+## Security And Privacy Rules
 
-1. `#80` Context Pack contracts and fixture specification.
-2. `#81` Context Pack tracer bullet.
-3. `#82` Context Pack safety and ambiguity hardening.
-4. `#83` Evidence-gated support groups.
-5. `#84` Derived Structural Summaries and package ownership.
-6. `#85` Pack-scoped expansion and relevance.
-7. `#86` Context Pack Evaluation execution.
-8. `#87` v0.3 docs and release readiness.
+RepoLens must not read or emit secret-like files.
 
-Non-blocking P1 follow-ups:
+Do not add unsafe include-secret behavior.
 
-- `#88` Navigation gap improvements from evaluation.
-- `#89` Persisted summary caching if needed.
-- `#90` Additional evaluation corpora.
+Sanitize command strings and metadata that may contain credentials.
 
-Do not start P1 work until the release-blocking Context Pack path has enough implementation and evaluation evidence to justify it.
+Do not expose raw `.env`, key, token, credential, or secret-like content.
 
-## Workflow
+Do not introduce network calls during normal indexing or Context Pack generation.
 
-Start each issue from the updated release branch:
+Do not introduce telemetry.
 
-```bash
-git checkout feature/repolens-v0.3
-git pull --ff-only origin feature/repolens-v0.3
-git checkout -b slice/<issue-number>-<short-name>
-```
+## Git And PR Rules
 
-Implementation workflow:
+Keep commits scoped to the issue.
 
-- Use one fresh OpenCode session per issue slice.
-- Give the assistant the GitHub issue plus this file.
-- Read `CONTEXT.md` before naming or redefining product concepts.
-- Read relevant ADRs before architecture-level changes.
-- Keep the assistant inside the current issue scope.
-- Do not let an implementation slice pull in future issue behavior.
-- Use TDD where practical: one behavior, one test, one implementation step.
-- Run the full verification gate before committing.
-- Open PRs into `feature/repolens-v0.3`, not `main`.
-- After merge:
-  - close the completed issue only when all acceptance criteria are satisfied;
-  - update `docs/repolens-v0.3-release-tracker.md` when issue references or release evidence change;
-  - delete merged local/remote slice branches;
-  - start the next slice from fresh `feature/repolens-v0.3`.
-
-## Commit And PR Conventions
-
-Use concise area-prefixed commit messages:
-
-```bash
-context-pack: add schema contract (#80)
-context-pack: add deterministic pack id (#81)
-security: add no-source-disclosure guard (#82)
-context-pack: add evidence-gated test support (#83)
-summary: derive file structural summaries (#84)
-mcp: add expand context tool (#85)
-evaluation: add context fixture runner (#86)
-docs: add v0.3 context workflow guide (#87)
-```
-
-PR descriptions should include:
-
-- Summary.
-- What changed.
-- Why it changed.
-- How it affects the existing flow.
-- Verification commands.
-- Scope notes.
-- `Closes #<issue>` only when the whole issue is complete.
-- Use `Refs #<issue>` or `Part of #<issue>` for sub-issues.
-
-## Generated Files And Ignore Rules
-
-Do not commit:
+Use concise area-prefixed commit messages, for example:
 
 ```text
-.venv/
-.repolens/
-__pycache__/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-dist/
-build/
+resolver: add workspace package candidate warnings
+context: omit raw config values from docs packs
+eval: add ambiguous package ownership fixture
+commands: classify risky verification candidates
 ```
 
-Commit when relevant:
+Do not mix unrelated cleanup with feature work.
+
+A final agent response or PR summary should include:
+
+- what changed;
+- why it changed;
+- how it affects RepoLens flow;
+- tests run;
+- tests not run, with reasons;
+- known risks or follow-ups.
+
+
+
+## Default Decision Rule
+
+When evidence is incomplete, preserve uncertainty.
+
+Use:
 
 ```text
-uv.lock
-pyproject.toml
-src/repolens/...
-tests/...
-docs/...
-docs/adr/...
-README.md
-AGENTS.md
+candidate
+warning
+unresolved
+unsupported
 ```
 
-## RepoLens Safety Rules
+instead of inventing a definitive graph fact.
 
-- Scanner/indexing behavior must stay inside the provided analysis root.
-- Paths in graph artifacts should be repo-relative POSIX paths.
-- Never scan `.repolens`.
-- Skip secret-looking files by path/name before parsing.
-- Do not store secret contents.
-- Do not mirror full source code into AI-facing artifacts.
-- Candidate commands may be detected and recorded, but must not be executed.
-- Deploy/publish-like commands must not be recommended for automatic execution.
-- Runtime package registry lookups are out of scope.
-
-## v0.3 Context Pack Safety Rules
-
-Context Pack MCP and CLI output must pass through the central No Whole-Source Disclosure guard.
-
-Never expose through Context Packs, expansion, relevance explanation, evaluation output, logs, handles, or task fingerprints:
-
-- full source files;
-- source snippets;
-- code bodies;
-- function or method signatures;
-- paragraph excerpts;
-- raw comment text;
-- raw Agent Guidance instruction text;
-- raw secret-like task text or focus hints;
-- absolute host paths;
-- serialized source-derived payloads.
-
-Allowed orientation metadata includes:
-
-- repo-relative file paths;
-- structural symbol names, kinds, qualified names, exported/public classification where known, and line ranges;
-- package/workspace ownership when explicit evidence exists;
-- relationship kinds;
-- confidence categories;
-- bounded evidence metadata;
-- freshness/hash metadata;
-- capped command metadata marked not run;
-- tiny Agent Guidance metadata such as path, kind, freshness, and reason.
-
-Risk Signals should include metadata only: location, category, reason, confidence, evidence, and freshness. They must not include raw comment text.
-
-Human output should use softer wording such as `lower-priority context to inspect later`. Do not tell assistants that a file is irrelevant, safe to ignore, or guaranteed unaffected.
-
-## Context Pack Contract Guidance
-
-When implementing or modifying Context Pack behavior, preserve these properties:
-
-- `context_pack_id` is deterministic and must not leak raw task text, secret-like text, absolute paths, source snippets, or session state.
-- Item handles are deterministic and pack-scoped.
-- Expansion handles must only refer to items returned in the pack.
-- Pack IDs and handles should derive from canonical graph state, Context Pack version, normalized/redacted task fingerprint, focus hints, and budget parameters.
-- Stale or mismatched pack IDs should return structured `ok: false` errors requiring a fresh pack.
-- Ranking must use deterministic inputs and stable tie-breakers.
-- Broad tasks must return bounded packs with breadth warnings, not repository dumps.
-- No-match tasks should return successful low-confidence packs with no broad dump.
-- Ambiguous targets should return candidates instead of silently choosing one.
-- Invalid focus paths outside the analysis root are errors.
-- In-root unresolved focus hints are warnings that lower confidence.
-
-Default Context Pack output should prioritize:
-
-1. freshness, warnings, and structured recoverable errors;
-2. First-Read Files;
-3. ambiguity candidates;
-4. likely tests;
-5. risk signals;
-6. configs and candidate verification commands;
-7. docs;
-8. tiny Agent Guidance metadata;
-9. lower-priority context.
-
-Support groups must be evidence-gated and capped. They must not crowd out First-Read Files unless the task is explicitly about that support group, such as a test-focused task.
-
-## Structural Summary Guidance
-
-Structural Summaries should:
-
-- be derived from graph facts at query time unless an issue explicitly adds justified caching;
-- avoid generated prose that sounds more certain than the graph evidence;
-- avoid source excerpts;
-- include freshness/hash metadata where applicable;
-- summarize structure for repository, package/workspace, directory, file, symbol, or test-group scopes only when useful for a Context Pack.
-
-Package Boundary ownership must come from explicit package/config evidence. Do not infer package ownership from conventional directory names alone.
-
-## MCP And CLI Guidance
-
-- MCP behavior remains read-only.
-- MCP tools must use the standard response envelope with data, freshness, warnings, limits, and truncation metadata.
-- CLI handlers should stay thin and delegate to framework-independent services.
-- `get_task_context` and `repolens context` must use the same Context Pack service.
-- `expand_context` and `explain_relevance` must be stateless and validate Context Pack IDs against current graph freshness/hash.
-- `expand_context` should default to depth 1 and must enforce a hard maximum depth of 2.
-- Expansion and relevance responses must include reasons, confidence, evidence, freshness metadata, limits, and truncation state.
-- Candidate Verification Commands are not recommendations to execute; mark them as not run.
-
-## Evaluation Guidance
-
-`repolens evaluate-context` should prove whether Context Packs improve assistant orientation.
-
-Release-blocking evaluation should cover:
-
-- direct symbol tasks;
-- config-driven tasks;
-- ambiguous tasks;
-- broad tasks;
-- no useful match tasks;
-- stale graph warnings;
-- invalid outside-root focus paths;
-- unresolved in-root focus hints;
-- secret-like task redaction;
-- stale pack ID errors;
-- no-snippet enforcement.
-
-Evaluation metrics should include:
-
-- first-read hit rate;
-- irrelevant file count;
-- test inclusion;
-- pack size;
-- expansion count;
-- safety negative outcomes.
-
-Evaluation should compare Context Packs against existing `suggest_reading_order` and a simple lexical baseline.
-
-Use expectation-based release gates rather than universal numeric thresholds.
-
-## Architecture Notes
-
-- Keep CLI handlers thin.
-- Put behavior in application/service modules.
-- Reuse scanner, graph store, query service, and exporter pipelines instead of duplicating traversal logic.
-- Extractors should read only scanner-approved files.
-- Parsers must not execute or import analyzed project code.
-- Store deterministic facts in SQLite and deterministic exports.
-- Line numbers may be metadata, not primary identity.
-- IDs should be stable across normal line shifts where practical.
-- Context Pack code should be deterministic under repeated runs against the same graph, task, focus hints, and budget parameters.
-
-## Architecture-Level Context
-
-- If `CONTEXT.md` exists, read it before naming new concepts.
-- If `docs/adr/` exists, read relevant ADRs before architecture-level changes.
-- `docs/adr/0003-v0-3-context-pack-boundary.md` defines the v0.3 Context Pack boundary.
-- Do not re-litigate accepted decisions unless new implementation friction justifies it.
-
+RepoLens should help assistants open fewer files while trusting the graph more.
