@@ -36,6 +36,18 @@ When those checks pass, RepoLens records the import as `local_resolved` with `re
 
 RepoLens does not resolve missing entrypoints, complex entrypoint maps, ambiguous package identities, ambiguous entrypoint targets, undeclared dependencies, or package names that only resemble directory names.
 
+## Supported TypeScript Alias Resolution
+
+RepoLens resolves JavaScript and TypeScript imports through `tsconfig.json` or `jsconfig.json` evidence only within the config file's directory subtree.
+
+Supported local alias evidence includes:
+
+- exact `paths` entries with one target;
+- trailing-wildcard `paths` entries with one target;
+- `baseUrl` imports when they uniquely match a scanner-approved in-repository JS/TS module path.
+
+Unsupported alias patterns, aliases used outside the config subtree, missing alias targets, and ambiguous alias/baseUrl matches remain unresolved and are surfaced through resolution statuses, relationship candidates, or graph-quality warnings. RepoLens does not run the TypeScript compiler and does not use alias evidence as a repository-wide table.
+
 ## Default Rule
 
 ```text
