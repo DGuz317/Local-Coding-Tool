@@ -2282,7 +2282,15 @@ class GraphQueryService:
                     str(row["source_path"]),
                 )
             )
-            owner = candidates[0]
+            deepest_depth = _path_depth(str(candidates[0]["path"]))
+            deepest_candidates = [
+                candidate
+                for candidate in candidates
+                if _path_depth(str(candidate["path"])) == deepest_depth
+            ]
+            if len(deepest_candidates) != 1:
+                continue
+            owner = deepest_candidates[0]
             package_root = str(owner["path"])
             boundaries[path] = {
                 "confidence": "high",
@@ -2333,7 +2341,15 @@ class GraphQueryService:
                     str(row["package_name"]),
                 )
             )
-            owner = candidates[0]
+            deepest_depth = _path_depth(str(candidates[0]["package_root"]))
+            deepest_candidates = [
+                candidate
+                for candidate in candidates
+                if _path_depth(str(candidate["package_root"])) == deepest_depth
+            ]
+            if len(deepest_candidates) != 1:
+                continue
+            owner = deepest_candidates[0]
             memberships[path] = {
                 "confidence": "high",
                 "ecosystem": str(owner["ecosystem"]),
@@ -2357,7 +2373,7 @@ class GraphQueryService:
         if not paths:
             return {}
         placeholders = ",".join("?" for _ in paths)
-        rows = _rows_to_dicts(
+        unresolved_rows = _rows_to_dicts(
             connection.execute(
                 f"""
                 SELECT path, specifier, resolution_status, line
@@ -2370,7 +2386,7 @@ class GraphQueryService:
             )
         )
         candidates: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
+        for row in unresolved_rows:
             path = str(row["path"])
             candidates.setdefault(path, []).append(
                 {
@@ -2382,12 +2398,181 @@ class GraphQueryService:
                         }
                     ],
                     "kind": "relationship_candidate",
+                    "reason": "import_resolution_not_definitive",
                     "relationship": "local_resolution",
                     "resolution_status": str(row["resolution_status"]),
                     "specifier": str(row["specifier"]),
+                    "warning_code": _relationship_candidate_warning_code(
+                        str(row["resolution_status"])
+                    ),
                 }
             )
+        candidates.update(
+            _merge_candidate_maps(
+                candidates, self._ambiguous_package_owner_candidates(connection, paths)
+            )
+        )
+        candidates.update(
+            _merge_candidate_maps(
+                candidates, self._ambiguous_workspace_membership_candidates(connection, paths)
+            )
+        )
+        candidates.update(
+            _merge_candidate_maps(
+                candidates, self._ambiguous_workspace_import_candidates(connection, paths)
+            )
+        )
         return candidates
+
+    def _ambiguous_package_owner_candidates(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, list[dict[str, Any]]]:
+        rows = _rows_to_dicts(
+            connection.execute(
+                """
+                SELECT name, ecosystem, path, source_path
+                FROM config_package_roots
+                ORDER BY path, name, ecosystem, source_path
+                """
+            )
+        )
+        candidates_by_path: dict[str, list[dict[str, Any]]] = {}
+        for path in sorted(paths):
+            matches = [row for row in rows if _path_is_under(path, str(row["path"]))]
+            if len(matches) < 2:
+                continue
+            deepest_depth = max(_path_depth(str(match["path"])) for match in matches)
+            deepest = [
+                match for match in matches if _path_depth(str(match["path"])) == deepest_depth
+            ]
+            if len(deepest) < 2:
+                continue
+            for match in deepest[:5]:
+                candidates_by_path.setdefault(path, []).append(
+                    {
+                        "confidence": "low",
+                        "evidence": [
+                            {
+                                "package_root": str(match["path"]),
+                                "source": "config_package_roots",
+                                "source_path": str(match["source_path"]),
+                            }
+                        ],
+                        "kind": "relationship_candidate",
+                        "package_name": str(match["name"]),
+                        "package_root": str(match["path"]),
+                        "reason": "ambiguous_package_ownership",
+                        "relationship": "package_ownership",
+                        "warning_code": "graph_quality:ambiguous_package_ownership",
+                    }
+                )
+        return candidates_by_path
+
+    def _ambiguous_workspace_membership_candidates(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, list[dict[str, Any]]]:
+        rows = _rows_to_dicts(
+            connection.execute(
+                """
+                SELECT
+                    root.name AS package_name,
+                    root.path AS package_root,
+                    root.source_path AS package_source_path,
+                    workspace.path AS workspace_path,
+                    workspace.source_path AS workspace_source_path
+                FROM config_package_roots AS root
+                JOIN config_workspaces AS workspace
+                  ON root.ecosystem = workspace.ecosystem
+                 AND root.path = workspace.path
+                ORDER BY root.path, root.name, workspace.source_path
+                """
+            )
+        )
+        candidates_by_path: dict[str, list[dict[str, Any]]] = {}
+        for path in sorted(paths):
+            matches = [row for row in rows if _path_is_under(path, str(row["package_root"]))]
+            if len(matches) < 2:
+                continue
+            deepest_depth = max(_path_depth(str(match["package_root"])) for match in matches)
+            deepest = [
+                match
+                for match in matches
+                if _path_depth(str(match["package_root"])) == deepest_depth
+            ]
+            if len(deepest) < 2:
+                continue
+            for match in deepest[:5]:
+                candidates_by_path.setdefault(path, []).append(
+                    {
+                        "confidence": "low",
+                        "evidence": [
+                            {
+                                "package_source_path": str(match["package_source_path"]),
+                                "source": "config_workspaces",
+                                "workspace_source_path": str(match["workspace_source_path"]),
+                            }
+                        ],
+                        "kind": "relationship_candidate",
+                        "package_name": str(match["package_name"]),
+                        "package_root": str(match["package_root"]),
+                        "reason": "ambiguous_workspace_membership",
+                        "relationship": "workspace_membership",
+                        "warning_code": "graph_quality:ambiguous_workspace_membership",
+                        "workspace_path": str(match["workspace_path"]),
+                    }
+                )
+        return candidates_by_path
+
+    def _ambiguous_workspace_import_candidates(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, list[dict[str, Any]]]:
+        placeholders = ",".join("?" for _ in paths)
+        rows = _rows_to_dicts(
+            connection.execute(
+                f"""
+                SELECT imports.path, imports.specifier, imports.line, roots.path AS package_root,
+                       roots.source_path AS package_source_path
+                FROM javascript_imports AS imports
+                JOIN config_package_roots AS roots
+                  ON imports.root_name = roots.name
+                 AND roots.ecosystem = 'javascript'
+                WHERE imports.path IN ({placeholders})
+                  AND imports.resolution_status = 'external'
+                ORDER BY imports.path, imports.line, roots.path
+                """,
+                paths,
+            )
+        )
+        grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(
+                (str(row["path"]), str(row["specifier"]), int(row["line"])), []
+            ).append(row)
+        candidates_by_path: dict[str, list[dict[str, Any]]] = {}
+        for (path, specifier, line), matches in sorted(grouped.items()):
+            if len(matches) < 2:
+                continue
+            for match in matches[:5]:
+                candidates_by_path.setdefault(path, []).append(
+                    {
+                        "confidence": "low",
+                        "evidence": [
+                            {"line": line, "source": "javascript_imports"},
+                            {
+                                "package_root": str(match["package_root"]),
+                                "source": "config_package_roots",
+                                "source_path": str(match["package_source_path"]),
+                            },
+                        ],
+                        "kind": "relationship_candidate",
+                        "package_root": str(match["package_root"]),
+                        "reason": "ambiguous_workspace_package_import",
+                        "relationship": "workspace_package_import",
+                        "specifier": specifier,
+                        "warning_code": "graph_quality:ambiguous_workspace_package_import",
+                    }
+                )
+        return candidates_by_path
 
 
 def _empty_impact_data(
@@ -2508,6 +2693,23 @@ def _impact_group(
         "total": len(items),
         "truncated": len(items) > max_results,
     }
+
+
+def _merge_candidate_maps(
+    left: dict[str, list[dict[str, Any]]], right: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    merged = {path: list(items) for path, items in left.items()}
+    for path, items in right.items():
+        merged.setdefault(path, []).extend(items)
+    return merged
+
+
+def _relationship_candidate_warning_code(resolution_status: str) -> str:
+    if "ambiguous" in resolution_status:
+        return "graph_quality:ambiguous_import_relationship"
+    if "unsupported" in resolution_status:
+        return "graph_quality:unsupported_import_relationship"
+    return "graph_quality:unresolved_import_relationship"
 
 
 def _impact_rollups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:

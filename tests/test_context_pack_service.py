@@ -386,11 +386,89 @@ def test_context_pack_surfaces_package_workspace_contract_tracer(tmp_path):
             "confidence": "low",
             "evidence": [{"line": 1, "source": "javascript_imports"}],
             "kind": "relationship_candidate",
+            "reason": "import_resolution_not_definitive",
             "relationship": "local_resolution",
             "resolution_status": "unresolved_missing_alias",
             "specifier": "@missing/thing",
+            "warning_code": "graph_quality:unresolved_import_relationship",
         }
     ]
+
+
+def test_context_pack_surfaces_ambiguous_workspace_package_import_candidates(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "workspace-root",
+              "private": true,
+              "workspaces": ["packages/*"]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "package.json",
+        dedent(
+            r"""
+            {
+              "name": "@demo/app",
+              "dependencies": {"@demo/lib": "workspace:*"}
+            }
+            """
+        ).lstrip(),
+    )
+    for package_path in ("lib-a", "lib-b"):
+        _write_text(
+            tmp_path / "packages" / package_path / "package.json",
+            dedent(
+                r"""
+                {
+                  "name": "@demo/lib",
+                  "exports": "./src/index.ts"
+                }
+                """
+            ).lstrip(),
+        )
+        _write_text(
+            tmp_path / "packages" / package_path / "src" / "index.ts",
+            "export const value = 1;\n",
+        )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        "import { value } from '@demo/lib';\nexport const appValue = value;\n",
+    )
+    index_repository(tmp_path)
+
+    query_metadata = GraphQueryService(tmp_path).context_pack_file_metadata(
+        ["packages/app/src/main.ts"]
+    )
+    envelope = get_task_context(tmp_path, "app imports demo lib")
+
+    assert query_metadata["ok"] is True
+    candidates = query_metadata["data"]["relationship_candidates"]["packages/app/src/main.ts"]
+    assert [candidate["package_root"] for candidate in candidates] == [
+        "packages/lib-a",
+        "packages/lib-b",
+    ]
+    assert all(
+        candidate["reason"] == "ambiguous_workspace_package_import" for candidate in candidates
+    )
+    assert any(
+        warning.startswith("graph_quality:ambiguous_package_identity")
+        for warning in envelope["warnings"]
+    )
+    assert any(
+        warning.startswith("graph_quality:ambiguous_workspace_package_import")
+        for warning in envelope["warnings"]
+    )
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+    assert not any(
+        edge["target_id"].startswith("javascript_module:packages/lib-")
+        for edge in graph_json["edges"]
+        if edge["kind"] == "IMPORTS"
+    )
 
 
 def test_expand_context_is_pack_scoped_bounded_and_source_free(tmp_path):

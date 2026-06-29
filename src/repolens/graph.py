@@ -107,6 +107,10 @@ HASH_FIELDS = (
 )
 PARSER_ERROR_WARNING = "Parser errors detected in the live graph overlay."
 UNRESOLVED_JAVASCRIPT_IMPORT_WARNING = "graph_quality:javascript_unresolved_import_relationships"
+AMBIGUOUS_PACKAGE_IDENTITY_WARNING = "graph_quality:ambiguous_package_identity"
+AMBIGUOUS_WORKSPACE_MEMBERSHIP_WARNING = "graph_quality:ambiguous_workspace_membership"
+AMBIGUOUS_WORKSPACE_PACKAGE_IMPORT_WARNING = "graph_quality:ambiguous_workspace_package_import"
+MISSING_WORKSPACE_PACKAGE_ENTRYPOINT_WARNING = "graph_quality:missing_workspace_package_entrypoint"
 MAX_EDGE_EVIDENCE_ITEMS = 20
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -6401,7 +6405,104 @@ def _quality_warnings(connection: sqlite3.Connection) -> list[str]:
         warnings.append(
             f"{UNRESOLVED_JAVASCRIPT_IMPORT_WARNING}:count={unresolved_js_import_count}"
         )
+    ambiguous_package_identity_count = _single_count(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM (
+          SELECT ecosystem, name
+          FROM config_package_roots
+          GROUP BY ecosystem, name
+          HAVING COUNT(*) > 1
+        )
+        """,
+    )
+    if ambiguous_package_identity_count:
+        warnings.append(
+            f"{AMBIGUOUS_PACKAGE_IDENTITY_WARNING}:count={ambiguous_package_identity_count}"
+        )
+    ambiguous_workspace_membership_count = _ambiguous_workspace_membership_count(connection)
+    if ambiguous_workspace_membership_count:
+        warnings.append(
+            f"{AMBIGUOUS_WORKSPACE_MEMBERSHIP_WARNING}:count={ambiguous_workspace_membership_count}"
+        )
+    ambiguous_workspace_import_count = _single_count(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM (
+          SELECT imports.path, imports.line, imports.specifier
+          FROM javascript_imports AS imports
+          JOIN config_package_roots AS roots
+            ON imports.root_name = roots.name
+           AND roots.ecosystem = 'javascript'
+          WHERE imports.resolution_status = 'external'
+          GROUP BY imports.path, imports.line, imports.specifier
+          HAVING COUNT(*) > 1
+        )
+        """,
+    )
+    if ambiguous_workspace_import_count:
+        warnings.append(
+            f"{AMBIGUOUS_WORKSPACE_PACKAGE_IMPORT_WARNING}:count={ambiguous_workspace_import_count}"
+        )
+    missing_workspace_entrypoint_count = _single_count(
+        connection,
+        """
+        SELECT COUNT(*)
+        FROM (
+          SELECT imports.path, imports.line, imports.specifier
+          FROM javascript_imports AS imports
+          JOIN config_package_roots AS roots
+            ON imports.root_name = roots.name
+           AND roots.ecosystem = 'javascript'
+          LEFT JOIN config_entrypoints AS entrypoints
+            ON roots.source_path = entrypoints.path
+           AND entrypoints.kind IN ('package_export', 'package_main')
+          WHERE imports.resolution_status = 'external'
+          GROUP BY imports.path, imports.line, imports.specifier
+          HAVING COUNT(DISTINCT roots.id) = 1
+             AND COUNT(entrypoints.id) = 0
+        )
+        """,
+    )
+    if missing_workspace_entrypoint_count:
+        warnings.append(
+            f"{MISSING_WORKSPACE_PACKAGE_ENTRYPOINT_WARNING}:count={missing_workspace_entrypoint_count}"
+        )
     return warnings
+
+
+def _ambiguous_workspace_membership_count(connection: sqlite3.Connection) -> int:
+    roots = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT id, ecosystem, path
+            FROM config_package_roots
+            ORDER BY id
+            """
+        )
+    )
+    workspaces = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT ecosystem, path
+            FROM config_workspaces
+            ORDER BY source_path, path
+            """
+        )
+    )
+    ambiguous = 0
+    for root in roots:
+        matches = [
+            workspace
+            for workspace in workspaces
+            if str(workspace["ecosystem"]) == str(root["ecosystem"])
+            and _workspace_scope_matches(str(root["path"]), str(workspace["path"]))
+        ]
+        if len(matches) > 1:
+            ambiguous += 1
+    return ambiguous
 
 
 def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
@@ -6425,6 +6526,10 @@ def _table_count(connection: sqlite3.Connection, table: str) -> int:
 def _single_count(connection: sqlite3.Connection, sql: str) -> int:
     row = connection.execute(sql).fetchone()
     return int(row[0] if row is not None else 0)
+
+
+def _rows_to_dicts(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
+    return [dict(row) for row in cursor.fetchall()]
 
 
 def _invalid_repo_paths(connection: sqlite3.Connection) -> list[str]:
