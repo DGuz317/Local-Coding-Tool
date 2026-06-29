@@ -156,6 +156,8 @@ uv run repolens evaluate-context --json
 uv build --out-dir /tmp/repolens-dist --clear
 ```
 
+The coordination tracker for this release is `docs/repolens-v0.4-release-tracker.md`. It locks the issue dependency order, non-goals, release gates, and maintainer checkpoints that control when downstream v0.4 implementation slices may start.
+
 ## Follow-Up Track
 
 After v0.4, consider a smaller adoption-focused release:

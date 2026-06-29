@@ -136,3 +136,34 @@ def test_dogfood_distilled_fixtures_are_committed_sources_only() -> None:
     assert "config/service.yaml" in (fixture_root / "mixed-docs-config" / "AGENTS.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_v0_4_release_tracker_locks_scope_and_gates() -> None:
+    tracker = (ROOT / "docs" / "repolens-v0.4-release-tracker.md").read_text(encoding="utf-8")
+    plan = (ROOT / "docs" / "repolens-v0.4-plan.md").read_text(encoding="utf-8")
+
+    for required in (
+        "Make RepoLens trustworthy across package/workspace repositories.",
+        "#120 -> #121",
+        "#121 -> #122",
+        "#121 -> #123",
+        "#121 -> #124",
+        "#122, #123 -> #125",
+        "#121, #125, #124 -> #126",
+        "#122, #123, #125, #126, #124 -> #127",
+        "#127 -> #128",
+        "no-whole-source-disclosure coverage",
+        "JS/TS workspace dogfooding evidence",
+        "Context Pack evaluation",
+        "hosted service",
+        "telemetry",
+        "embeddings or vector search",
+        "runtime package registry lookups",
+        "write-capable MCP tools",
+        "persisted assistant sessions",
+        "whole-source disclosure",
+        "Maintainer approval is required before #121 is moved out of blocked state.",
+    ):
+        assert required in tracker
+
+    assert "docs/repolens-v0.4-release-tracker.md" in plan
