@@ -645,6 +645,15 @@ def _attach_file_metadata(
     candidates = _sequence(relationship_candidates.get(path))
     if candidates:
         item["relationship_candidates"] = candidates
+        warning_codes = sorted(
+            {
+                str(_mapping(candidate).get("warning_code"))
+                for candidate in candidates
+                if _mapping(candidate).get("warning_code")
+            }
+        )
+        if warning_codes:
+            item["graph_quality_warning_codes"] = warning_codes
 
 
 def _command_item(
@@ -870,11 +879,25 @@ def _apply_character_budget(pack: dict[str, Any], max_total_chars: int) -> dict[
     if len(json.dumps(pack, sort_keys=True)) <= max_total_chars:
         return pack
     pack = dict(pack)
+    for group_name in ("supporting_docs", "supporting_configs", "lower_priority_context"):
+        pack[group_name] = _strip_structural_summaries(_sequence(pack.get(group_name)))
+    if len(json.dumps(pack, sort_keys=True)) <= max_total_chars:
+        pack["truncation"] = truncation_metadata(fields=["structural_summaries"])
+        return pack
     pack["lower_priority_context"] = []
     pack["supporting_docs"] = []
     pack["supporting_configs"] = []
     pack["truncation"] = truncation_metadata(fields=["character_budget"])
     return pack
+
+
+def _strip_structural_summaries(items: Sequence[Any]) -> list[dict[str, Any]]:
+    stripped = []
+    for item in items:
+        mapped = dict(_mapping(item))
+        mapped.pop("structural_summary", None)
+        stripped.append(mapped)
+    return stripped
 
 
 def _related_tests_by_source(tests: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:

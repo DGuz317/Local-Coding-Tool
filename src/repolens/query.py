@@ -2252,6 +2252,9 @@ class GraphQueryService:
             doc_summary = _documentation_summary(connection, path)
             if doc_summary:
                 summary.update(doc_summary)
+            config_summary = _config_summary(connection, path)
+            if config_summary:
+                summary.update(config_summary)
             if len(summary) > 2:
                 summaries[path] = summary
         return summaries
@@ -3054,11 +3057,22 @@ def _symbol_summary(
 
 def _documentation_summary(connection: sqlite3.Connection, path: str) -> dict[str, Any]:
     doc = _single_optional_row_dict(
-        connection.execute("SELECT title FROM documentation_files WHERE path = ?", (path,))
+        connection.execute(
+            """
+            SELECT doc_kind, importance, parser_status, title
+            FROM documentation_files
+            WHERE path = ?
+            """,
+            (path,),
+        )
     )
     if doc is None:
         return {}
-    summary: dict[str, Any] = {}
+    summary: dict[str, Any] = {
+        "doc_kind": str(doc["doc_kind"]),
+        "importance": str(doc["importance"]),
+        "parser_status": str(doc["parser_status"]),
+    }
     if doc.get("title"):
         summary["title"] = str(doc["title"])
     headings = _rows_to_dicts(
@@ -3068,7 +3082,7 @@ def _documentation_summary(connection: sqlite3.Connection, path: str) -> dict[st
             FROM markdown_headings
             WHERE path = ?
             ORDER BY line, level, text
-            LIMIT 8
+            LIMIT 5
             """,
             (path,),
         )
@@ -3077,6 +3091,181 @@ def _documentation_summary(connection: sqlite3.Connection, path: str) -> dict[st
         summary["headings"] = [
             {"level": int(row["level"]), "line": int(row["line"]), "text": str(row["text"])}
             for row in headings
+        ]
+    links = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT target_path, target_fragment, line
+            FROM markdown_links
+            WHERE path = ?
+            ORDER BY line, target_path, target_fragment
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if links:
+        summary["links"] = [
+            {
+                "line": int(row["line"]),
+                "target_fragment": row["target_fragment"],
+                "target_path": str(row["target_path"]),
+            }
+            for row in links
+        ]
+    path_mentions = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT mentioned_path, target_path, line
+            FROM markdown_path_mentions
+            WHERE path = ?
+            ORDER BY line, target_path, mentioned_path
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if path_mentions:
+        summary["mentioned_paths"] = [
+            {
+                "line": int(row["line"]),
+                "mentioned_path": str(row["mentioned_path"]),
+                "target_path": str(row["target_path"]),
+            }
+            for row in path_mentions
+        ]
+    code_fences = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT language, start_line, end_line
+            FROM markdown_code_fences
+            WHERE path = ?
+            ORDER BY start_line, language
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if code_fences:
+        summary["code_fences"] = [
+            {
+                "language": row["language"],
+                "line_range": {"end": row["end_line"], "start": int(row["start_line"])},
+            }
+            for row in code_fences
+        ]
+    return summary
+
+
+def _config_summary(connection: sqlite3.Connection, path: str) -> dict[str, Any]:
+    config = _single_optional_row_dict(
+        connection.execute(
+            """
+            SELECT config_kind, format, parser_status, top_level_keys_json
+            FROM config_files
+            WHERE path = ?
+            """,
+            (path,),
+        )
+    )
+    if config is None:
+        return {}
+    summary: dict[str, Any] = {
+        "config_kind": str(config["config_kind"]),
+        "format": str(config["format"]),
+        "parser_status": str(config["parser_status"]),
+        "top_level_keys": [str(key) for key in _decode_list(config["top_level_keys_json"])[:8]],
+    }
+    package_references = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT name, ecosystem, classification, dependency_type
+            FROM config_packages
+            WHERE source_path = ?
+            ORDER BY classification, dependency_type, ecosystem, name
+            LIMIT 8
+            """,
+            (path,),
+        )
+    )
+    if package_references:
+        summary["package_references"] = [
+            {
+                "classification": str(row["classification"]),
+                "dependency_type": str(row["dependency_type"]),
+                "ecosystem": str(row["ecosystem"]),
+                "name": str(row["name"]),
+            }
+            for row in package_references
+        ]
+    package_roots = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT name, ecosystem, path, source_path
+            FROM config_package_roots
+            WHERE source_path = ?
+            ORDER BY path, ecosystem, name
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if package_roots:
+        summary["package_roots"] = [
+            {
+                "ecosystem": str(row["ecosystem"]),
+                "name": str(row["name"]),
+                "path": str(row["path"]),
+                "source": "config_package_roots",
+                "source_path": str(row["source_path"]),
+            }
+            for row in package_roots
+        ]
+    package_managers = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT name, ecosystem, evidence_kind
+            FROM config_package_managers
+            WHERE source_path = ?
+            ORDER BY ecosystem, name, evidence_kind
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if package_managers:
+        summary["package_managers"] = [
+            {
+                "ecosystem": str(row["ecosystem"]),
+                "evidence_kind": str(row["evidence_kind"]),
+                "name": str(row["name"]),
+            }
+            for row in package_managers
+        ]
+    commands = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT name, purpose, risk_bucket, not_run, auto_run_recommended
+            FROM config_commands
+            WHERE group_source_path = ?
+            ORDER BY purpose, name
+            LIMIT 5
+            """,
+            (path,),
+        )
+    )
+    if commands:
+        summary["candidate_commands"] = [
+            {
+                "auto_run_recommended": bool(row["auto_run_recommended"]),
+                "found": True,
+                "name": str(row["name"]),
+                "not_run": bool(row["not_run"]),
+                "purpose": str(row["purpose"]),
+                "risk_bucket": str(row["risk_bucket"]),
+                "run": False,
+            }
+            for row in commands
         ]
     return summary
 

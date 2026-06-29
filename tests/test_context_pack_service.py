@@ -83,8 +83,18 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     assert [item["path"] for item in pack["likely_tests"]] == ["tests/login.test.ts"]
     assert [item["path"] for item in pack["supporting_docs"]] == ["README.md"]
     assert pack["supporting_docs"][0]["structural_summary"] == {
+        "doc_kind": "readme",
         "freshness": pack["freshness"],
         "headings": [{"level": 1, "line": 1, "text": "Auth Demo"}],
+        "importance": "important",
+        "mentioned_paths": [
+            {
+                "line": 3,
+                "mentioned_path": "src/auth/login.ts",
+                "target_path": "src/auth/login.ts",
+            }
+        ],
+        "parser_status": "parsed",
         "scope": "file",
         "source": "graph_facts",
         "title": "Auth Demo",
@@ -209,6 +219,89 @@ def test_context_pack_broad_task_is_bounded_and_warned(tmp_path):
         <= DEFAULT_CONTEXT_PACK_BUDGET["max_first_read_files"]
     )
     assert "Task is broad" in " ".join(envelope["warnings"])
+
+
+def test_context_pack_docs_and_config_orientation_stays_structured_without_excerpts(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    _write_text(
+        tmp_path / "docs" / "testing.md",
+        dedent(
+            """
+            # Testing Setup
+
+            Run the test script from package.json when changing src/auth/login.ts.
+
+            ```ts
+            export function leakedExample() {
+              return true;
+            }
+            ```
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "README.md",
+        dedent(
+            """
+            # Auth Demo
+
+            Read [testing setup](docs/testing.md) before changing `src/auth/login.ts`.
+            """
+        ).lstrip(),
+    )
+    index_repository(tmp_path)
+
+    docs_envelope = get_task_context(tmp_path, "Update testing setup docs for login flow")
+    config_envelope = get_task_context(tmp_path, "Fix package lint command")
+
+    docs_pack = docs_envelope["data"]
+    config_pack = config_envelope["data"]
+    docs_by_path = {item["path"]: item for item in docs_pack["supporting_docs"]}
+    readme_summary = docs_by_path["README.md"]["structural_summary"]
+    testing_summary = docs_by_path["docs/testing.md"]["structural_summary"]
+    config_summary = config_pack["supporting_configs"][0]["structural_summary"]
+
+    assert readme_summary["links"] == [
+        {"line": 3, "target_fragment": None, "target_path": "docs/testing.md"}
+    ]
+    assert {
+        "line": 3,
+        "mentioned_path": "src/auth/login.ts",
+        "target_path": "src/auth/login.ts",
+    } in readme_summary["mentioned_paths"]
+    assert {
+        "line": 3,
+        "mentioned_path": "docs/testing.md",
+        "target_path": "docs/testing.md",
+    } in readme_summary["mentioned_paths"]
+    assert {
+        "line": 3,
+        "mentioned_path": "package.json",
+        "target_path": "package.json",
+    } in testing_summary["mentioned_paths"]
+    assert {
+        "line": 3,
+        "mentioned_path": "src/auth/login.ts",
+        "target_path": "src/auth/login.ts",
+    } in testing_summary["mentioned_paths"]
+    assert testing_summary["headings"] == [{"level": 1, "line": 1, "text": "Testing Setup"}]
+    assert testing_summary["code_fences"] == [
+        {"language": "ts", "line_range": {"end": 9, "start": 5}}
+    ]
+    assert config_summary["config_kind"] == "package_manifest"
+    assert config_summary["package_roots"][0]["name"] == "auth-demo"
+    assert [command["risk_bucket"] for command in config_summary["candidate_commands"]] == [
+        "quality_check_likely",
+        "verification_likely",
+    ]
+    assert all(command["found"] is True for command in config_summary["candidate_commands"])
+    assert all(command["run"] is False for command in config_summary["candidate_commands"])
+
+    serialized = json.dumps({"docs": docs_pack, "config": config_pack})
+    assert "Run the test script" not in serialized
+    assert "export function leakedExample" not in serialized
+    assert "Keep changes focused" not in serialized
+    assert str(tmp_path) not in serialized
 
 
 def test_context_pack_focus_path_outside_root_is_rejected(tmp_path):
