@@ -1,6 +1,6 @@
 {
-  "manifest_version": "0.3.contract.v1",
-  "description": "Release-blocking Context Pack fixture manifest for v0.3 implementation slices.",
+  "manifest_version": "0.4.eval.v1",
+  "description": "Release-blocking Context Pack fixture manifest for v0.4 package/workspace and safety gates.",
   "default_budget": {
     "max_first_read_files": 5,
     "max_items_per_support_group": 5,
@@ -169,6 +169,147 @@
         ],
         "repo_relative_paths_only": true,
         "structural_symbols_allowed": true
+      }
+    },
+    {
+      "id": "v0_3_1_artifact_budget_regression",
+      "corpus": "release_blocking",
+      "category": "regression_v0_3_1",
+      "task": "Improve auth timeout session login handling across the repository",
+      "fixture_repo": "tests/fixtures/context_pack/happy-path",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "bounded_by_default_budget": true,
+        "first_read_files_max": 5,
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true
+      }
+    },
+    {
+      "id": "v0_4_js_ts_workspace_package_import",
+      "corpus": "release_blocking",
+      "category": "package_workspace",
+      "task": "Fix workspace package import from app to @dog/lib using TypeScript alias",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": [],
+      "expand_first_handle": true,
+      "expected_outcomes": {
+        "first_read_files_include_any": [
+          "packages/app/src/index.ts",
+          "packages/lib/src/index.ts"
+        ],
+        "package_boundaries_include": [
+          {"name": "@dog/app", "path": "packages/app"},
+          {"name": "@dog/lib", "path": "packages/lib"}
+        ],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "quality_check_likely"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "expansion_ok": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_4_unresolved_ts_alias_warning",
+      "corpus": "release_blocking",
+      "category": "package_workspace",
+      "task": "Fix unresolved @known/missing alias in app",
+      "fixture_repo": "tests/fixtures/context_pack/unresolved-alias",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["src/app.ts"],
+        "relationship_candidates_include": [
+          {
+            "specifier": "@known/missing",
+            "resolution_status": "unresolved_missing_alias",
+            "warning_code": "graph_quality:unresolved_import_relationship"
+          }
+        ],
+        "graph_quality_warning_codes_include": ["graph_quality:unresolved_import_relationship"],
+        "warnings_include": ["graph_quality:javascript_unresolved_import_relationships"],
+        "no_source_snippets": true
+      }
+    },
+    {
+      "id": "v0_4_ambiguous_workspace_package_import_candidates",
+      "corpus": "release_blocking",
+      "category": "ambiguity",
+      "task": "Fix @demo/lib workspace import in app main",
+      "fixture_repo": "tests/fixtures/context_pack/ambiguous-workspace-import",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["packages/app/src/main.ts"],
+        "package_boundaries_include": [
+          {"name": "@demo/app", "path": "packages/app"}
+        ],
+        "relationship_candidates_include": [
+          {
+            "specifier": "@demo/lib",
+            "reason": "ambiguous_workspace_package_import",
+            "warning_code": "graph_quality:ambiguous_workspace_package_import"
+          }
+        ],
+        "graph_quality_warning_codes_include": [
+          "graph_quality:ambiguous_workspace_package_import"
+        ],
+        "warnings_include": ["graph_quality:ambiguous_workspace_package_import"],
+        "confidence_at_most": "medium",
+        "no_source_snippets": true
+      }
+    },
+    {
+      "id": "v0_4_docs_config_orientation_no_disclosure",
+      "corpus": "release_blocking",
+      "category": "documentation_config",
+      "task": "Orient me to testing docs, package commands, and setup config without source excerpts",
+      "fixture_repo": "tests/fixtures/context_pack/config-docs",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "supporting_configs_include_any": ["pyproject.toml", "package.json"],
+        "supporting_docs_include_any": ["README.md", "docs/testing.md"],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "quality_check_likely"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "forbidden_fields_rejected_or_sanitized": [
+          "snippet",
+          "source_text",
+          "function_body",
+          "function_signature",
+          "paragraph_excerpt",
+          "raw_comment_text",
+          "raw_agent_guidance"
+        ],
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_4_command_risk_bucket_gate",
+      "corpus": "release_blocking",
+      "category": "command_classification",
+      "task": "Find test lint build deploy commands",
+      "fixture_repo": "tests/fixtures/context_pack/command-risk",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "supporting_configs_include_any": ["package.json"],
+        "candidate_commands_include": [
+          {"name": "test", "risk_bucket": "verification_likely", "run": false},
+          {"name": "lint", "risk_bucket": "quality_check_likely", "run": false},
+          {"name": "build", "risk_bucket": "build_likely", "run": false},
+          {"name": "deploy", "risk_bucket": "risky_or_external", "run": false}
+        ],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "quality_check_likely",
+          "build_likely",
+          "risky_or_external"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true
       }
     },
     {

@@ -1,0 +1,4 @@
+{
+  "name": "@demo/lib",
+  "exports": "./src/index.ts"
+}

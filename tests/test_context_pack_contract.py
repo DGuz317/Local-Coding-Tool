@@ -153,6 +153,10 @@ def test_context_pack_fixture_manifest_names_required_case_families():
         "secret_redaction",
         "stale_pack",
         "no_source_disclosure",
+        "regression_v0_3_1",
+        "package_workspace",
+        "ambiguity",
+        "command_classification",
     }
     assert expanded_categories == {"cli_export"}
     assert manifest["default_budget"] == DEFAULT_CONTEXT_PACK_BUDGET

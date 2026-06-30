@@ -148,6 +148,15 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
         focus_hints = [str(hint) for hint in _sequence(case.get("focus_hints"))]
         pack_envelope = get_task_context(work_repo, task, focus_hints=focus_hints)
         expansion_envelope: dict[str, Any] | None = None
+        if case.get("expand_first_handle") is True:
+            original_pack = _mapping(pack_envelope.get("data"))
+            expansion_envelope = expand_context(
+                work_repo,
+                task,
+                str(original_pack.get("context_pack_id", "")),
+                _first_expansion_handle(original_pack),
+                focus_hints=focus_hints,
+            )
         if str(case.get("graph_state", "")) == "stale_but_readable":
             _touch_stale_fixture(work_repo)
             pack_envelope = get_task_context(work_repo, task, focus_hints=focus_hints)
@@ -302,6 +311,49 @@ def _expectation_checks(
                 _paths(pack.get("supporting_docs")), expected["supporting_docs_include_any"]
             ),
         )
+    if "package_boundaries_include" in expected:
+        for expected_boundary in _sequence(expected["package_boundaries_include"]):
+            mapped_boundary = _mapping(expected_boundary)
+            name = str(mapped_boundary.get("name", ""))
+            path = str(mapped_boundary.get("path", ""))
+            _add_check(
+                checks,
+                f"package_boundaries_include:{name or path}",
+                _package_boundary_present(pack, name=name, path=path),
+            )
+    if "workspace_memberships_include" in expected:
+        for expected_membership in _sequence(expected["workspace_memberships_include"]):
+            mapped_membership = _mapping(expected_membership)
+            package_name = str(mapped_membership.get("package_name", ""))
+            package_root = str(mapped_membership.get("package_root", ""))
+            _add_check(
+                checks,
+                f"workspace_memberships_include:{package_name or package_root}",
+                _workspace_membership_present(
+                    pack, package_name=package_name, package_root=package_root
+                ),
+            )
+    if "relationship_candidates_include" in expected:
+        for expected_candidate in _sequence(expected["relationship_candidates_include"]):
+            mapped_candidate = _mapping(expected_candidate)
+            label = str(
+                mapped_candidate.get("warning_code")
+                or mapped_candidate.get("resolution_status")
+                or mapped_candidate.get("reason")
+                or mapped_candidate.get("specifier")
+            )
+            _add_check(
+                checks,
+                f"relationship_candidates_include:{label}",
+                _relationship_candidate_present(pack, expected_candidate=mapped_candidate),
+            )
+    if "graph_quality_warning_codes_include" in expected:
+        for expected_code in _sequence(expected["graph_quality_warning_codes_include"]):
+            _add_check(
+                checks,
+                f"graph_quality_warning_codes_include:{expected_code}",
+                str(expected_code) in _graph_quality_warning_codes(pack),
+            )
     if "ambiguity_candidates_include_any" in expected:
         _add_check(
             checks,
@@ -310,6 +362,25 @@ def _expectation_checks(
                 _paths(pack.get("ambiguity")), expected["ambiguity_candidates_include_any"]
             ),
         )
+    if "candidate_command_risk_buckets_include" in expected:
+        risk_buckets = {
+            str(_mapping(command).get("risk_bucket")) for command in _all_candidate_commands(pack)
+        }
+        for expected_bucket in _sequence(expected["candidate_command_risk_buckets_include"]):
+            _add_check(
+                checks,
+                f"candidate_command_risk_buckets_include:{expected_bucket}",
+                str(expected_bucket) in risk_buckets,
+            )
+    if "candidate_commands_include" in expected:
+        for expected_command in _sequence(expected["candidate_commands_include"]):
+            mapped_command = _mapping(expected_command)
+            name = str(mapped_command.get("name", ""))
+            _add_check(
+                checks,
+                f"candidate_commands_include:{name}",
+                _candidate_command_present(pack, expected_command=mapped_command),
+            )
     if "first_read_files_max" in expected:
         _add_check(
             checks,
@@ -343,6 +414,13 @@ def _expectation_checks(
             checks,
             "error_code",
             _mapping(target_envelope.get("error")).get("code") == expected["error_code"],
+        )
+    if "expansion_ok" in expected:
+        _add_check(
+            checks,
+            "expansion_ok",
+            expansion_envelope is not None
+            and expansion_envelope.get("ok") is expected["expansion_ok"],
         )
     for name, passed in safety_outcomes.items():
         _add_check(checks, name, passed)
@@ -382,9 +460,7 @@ def _safety_outcomes(
             f'"{field}"' in serialized for field in _FORBIDDEN_FIELD_NAMES
         )
     if expected.get("candidate_commands_marked_not_run") is True:
-        commands = _sequence(
-            _mapping(pack_envelope.get("data")).get("candidate_verification_commands")
-        )
+        commands = _all_candidate_commands(_mapping(pack_envelope.get("data")))
         outcomes["candidate_commands_marked_not_run"] = bool(commands) and all(
             _mapping(command).get("not_run") is True
             and _mapping(command).get("auto_run_recommended") is False
@@ -488,6 +564,87 @@ def _expected_relevant_paths(expected: Mapping[str, Any]) -> set[str]:
     ):
         result.update(str(path) for path in _sequence(expected.get(key)))
     return result
+
+
+def _all_pack_items(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key in (
+        "first_read_files",
+        "likely_tests",
+        "supporting_docs",
+        "supporting_configs",
+        "lower_priority_context",
+        "ambiguity",
+        "candidate_verification_commands",
+        "risk_signals",
+        "agent_guidance",
+    ):
+        items.extend(_mapping(item) for item in _sequence(pack.get(key)))
+    return items
+
+
+def _package_boundary_present(pack: Mapping[str, Any], *, name: str, path: str) -> bool:
+    for item in _all_pack_items(pack):
+        boundary = _mapping(item.get("package_boundary"))
+        if (
+            boundary
+            and (not name or boundary.get("name") == name)
+            and (not path or boundary.get("path") == path)
+        ):
+            return True
+    return False
+
+
+def _workspace_membership_present(
+    pack: Mapping[str, Any], *, package_name: str, package_root: str
+) -> bool:
+    for item in _all_pack_items(pack):
+        membership = _mapping(item.get("workspace_membership"))
+        if (
+            membership
+            and (not package_name or membership.get("package_name") == package_name)
+            and (not package_root or membership.get("package_root") == package_root)
+        ):
+            return True
+    return False
+
+
+def _relationship_candidate_present(
+    pack: Mapping[str, Any], *, expected_candidate: Mapping[str, Any]
+) -> bool:
+    for item in _all_pack_items(pack):
+        for candidate in (
+            _mapping(value) for value in _sequence(item.get("relationship_candidates"))
+        ):
+            if all(candidate.get(key) == value for key, value in expected_candidate.items()):
+                return True
+    return False
+
+
+def _graph_quality_warning_codes(pack: Mapping[str, Any]) -> set[str]:
+    codes: set[str] = set()
+    for item in _all_pack_items(pack):
+        codes.update(str(code) for code in _sequence(item.get("graph_quality_warning_codes")))
+    return codes
+
+
+def _all_candidate_commands(pack: Mapping[str, Any]) -> list[dict[str, Any]]:
+    commands = [_mapping(value) for value in _sequence(pack.get("candidate_verification_commands"))]
+    for item in _all_pack_items(pack):
+        summary = _mapping(item.get("structural_summary"))
+        commands.extend(
+            _mapping(command) for command in _sequence(summary.get("candidate_commands"))
+        )
+    return commands
+
+
+def _candidate_command_present(
+    pack: Mapping[str, Any], *, expected_command: Mapping[str, Any]
+) -> bool:
+    for command in _all_candidate_commands(pack):
+        if all(command.get(key) == value for key, value in expected_command.items()):
+            return True
+    return False
 
 
 def _paths(items: Any) -> list[str]:
