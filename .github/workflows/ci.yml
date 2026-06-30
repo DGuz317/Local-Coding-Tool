@@ -6,11 +6,13 @@ on:
       - main
       - feature/repolens-v0.3
       - feature/repolens-v0.3.1
+      - feature/repolens-v0.4
   pull_request:
     branches:
       - main
       - feature/repolens-v0.3
       - feature/repolens-v0.3.1
+      - feature/repolens-v0.4
 
 jobs:
   release-gate:
@@ -48,6 +50,9 @@ jobs:
 
       - name: Run Context Pack tests
         run: uv run pytest tests/test_context_pack_contract.py tests/test_context_pack_service.py tests/test_context_evaluation.py
+
+      - name: Run v0.4 package workspace tests
+        run: uv run pytest tests/test_config_index.py tests/test_javascript_index.py tests/test_query_service.py
 
       - name: Run full test suite
         run: uv run pytest

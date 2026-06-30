@@ -69,6 +69,16 @@ def test_ci_runs_v0_3_1_graph_index_and_context_pack_gates() -> None:
     assert "repolens evaluate-context" in workflow
 
 
+def test_ci_runs_v0_4_release_branch_and_workspace_gates() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "feature/repolens-v0.4" in workflow
+    assert "Run v0.4 package workspace tests" in workflow
+    assert "tests/test_config_index.py" in workflow
+    assert "tests/test_javascript_index.py" in workflow
+    assert "tests/test_query_service.py" in workflow
+
+
 def test_release_notes_document_v0_3_1_graph_index_policy() -> None:
     release_notes = (ROOT / "docs" / "releases" / "v0.3.1.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -94,6 +104,9 @@ def test_dogfood_reports_define_process_and_release_blocker() -> None:
     process = (ROOT / "docs" / "dogfood" / "README.md").read_text(encoding="utf-8")
     report = (ROOT / "docs" / "dogfood" / "2026-06-22-v0.2-dogfood.md").read_text(encoding="utf-8")
     readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    v0_4_report = (ROOT / "docs" / "dogfood" / "2026-06-30-v0.4-js-ts-workspace.md").read_text(
+        encoding="utf-8"
+    )
 
     for required in (
         "RepoLens on itself",
@@ -115,7 +128,16 @@ def test_dogfood_reports_define_process_and_release_blocker() -> None:
         assert required in report
 
     assert "docs/dogfood/README.md" in readiness
-    assert "v0.3 release remains blocked on full verification" in readiness
+    assert "v0.4 release remains blocked on full verification" in readiness
+
+    for required in (
+        "JS/TS Workspace Dogfooding Report",
+        "Relationship Candidates",
+        "Graph Quality Warnings",
+        "Lockfile-only evidence does not create package ownership facts",
+        "No third-party source snapshots or generated `.repolens/` artifacts are committed.",
+    ):
+        assert required in v0_4_report
 
 
 def test_dogfood_distilled_fixtures_are_committed_sources_only() -> None:
@@ -190,3 +212,35 @@ def test_package_workspace_evidence_contract_is_documented() -> None:
         "must not surface source snippets",
     ):
         assert required in contract
+
+
+def test_v0_4_release_readiness_docs_cover_required_topics() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required in (
+        "package/workspace evidence",
+        "Relationship Candidates",
+        "Graph Quality Warnings",
+        "docs/config orientation",
+        "command risk bucket",
+        "Maintainer release judgment",
+        "uv run repolens evaluate-context --json",
+        "uv build --out-dir /tmp/repolens-dist --clear",
+    ):
+        assert required in readiness
+
+    for required in (
+        "unsupported workspace declarations",
+        "Complex package entrypoints",
+        "Unresolved aliases",
+        "Lockfile-only evidence does not create package ownership facts",
+        "package/workspace overclaiming",
+    ):
+        assert required in limitations
+
+    assert (
+        "RepoLens v0.4 focuses on making Context Packs trustworthy across package/workspace repositories."
+        in readme
+    )

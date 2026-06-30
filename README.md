@@ -7,7 +7,7 @@ Think of it as a local map of your codebase:
 - It scans a repository on your machine.
 - It writes a generated graph under `.repolens/`.
 - It lets assistants ask read-only questions about files, symbols, tests, docs, configs, and relationships.
-- In v0.3, it can return a small task-focused **Context Pack** so an assistant knows what to read first.
+- It can return a small task-focused **Context Pack** so an assistant knows what to read first.
 
 RepoLens is local-first. Normal indexing and MCP usage do not require AI models, embeddings, telemetry, hosted services, a browser UI, or runtime network calls.
 
@@ -130,7 +130,7 @@ Command meanings:
 - `status`: check graph freshness without creating `.repolens/`.
 - `report`: print the generated Markdown graph report.
 - `search`: search scanner-approved live text with capped previews.
-- `context`: return a v0.3 task-scoped Context Pack.
+- `context`: return a task-scoped Context Pack.
 - `mcp`: start the read-only stdio MCP server for an assistant.
 
 There is also a developer-oriented `benchmark-update` command for update-speed evidence.
@@ -402,13 +402,16 @@ Before release, run the full verification gate, review generated artifact behavi
 
 ## Roadmap And Non-Goals
 
-RepoLens v0.3 focuses on local, deterministic, assistant-facing Context Packs.
+RepoLens v0.4 focuses on making Context Packs trustworthy across package/workspace repositories.
 
 Current focus:
 
 - local CLI indexing, update, status, report, search, context, and read-only MCP serving;
 - deterministic `.repolens/` graph artifacts;
 - task-scoped Context Packs with bounded output;
+- explicit package/workspace evidence, Relationship Candidates, and Graph Quality Warnings;
+- JavaScript and TypeScript workspace import and scoped alias resolution when local evidence is sufficient;
+- command risk buckets for candidate verification commands that remain found but not run;
 - freshness, warning, limit, confidence, and truncation metadata;
 - safe assistant orientation without whole-source disclosure.
 
