@@ -1,12 +1,15 @@
-# RepoLens MCP v0.3 Known Limitations
+# RepoLens MCP v0.4 Known Limitations
 
-These limitations are acceptable for v0.3 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading expansion, corrupt artifacts, stale graph facts, or unusable workflows.
+These limitations are acceptable for v0.4 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading expansion, corrupt artifacts, stale graph facts, or unusable workflows.
 
 ## Resolution Limits
 
 - RepoLens does not emulate runtime Python imports, installed environments, namespace package edge cases, or dynamic imports.
 - RepoLens does not run the TypeScript compiler, package manager, bundler, or framework resolver.
-- JavaScript and TypeScript workspace package resolution is partial. Dogfooding found `@dog/lib` classified as third-party in a local fixture even though it is a workspace package.
+- JavaScript and TypeScript workspace package resolution is evidence-limited, including unsupported workspace declarations, package-manager-specific features outside the documented contract, and workspace scopes without explicit package identity; these remain unresolved or candidates.
+- Complex package entrypoints such as conditional export maps, pattern export maps, generated entrypoints, framework conventions, or entrypoints requiring package-manager/bundler execution are not resolved as definitive local edges.
+- TypeScript `paths` and `baseUrl` aliases resolve only inside the applicable config subtree and only when they uniquely match scanner-approved in-repository JS/TS modules. Unresolved aliases, unsupported alias patterns, and ambiguous alias targets produce unresolved statuses, candidates, or graph-quality warnings.
+- Lockfile-only evidence does not create package ownership facts. Lockfiles may support candidates only when they clearly map to local workspace packages, and ownership still requires explicit package/config evidence.
 - Low-confidence fuzzy matches remain candidates only and must not be stored as graph edges.
 
 ## Semantic Analysis Limits
@@ -49,10 +52,10 @@ These limitations are acceptable for v0.3 when they remain explicit, safe, and n
 - No runtime package registry lookups during normal indexing or MCP serving.
 - No full framework emulation or runtime package-manager, bundler, or compiler execution during Context Pack generation.
 - No persisted Context Pack sessions or server-side assistant memory.
-- No PyPI, Docker registry, or hosted publishing automation in v0.3.
+- No PyPI, Docker registry, or hosted publishing automation in v0.4.
 
 ## Dogfooding And Evaluation Outcomes Reflected Here
 
 The v0.2 dogfooding report in `docs/dogfood/2026-06-22-v0.2-dogfood.md` identified workspace package resolution gaps, conservative Makefile command classification, and shallow docs/config impact context. These are documented limitations unless follow-up work promotes them to release-blocking bugs.
 
-The v0.3 Context Pack Evaluation suite records release-blocking expectation checks in `tests/fixtures/context_pack/evaluation_manifest.json`. Keep this document aligned when evaluation finds repeated failures to include known relevant files/tests, source disclosure risk, stale-pack misuse, or misleading lower-priority wording.
+The v0.4 Context Pack Evaluation suite records release-blocking expectation checks in `tests/fixtures/context_pack/evaluation_manifest.json`. Keep this document aligned when evaluation finds repeated failures to include known relevant files/tests, source disclosure risk, stale-pack misuse, misleading lower-priority wording, package/workspace overclaiming, missing Relationship Candidates, missing Graph Quality Warnings, docs/config orientation gaps, or command risk bucket regressions.

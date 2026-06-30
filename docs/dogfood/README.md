@@ -20,7 +20,7 @@ Dogfooding Reports are release-readiness records for running RepoLens on local r
 ## Distilled Fixtures
 
 - `tests/fixtures/dogfood/python-local-imports`: small Python package plus test import path.
-- `tests/fixtures/dogfood/js-ts-workspace`: tiny TypeScript workspace with a local workspace package and relative import.
+- `tests/fixtures/dogfood/js-ts-workspace`: tiny TypeScript workspace with a local workspace package, package ownership evidence, scoped alias evidence, and relative import.
 - `tests/fixtures/dogfood/mixed-docs-config`: documentation, assistant guidance, YAML config, and Makefile commands.
 
-Package/workspace findings must be promoted to a P0 bug when they create unsafe assistant guidance or unusable release-blocking workflows. Otherwise, document them as known limitations and keep #50 as the follow-up package-boundary slice.
+Package/workspace findings must be promoted to a P0 bug when they create unsafe assistant guidance or unusable release-blocking workflows. Otherwise, document them as known limitations, relationship candidates, graph-quality warnings, or follow-up issues.
