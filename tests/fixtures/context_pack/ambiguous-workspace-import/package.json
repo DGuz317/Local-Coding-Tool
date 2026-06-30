@@ -1,0 +1,5 @@
+{
+  "name": "ambiguous-workspace-root",
+  "private": true,
+  "workspaces": ["packages/*"]
+}

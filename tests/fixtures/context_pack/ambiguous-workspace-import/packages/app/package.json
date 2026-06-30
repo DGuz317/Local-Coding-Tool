@@ -1,0 +1,6 @@
+{
+  "name": "@demo/app",
+  "dependencies": {
+    "@demo/lib": "workspace:*"
+  }
+}

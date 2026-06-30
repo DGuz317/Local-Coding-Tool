@@ -1,0 +1,9 @@
+{
+  "name": "command-risk-fixture",
+  "scripts": {
+    "test": "vitest run",
+    "lint": "ruff check .",
+    "build": "npm run compile",
+    "deploy": "terraform apply"
+  }
+}
