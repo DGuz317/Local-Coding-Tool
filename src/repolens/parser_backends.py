@@ -4,13 +4,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 from repolens.config_index import ConfigIndex, extract_config_index
 from repolens.documentation_index import DocumentationIndex, extract_documentation_index
 from repolens.javascript_index import JavaScriptIndex, extract_javascript_index
 from repolens.python_index import PythonIndex, extract_python_index
 from repolens.scanner import ScannedFile
+
+
+@dataclass(frozen=True)
+class ParserBackendContract:
+    """Hash and identity contract shared by parser backend implementations."""
+
+    stable_fact_groups: tuple[str, ...]
+    experimental_fact_policy: str
+    default_backend: str
+
+
+PARSER_BACKEND_CONTRACT = ParserBackendContract(
+    stable_fact_groups=("python", "javascript", "config", "documentation", "parser_status_by_path"),
+    experimental_fact_policy=(
+        "experimental_facts are parser research output only; they are excluded from stable "
+        "Canonical Graph Hash and default Context Pack identity until a contract change "
+        "promotes them into stable_fact_groups."
+    ),
+    default_backend="stable",
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +42,17 @@ class ParserIndexes:
     config: ConfigIndex
     documentation: DocumentationIndex
     parser_status_by_path: dict[str, str]
+    experimental_facts: tuple[dict[str, Any], ...] = ()
+
+    def stable_contract_projection(self) -> "ParserIndexes":
+        """Return only facts covered by the stable graph/hash contract."""
+        return ParserIndexes(
+            python=self.python,
+            javascript=self.javascript,
+            config=self.config,
+            documentation=self.documentation,
+            parser_status_by_path=dict(self.parser_status_by_path),
+        )
 
 
 class ParserBackend(Protocol):
@@ -99,7 +130,7 @@ def extract_with_parser_backend(
     """Extract indexes, falling back only for explicit experimental backend failures."""
     backend = resolve_parser_backend(parser_backend)
     try:
-        return backend.extract(root, files)
+        return backend.extract(root, files).stable_contract_projection()
     except Exception:
         if backend.experimental:
             return StableParserBackend().extract(root, files)
