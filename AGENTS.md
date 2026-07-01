@@ -15,6 +15,20 @@ RepoLens must remain:
 - read-only through MCP;
 - useful for reducing assistant token usage and file exploration.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for this repo. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage role labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo using root `CONTEXT.md` and root `docs/adr/`. See `docs/agents/domain.md`.
+
 ## Current Release Focus: v0.4
 
 v0.4 theme:
