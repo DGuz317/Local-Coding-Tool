@@ -29,26 +29,27 @@ Use the default triage role labels: `needs-triage`, `needs-info`, `ready-for-age
 
 This is a single-context repo using root `CONTEXT.md` and root `docs/adr/`. See `docs/agents/domain.md`.
 
-## Current Release Focus: v0.4
+## Current Release Focus: v0.5
 
-v0.4 theme:
+v0.5 theme:
 
 ```text
-Make RepoLens trustworthy across package/workspace repositories.
+Code Intelligence Foundation: one cheap, safe, bounded Assistant Preflight workflow backed by parser, resolver, graph-store, evaluation, and artifact-safety contracts.
 ```
 
-The main implementation goal is to improve graph facts that Context Packs depend on, especially for JavaScript and TypeScript package/workspace repositories.
+The main implementation goal is to give assistants one deterministic, read-only preflight workflow before broad repository reads while defining the internal contracts needed for future parser, resolver, graph, semantic, and AI expansion.
 
-v0.4 work should improve:
+v0.5 work should improve:
 
-- explicit package and workspace evidence;
-- JavaScript and TypeScript workspace import resolution;
-- TypeScript `tsconfig.json` path and `baseUrl` alias resolution;
-- package ownership facts in graph output and Context Packs;
-- ambiguity handling through candidates and warnings;
-- docs/config task orientation without excerpts;
-- Candidate Verification Command classification;
-- expanded evaluation fixtures and expectation gates.
+- Parser Backend Contract and experimental hash boundaries;
+- Resolver Evidence Taxonomy and candidate outcome tracing;
+- narrow high-level Graph Store Seam while keeping SQLite as the artifact contract;
+- Assistant Preflight contract, CLI, and MCP tool;
+- deterministic focus hints and budget controls;
+- local savings metrics in `evaluate-context`;
+- artifact safety audit;
+- install and adoption polish after preflight stabilizes;
+- dogfood evaluation pack and final release readiness evidence.
 
 
 
@@ -211,22 +212,27 @@ Work one GitHub issue slice at a time.
 
 Do not start a blocked issue.
 
-Expected v0.4 issue flow:
+Expected v0.5 issue flow:
 
 ```text
-1 -> 2
-2 -> 3
-2 -> 4
-2 -> 7
-3,4 -> 5
-5,7 -> 6
-3,4,5,6,7 -> 8
-8 -> 9
+#138 -> #139
+#138 -> #140
+#138 -> #141
+#139, #140 -> #142
+#142 -> #143
+#143 -> #144
+#143 -> #145
+#143, #144 -> #146
+#143, #144 -> #147
+#143, #144, #145, #146 -> #148
+#139, #140, #141, #142, #143, #144, #145, #146, #147, #148 -> #149
 ```
 
-Issue 1 and Issue 9 are HITL slices.
+Issue #138 and Issue #149 are HITL slices.
 
-Issue 2 defines the core package evidence contract. Treat it as the foundation for all downstream v0.4 work. Downstream implementation should not proceed until the Issue 2 contract is merged and accepted.
+Issue #138 defines the v0.5 scope, dependency order, release gates, and non-goals. Downstream implementation should not proceed until #138 is merged and accepted.
+
+v0.4 release signoff remains a prerequisite for AFK v0.5 implementation work. Issue #128 records that signoff and must stay complete before #139 through #148 are treated as unblocked.
 
 Use `ready-for-agent` only when an issue is unblocked and has complete acceptance criteria.
 
@@ -268,24 +274,20 @@ Do not expose absolute paths unless they are internal-only.
 
 Add or update tests for every behavior change.
 
-v0.4 tests should cover:
+v0.5 tests should cover:
 
-- explicit package identity;
-- workspace membership;
-- package ownership;
-- workspace package imports;
-- package entrypoint evidence;
-- TypeScript path aliases;
-- `baseUrl` alias resolution;
-- unresolved alias warnings;
-- ambiguous package ownership;
-- relationship candidates;
-- graph-quality warnings;
-- docs/config orientation;
-- command risk buckets;
-- Context Pack no-disclosure behavior;
-- evaluation expectation gates;
-- v0.3 and v0.3.1 regression protection.
+- parser backend parity and experimental hash boundaries;
+- resolver evidence taxonomy and outcome labels;
+- relationship candidates and graph-quality warnings for ambiguous evidence;
+- high-level graph-store seam smoke behavior;
+- Assistant Preflight CLI and MCP response contracts;
+- deterministic focus hints and budget limits;
+- graph freshness, stale graph, no match, broad task, and ambiguity cases;
+- candidate commands discovered but not run;
+- local savings metrics and explanation of estimates;
+- artifact audit disclosure and safety failures;
+- Context Pack and preflight no-disclosure behavior;
+- v0.3, v0.3.1, and v0.4 regression protection.
 
 Prefer fixture repositories that are minimal and purpose-built.
 
@@ -295,7 +297,7 @@ Tests should assert observable behavior, not incidental implementation details.
 
 Run focused tests while developing.
 
-Before considering a v0.4 implementation slice complete, run the relevant subset of:
+Before considering a v0.5 implementation slice complete, run the relevant subset of:
 
 ```bash
 uv run pytest
@@ -321,14 +323,16 @@ If a command cannot be run in the current environment, report it clearly with th
 
 Update docs when behavior changes.
 
-For v0.4, docs should clearly explain:
+For v0.5, docs should clearly explain:
 
-- package/workspace evidence rules;
-- supported JS/TS workspace resolution cases;
-- supported TypeScript alias cases;
-- ambiguity and graph-quality warnings;
-- command risk buckets;
-- Context Pack disclosure boundaries;
+- assistants should call preflight before broad file reads;
+- CLI and MCP preflight usage;
+- deterministic focus hints and budget controls;
+- graph freshness and stale graph handling;
+- candidate commands as discovered but not run;
+- local savings metrics as estimates, not telemetry or universal productivity claims;
+- artifact audit behavior and disclosure boundaries;
+- Context Pack and preflight disclosure boundaries;
 - known limitations.
 
 Known limitations are acceptable. Silent overclaiming is not.

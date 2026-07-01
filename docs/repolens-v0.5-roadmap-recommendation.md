@@ -1,6 +1,6 @@
 # RepoLens v0.5 Roadmap Recommendation
 
-Status: draft planning document until v0.4 release signoff and v0.5 tracker acceptance.
+Status: accepted roadmap reference for v0.5 after v0.4 release signoff and Issue #138 tracker acceptance.
 
 ## Recommended Next Version Theme
 
