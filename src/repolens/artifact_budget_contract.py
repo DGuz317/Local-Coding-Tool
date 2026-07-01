@@ -40,6 +40,7 @@ GRAPH_INDEX_SECTION_BUDGETS = {
     "config_commands": 50,
     "config_entrypoints": 50,
     "config_parse_errors": 50,
+    "relationship_candidates": 100,
     "skipped_paths": 50,
 }
 

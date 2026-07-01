@@ -20,6 +20,10 @@ Graph Quality Warning is structured warning metadata for incomplete, ambiguous, 
 
 Resolution Strategy names how a fact was resolved, such as exact explicit package evidence, scoped alias resolution, or unresolved ambiguous import.
 
+Resolver Evidence Labels are stable public labels for why a resolver considered a fact: `javascript_import_specifier`, `package_manifest_dependency`, `package_manifest_identity`, `package_entrypoint_metadata`, and `workspace_declaration`.
+
+Resolver Outcome Classes are stable public classes for resolver results: `resolved_edge`, `relationship_candidate`, `unresolved`, and `unsupported`.
+
 Alias Resolution Scope is the directory subtree controlled by the applicable `tsconfig.json` or `jsconfig.json`. Aliases outside that scope must not create definitive edges.
 
 ## Supported JS/TS Workspace Package Import Resolution
@@ -35,6 +39,8 @@ RepoLens resolves a package-style JavaScript or TypeScript import to a local wor
 When those checks pass, RepoLens records the import as `local_resolved` with `resolved_workspace_package` and emits an `IMPORTS` edge to the scanner-approved module path using `workspace_package_import` evidence.
 
 RepoLens does not resolve missing entrypoints, complex entrypoint maps, ambiguous package identities, ambiguous entrypoint targets, undeclared dependencies, or package names that only resemble directory names.
+
+When multiple explicit local package identities match a workspace package import, RepoLens records `relationship_candidates` with `relationship_candidate` outcome class and low confidence, emits a graph-quality warning, and does not emit a definitive `IMPORTS` edge for that import.
 
 ## Supported TypeScript Alias Resolution
 

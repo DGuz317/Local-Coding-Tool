@@ -53,6 +53,11 @@ from repolens.python_index import (
     python_package_node_id,
 )
 from repolens.redaction import redact_command, redact_payload
+from repolens.resolver_contract import (
+    RESOLVER_CONFIDENCE_LABELS,
+    RESOLVER_EVIDENCE_LABELS,
+    RESOLVER_OUTCOME_CLASSES,
+)
 from repolens.scanner import (
     ARTIFACT_DIR_NAME,
     DEFAULT_MAX_FILE_SIZE_BYTES,
@@ -63,7 +68,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 13
+GRAPH_SCHEMA_VERSION = 14
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -112,7 +117,7 @@ AMBIGUOUS_WORKSPACE_MEMBERSHIP_WARNING = "graph_quality:ambiguous_workspace_memb
 AMBIGUOUS_WORKSPACE_PACKAGE_IMPORT_WARNING = "graph_quality:ambiguous_workspace_package_import"
 MISSING_WORKSPACE_PACKAGE_ENTRYPOINT_WARNING = "graph_quality:missing_workspace_package_entrypoint"
 MAX_EDGE_EVIDENCE_ITEMS = 20
-CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+CONFIDENCE_RANK = {label: rank for rank, label in enumerate(RESOLVER_CONFIDENCE_LABELS)}
 
 
 class GraphStoreError(RuntimeError):
@@ -290,6 +295,19 @@ class _EdgeFact:
     confidence: str
     resolution_strategy: str
     evidence: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _RelationshipCandidateFact:
+    source_id: str
+    target_id: str
+    kind: str
+    outcome_class: str
+    confidence: str
+    resolution_strategy: str
+    evidence_label: str
+    evidence: list[dict[str, Any]]
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -680,6 +698,19 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             kind TEXT NOT NULL,
             confidence TEXT NOT NULL,
             resolution_strategy TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE relationship_candidates (
+            id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            target_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            outcome_class TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            resolution_strategy TEXT NOT NULL,
+            evidence_label TEXT NOT NULL,
             evidence_json TEXT NOT NULL,
             metadata_json TEXT NOT NULL
         ) WITHOUT ROWID;
@@ -2773,6 +2804,7 @@ def _insert_edges(
     documentation_index: DocumentationIndex,
 ) -> None:
     edge_rows: list[_EdgeFact] = []
+    candidate_rows: list[_RelationshipCandidateFact] = []
 
     def add_edge(
         source_id: str,
@@ -3121,6 +3153,14 @@ def _insert_edges(
         javascript_index,
         config_index,
     )
+    workspace_package_candidates = _workspace_package_import_candidates(
+        javascript_index,
+        config_index,
+    )
+    ambiguous_workspace_import_ids = {
+        candidate.metadata["import_id"] for candidate in workspace_package_candidates
+    }
+    candidate_rows.extend(workspace_package_candidates)
     connection.executemany(
         """
         UPDATE javascript_imports
@@ -3207,6 +3247,8 @@ def _insert_edges(
             )
             continue
         if javascript_import.root_name is None:
+            continue
+        if javascript_import.id in ambiguous_workspace_import_ids:
             continue
         package_id = javascript_package_node_id(
             javascript_import.root_name, javascript_import.classification
@@ -3390,6 +3432,41 @@ def _insert_edges(
                 _metadata_json(edge.metadata),
             )
             for edge in normalized_edges
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO relationship_candidates(
+            id,
+            source_id,
+            target_id,
+            kind,
+            outcome_class,
+            confidence,
+            resolution_strategy,
+            evidence_label,
+            evidence_json,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                _relationship_candidate_id(candidate),
+                candidate.source_id,
+                candidate.target_id,
+                candidate.kind,
+                candidate.outcome_class,
+                candidate.confidence,
+                candidate.resolution_strategy,
+                candidate.evidence_label,
+                _json_value(candidate.evidence),
+                _metadata_json(candidate.metadata),
+            )
+            for candidate in sorted(
+                candidate_rows,
+                key=lambda item: (item.source_id, item.kind, item.target_id),
+            )
         ),
     )
 
@@ -3767,6 +3844,93 @@ def _workspace_package_import_resolutions(
     return resolutions
 
 
+def _workspace_package_import_candidates(
+    javascript_index: JavaScriptIndex,
+    config_index: ConfigIndex,
+) -> tuple[_RelationshipCandidateFact, ...]:
+    package_roots = tuple(
+        root for root in config_index.package_roots if root.ecosystem == "javascript"
+    )
+    roots_by_name: dict[str, list[Any]] = {}
+    for package_root in package_roots:
+        roots_by_name.setdefault(package_root.name, []).append(package_root)
+
+    workspaces = tuple(
+        workspace for workspace in config_index.workspaces if workspace.ecosystem == "javascript"
+    )
+    dependencies_by_source: dict[str, set[str]] = {}
+    for package in config_index.packages:
+        if package.ecosystem != "javascript" or package.classification != "external":
+            continue
+        dependencies_by_source.setdefault(package.source_path, set()).add(package.name)
+
+    candidates: list[_RelationshipCandidateFact] = []
+    for import_fact in javascript_index.imports:
+        if import_fact.resolved_path is not None or import_fact.root_name is None:
+            continue
+        importer_root = _nearest_javascript_package_root(import_fact.path, package_roots)
+        if importer_root is None:
+            continue
+        if import_fact.root_name not in dependencies_by_source.get(
+            importer_root.source_path, set()
+        ):
+            continue
+        importer_workspace = _workspace_membership_for_package_root(importer_root.path, workspaces)
+        if importer_workspace is None:
+            continue
+
+        target_roots = roots_by_name.get(import_fact.root_name, [])
+        if len(target_roots) <= 1:
+            continue
+        for target_root in sorted(target_roots, key=lambda root: (root.path, root.source_path)):
+            target_workspace = _workspace_membership_for_package_root(target_root.path, workspaces)
+            candidates.append(
+                _RelationshipCandidateFact(
+                    source_id=import_fact.module_node_id,
+                    target_id=target_root.id,
+                    kind="IMPORTS",
+                    outcome_class="relationship_candidate",
+                    confidence="low",
+                    resolution_strategy="workspace_package_import",
+                    evidence_label="package_manifest_identity",
+                    evidence=[
+                        {
+                            "evidence_label": "javascript_import_specifier",
+                            "import_id": import_fact.id,
+                            "line": import_fact.line,
+                            "path": import_fact.path,
+                            "specifier": import_fact.specifier,
+                        },
+                        {
+                            "evidence_label": "package_manifest_dependency",
+                            "package_name": import_fact.root_name,
+                            "source_path": importer_root.source_path,
+                        },
+                        {
+                            "evidence_label": "package_manifest_identity",
+                            "package_name": target_root.name,
+                            "source_path": target_root.source_path,
+                        },
+                        {
+                            "evidence_label": "workspace_declaration",
+                            "source_path": importer_workspace.source_path,
+                            "workspace_path": importer_workspace.path,
+                        },
+                    ],
+                    metadata={
+                        "import_id": import_fact.id,
+                        "importer_package_root": importer_root.path,
+                        "package_name": import_fact.root_name,
+                        "target_package_root": target_root.path,
+                        "target_workspace_path": target_workspace.path
+                        if target_workspace is not None
+                        else None,
+                    },
+                )
+            )
+    return tuple(candidates)
+
+
 def _nearest_javascript_package_root(path: str, package_roots: tuple[Any, ...]) -> Any | None:
     candidates = [root for root in package_roots if _path_is_under(path, root.path)]
     if not candidates:
@@ -3826,6 +3990,20 @@ def _join_posix(*parts: str) -> str:
         if normalized:
             cleaned.append(normalized)
     return "/".join(cleaned) if cleaned else "."
+
+
+def _relationship_candidate_id(candidate: _RelationshipCandidateFact) -> str:
+    payload = "|".join(
+        (
+            candidate.source_id,
+            candidate.target_id,
+            candidate.kind,
+            candidate.outcome_class,
+            candidate.resolution_strategy,
+            candidate.evidence_label,
+        )
+    )
+    return f"candidate:{candidate.kind}:{_sha256_string(payload)[:12]}"
 
 
 def _dedupe_json_like(values: list[Any]) -> list[Any]:
@@ -3895,6 +4073,25 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                     evidence_json,
                     metadata_json
                 FROM edges
+                ORDER BY source_id, kind, target_id, id
+                """
+            )
+        )
+        relationship_candidates = _rows(
+            connection.execute(
+                """
+                SELECT
+                    id,
+                    source_id,
+                    target_id,
+                    kind,
+                    outcome_class,
+                    confidence,
+                    resolution_strategy,
+                    evidence_label,
+                    evidence_json,
+                    metadata_json
+                FROM relationship_candidates
                 ORDER BY source_id, kind, target_id, id
                 """
             )
@@ -4310,6 +4507,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "python_parse_errors": len(python_parse_errors),
         "python_symbols": len(python_symbols),
         "python_tagged_comments": len(python_tagged_comments),
+        "relationship_candidates": len(relationship_candidates),
         "markdown_code_fences": len(markdown_code_fences),
         "markdown_headings": len(markdown_headings),
         "markdown_links": len(markdown_links),
@@ -4344,6 +4542,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "tagged_comments": documentation_tagged_comments,
         },
         "edges": _decode_edge_rows(edges),
+        "relationship_candidates": _decode_relationship_candidate_rows(relationship_candidates),
         "files": files,
         "javascript": {
             "commonjs_assignments": javascript_commonjs_assignments,
@@ -4390,6 +4589,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "limits": snapshot["limits"],
         "python": snapshot["python"],
         "repository": snapshot["repository"],
+        "relationship_candidates": snapshot["relationship_candidates"],
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
         "skipped_paths": snapshot["skipped_paths"],
@@ -4421,6 +4621,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "javascript": _javascript_lite_payload(snapshot),
         "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
+        "relationship_candidates": snapshot["relationship_candidates"],
         "run": _run_payload(snapshot),
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
@@ -5853,6 +6054,33 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
     )
     _append_graph_index_section(
         lines,
+        section_key="relationship_candidates",
+        title="Relationship Candidates",
+        item_label="relationship candidates",
+        rows=snapshot["relationship_candidates"],
+        headers=(
+            "Candidate ID",
+            "Source",
+            "Target",
+            "Kind",
+            "Outcome",
+            "Confidence",
+            "Strategy",
+            "Evidence",
+        ),
+        row=lambda candidate: (
+            f"`{_md_cell(candidate['id'])}`",
+            f"`{_md_cell(candidate['source_id'])}`",
+            f"`{_md_cell(candidate['target_id'])}`",
+            str(candidate["kind"]),
+            str(candidate["outcome_class"]),
+            str(candidate["confidence"]),
+            str(candidate["resolution_strategy"]),
+            str(candidate["evidence_label"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
         section_key="skipped_paths",
         title="Skipped Paths",
         item_label="skipped paths",
@@ -6301,6 +6529,10 @@ def _validate_graph_store(connection: sqlite3.Connection) -> dict[str, list[str]
     if invalid_edge_contracts:
         hard_failures.append("invalid_edge_contracts")
 
+    invalid_candidate_contracts = _invalid_relationship_candidate_contracts(connection)
+    if invalid_candidate_contracts:
+        hard_failures.append("invalid_relationship_candidate_contracts")
+
     return {"hard_failures": hard_failures, "quality_warnings": _quality_warnings(connection)}
 
 
@@ -6358,6 +6590,34 @@ def _canonical_graph_hash(connection: sqlite3.Connection) -> str:
             """
             SELECT source_id, target_id, kind, confidence, resolution_strategy, metadata_json
             FROM edges
+            ORDER BY source_id, kind, target_id
+            """
+        )
+    )
+    facts.extend(
+        {
+            "candidate_kind": row["kind"],
+            "confidence": row["confidence"],
+            "evidence_label": row["evidence_label"],
+            "kind": "relationship_candidate",
+            "metadata": _stable_graph_value(json.loads(row["metadata_json"])),
+            "outcome_class": row["outcome_class"],
+            "resolution_strategy": row["resolution_strategy"],
+            "source_id": row["source_id"],
+            "target_id": row["target_id"],
+        }
+        for row in connection.execute(
+            """
+            SELECT
+                source_id,
+                target_id,
+                kind,
+                outcome_class,
+                confidence,
+                resolution_strategy,
+                evidence_label,
+                metadata_json
+            FROM relationship_candidates
             ORDER BY source_id, kind, target_id
             """
         )
@@ -6557,6 +6817,37 @@ def _invalid_edge_contracts(connection: sqlite3.Connection) -> list[str]:
             invalid.append(str(row["id"]))
             continue
         if not str(row["resolution_strategy"]).strip():
+            invalid.append(str(row["id"]))
+            continue
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except json.JSONDecodeError:
+            invalid.append(str(row["id"]))
+            continue
+        if not isinstance(evidence, list):
+            invalid.append(str(row["id"]))
+    return invalid
+
+
+def _invalid_relationship_candidate_contracts(connection: sqlite3.Connection) -> list[str]:
+    invalid: list[str] = []
+    for row in connection.execute(
+        """
+        SELECT id, outcome_class, confidence, resolution_strategy, evidence_label, evidence_json
+        FROM relationship_candidates
+        ORDER BY id
+        """
+    ):
+        if str(row["outcome_class"]) not in RESOLVER_OUTCOME_CLASSES:
+            invalid.append(str(row["id"]))
+            continue
+        if str(row["confidence"]) not in CONFIDENCE_RANK:
+            invalid.append(str(row["id"]))
+            continue
+        if not str(row["resolution_strategy"]).strip():
+            invalid.append(str(row["id"]))
+            continue
+        if str(row["evidence_label"]) not in RESOLVER_EVIDENCE_LABELS:
             invalid.append(str(row["id"]))
             continue
         try:
@@ -6973,6 +7264,18 @@ def _decode_metadata_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _decode_edge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["evidence"] = json.loads(decoded.pop("evidence_json"))
+        decoded["metadata"] = json.loads(decoded.pop("metadata_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_relationship_candidate_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     decoded_rows = []
     for row in rows:
         decoded = dict(row)

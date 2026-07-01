@@ -50,7 +50,7 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "13"
+    assert metadata["schema_version"] == "14"
     assert len(metadata["canonical_graph_hash"]) == 64
     assert {"confidence", "resolution_strategy", "evidence_json"} <= edge_columns
     assert len(import_edges) == 1
@@ -150,6 +150,113 @@ def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_pat
         and edge["resolution_strategy"] == "local_import"
         for edge in graph_json["edges"]
     )
+
+
+def test_ambiguous_workspace_package_imports_create_candidates_not_edges(tmp_path):
+    (tmp_path / "packages" / "app" / "src").mkdir(parents=True)
+    (tmp_path / "packages" / "shared-a" / "src").mkdir(parents=True)
+    (tmp_path / "packages" / "shared-b" / "src").mkdir(parents=True)
+    (tmp_path / "package.json").write_text(
+        '{"name":"repo","workspaces":["packages/*"]}\n', encoding="utf-8"
+    )
+    (tmp_path / "packages" / "app" / "package.json").write_text(
+        '{"name":"app","dependencies":{"@acme/shared":"workspace:*"}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "shared-a" / "package.json").write_text(
+        '{"name":"@acme/shared","main":"src/index.ts"}\n', encoding="utf-8"
+    )
+    (tmp_path / "packages" / "shared-b" / "package.json").write_text(
+        '{"name":"@acme/shared","main":"src/index.ts"}\n', encoding="utf-8"
+    )
+    (tmp_path / "packages" / "app" / "src" / "index.ts").write_text(
+        "import { shared } from '@acme/shared';\n", encoding="utf-8"
+    )
+    (tmp_path / "packages" / "shared-a" / "src" / "index.ts").write_text(
+        "export const shared = 'a';\n", encoding="utf-8"
+    )
+    (tmp_path / "packages" / "shared-b" / "src" / "index.ts").write_text(
+        "export const shared = 'b';\n", encoding="utf-8"
+    )
+
+    build_graph_store(tmp_path, scan_repository(tmp_path))
+    export_graph_artifacts(tmp_path)
+
+    source_id = "javascript_module:packages/app/src/index.ts"
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        connection.row_factory = sqlite3.Row
+        import_edges = list(
+            connection.execute(
+                """
+                SELECT target_id
+                FROM edges
+                WHERE source_id = ?
+                  AND kind = 'IMPORTS'
+                ORDER BY target_id
+                """,
+                (source_id,),
+            )
+        )
+        candidates = list(
+            connection.execute(
+                """
+                SELECT
+                    target_id,
+                    outcome_class,
+                    confidence,
+                    resolution_strategy,
+                    evidence_label,
+                    evidence_json,
+                    metadata_json
+                FROM relationship_candidates
+                WHERE source_id = ?
+                  AND kind = 'IMPORTS'
+                ORDER BY target_id
+                """,
+                (source_id,),
+            )
+        )
+        warnings = json.loads(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key = 'graph_quality_warnings'"
+            ).fetchone()[0]
+        )
+
+    assert import_edges == []
+    assert [candidate["outcome_class"] for candidate in candidates] == [
+        "relationship_candidate",
+        "relationship_candidate",
+    ]
+    assert {candidate["target_id"] for candidate in candidates} == {
+        "config_package_root:javascript:@acme/shared:packages/shared-a",
+        "config_package_root:javascript:@acme/shared:packages/shared-b",
+    }
+    assert {candidate["confidence"] for candidate in candidates} == {"low"}
+    assert {candidate["resolution_strategy"] for candidate in candidates} == {
+        "workspace_package_import"
+    }
+    assert {candidate["evidence_label"] for candidate in candidates} == {
+        "package_manifest_identity"
+    }
+    assert all(
+        {item["evidence_label"] for item in json.loads(candidate["evidence_json"])}
+        >= {
+            "javascript_import_specifier",
+            "package_manifest_dependency",
+            "package_manifest_identity",
+            "workspace_declaration",
+        }
+        for candidate in candidates
+    )
+    assert all(
+        json.loads(candidate["metadata_json"])["package_name"] == "@acme/shared"
+        for candidate in candidates
+    )
+    assert "graph_quality:ambiguous_workspace_package_import:count=1" in warnings
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    assert graph_json["counts"]["relationship_candidates"] == 2
+    assert len(graph_json["relationship_candidates"]) == 2
 
 
 def test_javascript_relative_import_edges_store_strategy_and_bounded_evidence(tmp_path):
