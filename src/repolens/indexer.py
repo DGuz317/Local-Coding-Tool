@@ -9,19 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from repolens.graph import (
-    FULL_GRAPH_INDEX_PATH,
-    GRAPH_EXPORT_PATHS,
-    GRAPH_STORE_PATH,
     FileChange,
     GraphArtifactsStatus,
     GraphExportError,
     GraphStoreError,
     SelectiveUpdatePlan,
-    export_full_graph_index,
-    inspect_graph_artifacts,
     plan_selective_update,
-    rebuild_graph_artifacts,
-    replace_graph_artifacts_selectively,
+)
+from repolens.graph_store import (
+    FULL_GRAPH_INDEX_PATH,
+    GRAPH_EXPORT_PATHS,
+    GRAPH_STORE_PATH,
+    SqliteGraphStore,
 )
 from repolens.parser_backends import ParserBackendOption
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanError, ScanResult, scan_repository
@@ -107,14 +106,13 @@ def index_repository(
     except ScanError as exc:
         raise RepoLensIndexError(str(exc)) from exc
     _write_scan_artifact(root, scan)
+    graph_store = SqliteGraphStore(root)
     try:
-        rebuild_graph_artifacts(
-            root, scan, file_changes=file_changes, parser_backend=parser_backend
-        )
+        graph_store.rebuild(scan, file_changes=file_changes, parser_backend=parser_backend)
         graph_exports = GRAPH_EXPORT_PATHS
         warnings: tuple[str, ...] = ()
         if full_graph_index:
-            full_index_path = export_full_graph_index(root)
+            full_index_path = graph_store.export_full_index()
             graph_exports = (*graph_exports, full_index_path)
             warnings = (
                 f"Full graph index export may be large; RepoLens wrote {FULL_GRAPH_INDEX_PATH}.",
@@ -140,7 +138,8 @@ def update_repository(
     if ARTIFACT_DIR_NAME in root.parts:
         raise RepoLensIndexError("analysis_root_is_repolens_artifact_dir")
 
-    previous_status = inspect_graph_artifacts(root)
+    graph_store = SqliteGraphStore(root)
+    previous_status = graph_store.inspect()
     initialized = previous_status.reason == "missing_graph_artifacts"
     _bootstrap_artifact_dir(root)
     try:
@@ -153,8 +152,7 @@ def update_repository(
     changes = () if initialized else previous_status.file_changes
     try:
         if plan.safe:
-            replace_graph_artifacts_selectively(
-                root,
+            graph_store.replace_selectively(
                 scan,
                 plan,
                 file_changes=changes,
@@ -162,7 +160,7 @@ def update_repository(
             )
             mode = "selective"
         else:
-            rebuild_graph_artifacts(root, scan, file_changes=changes, parser_backend=parser_backend)
+            graph_store.rebuild(scan, file_changes=changes, parser_backend=parser_backend)
             mode = "initialized" if initialized else "full_rebuild"
     except (GraphStoreError, GraphExportError) as exc:
         raise RepoLensIndexError(str(exc)) from exc

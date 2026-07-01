@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from repolens.graph import GraphExportError, export_graph_artifacts
+from repolens.graph import GraphExportError
+from repolens.graph_store import SqliteGraphStore
 from repolens.scanner import ARTIFACT_DIR_NAME
 
 GRAPH_REPORT_PATH = f"{ARTIFACT_DIR_NAME}/graph-report.md"
@@ -36,7 +37,7 @@ def read_graph_report(repo_path: Path | str, *, regenerate: bool = False) -> Gra
 
     if regenerate:
         try:
-            export_graph_artifacts(root)
+            SqliteGraphStore(root).export_artifacts()
         except GraphExportError as exc:
             raise RepoLensReportError(str(exc) or "graph_report_regeneration_failed") from exc
 

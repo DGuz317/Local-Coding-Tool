@@ -12,11 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from repolens.graph import (
-    GRAPH_SCHEMA_VERSION,
-    GRAPH_STORE_PATH,
-    REQUIRED_GRAPH_ARTIFACTS,
-)
+from repolens.graph_store import GraphStore, SqliteGraphStore
 from repolens.scanner import ARTIFACT_DIR_NAME
 
 QUERY_DEFAULT_LIMIT = 20
@@ -209,8 +205,9 @@ class _ResolvedNode:
 class GraphQueryService:
     """Read-only graph metadata queries backed by generated graph storage."""
 
-    def __init__(self, repo_path: Path | str):
+    def __init__(self, repo_path: Path | str, *, graph_store: GraphStore | None = None):
         self.root = _resolve_root(repo_path)
+        self.graph_store = graph_store or SqliteGraphStore(self.root)
 
     def repo_summary(
         self,
@@ -270,7 +267,7 @@ class GraphQueryService:
             "major_modules": all_modules[: limits["max_modules"]],
             "repository": repository,
             "run": run,
-            "schema": {"version": GRAPH_SCHEMA_VERSION},
+            "schema": {"version": self.graph_store.supported_schema_version},
             "truncated": {
                 "available_commands": len(all_commands) > limits["max_commands"],
                 "entrypoints": len(all_entrypoints) > limits["max_entrypoints"],
@@ -859,15 +856,10 @@ class GraphQueryService:
         )
 
     def _connect(self) -> sqlite3.Connection:
-        graph_store = self.root / GRAPH_STORE_PATH
-        connection = sqlite3.connect(f"file:{graph_store}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-        return connection
+        return self.graph_store.connect_readonly()
 
     def _status_snapshot(self, *, max_changed_files: int = QUERY_DEFAULT_LIMIT) -> _StatusSnapshot:
-        missing_artifacts = tuple(
-            artifact for artifact in REQUIRED_GRAPH_ARTIFACTS if not (self.root / artifact).exists()
-        )
+        missing_artifacts = self.graph_store.missing_artifacts()
         recommended_action = self._recommended_action()
         base_data: dict[str, Any] = {
             "artifact_dir": ARTIFACT_DIR_NAME,
@@ -877,7 +869,7 @@ class GraphQueryService:
             "missing_artifacts": list(missing_artifacts),
             "recommended_action": recommended_action,
             "repo_path": str(self.root),
-            "supported_schema_version": GRAPH_SCHEMA_VERSION,
+            "supported_schema_version": self.graph_store.supported_schema_version,
         }
         if missing_artifacts:
             data = {
@@ -895,8 +887,7 @@ class GraphQueryService:
                 available=False,
             )
 
-        graph_store = self.root / GRAPH_STORE_PATH
-        if graph_store.is_symlink():
+        if self.graph_store.is_graph_store_symlink():
             data = {
                 **base_data,
                 "changed_files": [],
@@ -919,12 +910,12 @@ class GraphQueryService:
                 schema_version = metadata.get("schema_version")
                 evidence = (
                     {
-                        "artifact": GRAPH_STORE_PATH,
+                        "artifact": self.graph_store.graph_store_path,
                         "schema_version": schema_version,
                         "source": "sqlite_metadata",
                     },
                 )
-                if schema_version != str(GRAPH_SCHEMA_VERSION):
+                if schema_version != str(self.graph_store.supported_schema_version):
                     data = {
                         **base_data,
                         "changed_files": [],
@@ -1003,7 +994,7 @@ class GraphQueryService:
             "change_counts": change_counts,
             "changed_files": shown_changes,
             "changed_files_truncated": len(changed_files) > max_changed_files,
-            "detected_schema_version": str(GRAPH_SCHEMA_VERSION),
+            "detected_schema_version": str(self.graph_store.supported_schema_version),
             "fresh": fresh,
             "indexed_at_utc": run.get("indexed_at_utc"),
             "missing_artifacts": [],

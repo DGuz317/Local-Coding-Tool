@@ -12,7 +12,10 @@ from repolens.graph import (
     GraphStoreError,
     build_graph_store,
     export_graph_artifacts,
+    plan_selective_update,
 )
+from repolens.graph_store import GRAPH_STORE_PATH, SqliteGraphStore
+from repolens.query import GraphQueryService
 from repolens.scanner import scan_repository
 
 
@@ -395,3 +398,28 @@ def test_graph_export_leaves_existing_artifact_when_replace_fails(tmp_path, monk
         export_graph_artifacts(tmp_path)
 
     assert graph_export.read_text(encoding="utf-8") == original_export
+
+
+def test_sqlite_graph_store_replaces_artifacts_through_seam(tmp_path):
+    (tmp_path / "app.py").write_text("def first():\n    return 1\n", encoding="utf-8")
+    graph_store = SqliteGraphStore(tmp_path)
+
+    graph_store.rebuild(scan_repository(tmp_path))
+    graph_store.export_artifacts()
+    original_store = (tmp_path / GRAPH_STORE_PATH).read_bytes()
+
+    (tmp_path / "app.py").write_text("def second():\n    return 2\n", encoding="utf-8")
+    previous_status = graph_store.inspect()
+    scan = scan_repository(tmp_path)
+    plan = plan_selective_update(previous_status, scan)
+
+    exports = graph_store.replace_selectively(
+        scan,
+        plan,
+        file_changes=previous_status.file_changes,
+    )
+
+    assert graph_store.graph_store_path == ".repolens/graph.sqlite"
+    assert exports == graph_store.graph_export_paths
+    assert (tmp_path / GRAPH_STORE_PATH).read_bytes() != original_store
+    assert GraphQueryService(tmp_path, graph_store=graph_store).search_graph("second")["ok"] is True
