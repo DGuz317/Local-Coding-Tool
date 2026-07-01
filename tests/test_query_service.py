@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from textwrap import dedent
 
+from repolens.graph_store import SqliteGraphStore
 from repolens.indexer import index_repository
 from repolens.query import GraphQueryService
 
@@ -81,6 +82,19 @@ def test_query_service_summarizes_status_report_nodes_neighbors_and_entrypoints(
     assert path["data"]["path"][0]["node"]["path"] == "README.md"
     assert path["data"]["path"][-1]["node"]["label"] == "PublicWidget"
     assert path["data"]["edge_count"] >= 1
+
+
+def test_query_service_reads_through_injected_graph_store(tmp_path):
+    _write_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    graph_store = _TrackingGraphStore(tmp_path)
+    service = GraphQueryService(tmp_path, graph_store=graph_store)
+
+    summary = service.repo_summary()
+
+    assert summary["ok"] is True
+    assert summary["evidence"][0]["artifact"] == ".repolens/graph.sqlite"
+    assert graph_store.readonly_connections == 2
 
 
 def test_search_graph_ranks_exact_paths_names_tokens_and_public_symbols(tmp_path):
@@ -558,3 +572,13 @@ def _write_impact_fixture_repo(root) -> None:
 def _write_text(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+class _TrackingGraphStore(SqliteGraphStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.readonly_connections = 0
+
+    def connect_readonly(self):
+        self.readonly_connections += 1
+        return super().connect_readonly()
