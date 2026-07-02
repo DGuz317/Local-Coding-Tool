@@ -19,8 +19,8 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert envelope["ok"] is True
     data = envelope["data"]
     assert data["manifest_version"] == "0.4.eval.v1"
-    assert data["summary"]["total_cases"] == 19
-    assert data["summary"]["passed_cases"] == 19
+    assert data["summary"]["total_cases"] == 23
+    assert data["summary"]["passed_cases"] == 23
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
     assert data["release_gate"]["required_cases"] == [
@@ -28,7 +28,29 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     ]
     assert data["corpora"] == {
         "expanded": {"failed_cases": 0, "passed_cases": 1, "total_cases": 1},
-        "release_blocking": {"failed_cases": 0, "passed_cases": 18, "total_cases": 18},
+        "release_blocking": {"failed_cases": 0, "passed_cases": 22, "total_cases": 22},
+    }
+    assert data["preflight_summary"] == {
+        "evaluated_cases": [
+            "v0_5_dogfood_js_ts_workspace_preflight_audit",
+            "v0_5_dogfood_python_package_preflight",
+            "v0_5_dogfood_docs_heavy_preflight",
+            "v0_5_dogfood_config_heavy_artifact_audit",
+        ],
+        "failed_cases": 0,
+        "passed_cases": 4,
+        "purpose": "assistant_preflight_before_broad_repository_reads",
+        "total_cases": 4,
+    }
+    assert data["artifact_audit_summary"] == {
+        "evaluated_cases": [
+            "v0_5_dogfood_js_ts_workspace_preflight_audit",
+            "v0_5_dogfood_config_heavy_artifact_audit",
+        ],
+        "failed_cases": 0,
+        "passed_cases": 2,
+        "purpose": "artifact_safety_disclosure_gate",
+        "total_cases": 2,
     }
     assert data["structural_summary_caching"] == {
         "decision": "derived_on_demand",
@@ -41,7 +63,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     }
     assert data["local_savings_summary"]["baseline"] == "lexical_path_search"
     assert data["local_savings_summary"]["estimate_kind"] == ("local_fixture_metadata_estimate")
-    assert data["local_savings_summary"]["case_count"] == 19
+    assert data["local_savings_summary"]["case_count"] == 23
     assert data["local_savings_summary"]["not_run_command_count"] >= 1
     assert data["local_savings_summary"]["stale_graph_risk_case_count"] == 1
     assert "not telemetry" in data["local_savings_summary"]["explanation"]
@@ -95,6 +117,24 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
         check["name"] == "candidate_command_risk_buckets_include:risky_or_external"
         for check in command_case["checks"]
     )
+
+    js_dogfood_case = case_by_id["v0_5_dogfood_js_ts_workspace_preflight_audit"]
+    assert js_dogfood_case["preflight_evidence"] == {
+        "candidate_commands_not_run": True,
+        "first_read_count": 1,
+        "freshness_status": "available",
+        "ok": True,
+        "version": "0.5.preflight.v1",
+    }
+    assert js_dogfood_case["artifact_audit_evidence"]["passed"] is True
+
+    python_dogfood_case = case_by_id["v0_5_dogfood_python_package_preflight"]
+    assert python_dogfood_case["passed"] is True
+    assert python_dogfood_case["metrics"]["assistant_preflight"]["ok"] is True
+
+    config_dogfood_case = case_by_id["v0_5_dogfood_config_heavy_artifact_audit"]
+    assert config_dogfood_case["passed"] is True
+    assert config_dogfood_case["metrics"]["artifact_audit"]["violation_count"] == 0
 
 
 def test_evaluate_context_cli_emits_json_for_ci() -> None:
