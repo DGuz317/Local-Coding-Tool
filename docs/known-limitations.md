@@ -1,6 +1,6 @@
-# RepoLens MCP v0.4 Known Limitations
+# RepoLens MCP v0.5 Known Limitations
 
-These limitations are acceptable for v0.4 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading expansion, corrupt artifacts, stale graph facts, or unusable workflows.
+These limitations are acceptable for v0.5 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight or expansion, corrupt artifacts, stale graph facts, or unusable workflows.
 
 ## Resolution Limits
 
@@ -22,6 +22,9 @@ These limitations are acceptable for v0.4 when they remain explicit, safe, and n
 
 ## Context Pack Limits
 
+- Assistant Preflight is a bounded orientation workflow before broad file reads, not a source mirror, semantic planner, or command runner.
+- Focus hints and budget controls deterministically narrow ranking and output size, but they do not guarantee that every relevant file or test appears in the first response.
+- Stale or missing graph handling is explicit: RepoLens reports freshness and warnings, while MCP tools remain read-only and do not rebuild artifacts.
 - Context Packs are orientation-only. They intentionally omit source snippets, code bodies, function or method signatures, paragraph excerpts, raw comment text, and raw Agent Guidance instruction text.
 - Context Pack IDs and item handles are deterministic references, not persisted assistant sessions or serialized source payloads.
 - `expand_context` can expand only items returned in the same Context Pack and remains capped at bounded depth and item limits.
@@ -52,10 +55,12 @@ These limitations are acceptable for v0.4 when they remain explicit, safe, and n
 - No runtime package registry lookups during normal indexing or MCP serving.
 - No full framework emulation or runtime package-manager, bundler, or compiler execution during Context Pack generation.
 - No persisted Context Pack sessions or server-side assistant memory.
-- No PyPI, Docker registry, or hosted publishing automation in v0.4.
+- No PyPI, Docker registry, or hosted publishing automation in v0.5.
 
 ## Dogfooding And Evaluation Outcomes Reflected Here
 
 The v0.2 dogfooding report in `docs/dogfood/2026-06-22-v0.2-dogfood.md` identified workspace package resolution gaps, conservative Makefile command classification, and shallow docs/config impact context. These are documented limitations unless follow-up work promotes them to release-blocking bugs.
 
 The v0.4 Context Pack Evaluation suite records release-blocking expectation checks in `tests/fixtures/context_pack/evaluation_manifest.json`. Keep this document aligned when evaluation finds repeated failures to include known relevant files/tests, source disclosure risk, stale-pack misuse, misleading lower-priority wording, package/workspace overclaiming, missing Relationship Candidates, missing Graph Quality Warnings, docs/config orientation gaps, or command risk bucket regressions.
+
+The v0.5 dogfood evaluation pack in `docs/dogfood/2026-07-02-v0.5-dogfood-evaluation-pack.md` adds Assistant Preflight, local savings metrics, and artifact audit scenarios. Keep this document aligned when dogfooding finds repeated stale graph confusion, over-broad focus hints, misleading budget metadata, unsafe artifact output, or candidate commands that could be mistaken as run or recommended for automatic execution.

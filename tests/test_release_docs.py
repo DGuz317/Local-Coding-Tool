@@ -268,3 +268,42 @@ def test_v0_5_install_and_adoption_docs_cover_preflight_setup() -> None:
         assert required in combined
 
     assert "assistant_preflight" in opencode_example
+
+
+def test_v0_5_release_readiness_records_final_evidence() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    dogfood = (ROOT / "docs" / "dogfood" / "2026-07-02-v0.5-dogfood-evaluation-pack.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "Latest local evidence for issue #149",
+        "uv run repolens audit-artifacts . --json",
+        "source snippet leakage",
+        "absolute host paths",
+        "raw secrets",
+        "Local savings metrics",
+        "Maintainer release judgment: approved for v0.5 release",
+        "Publishing to PyPI or a Docker registry remains deferred",
+    ):
+        assert required in readiness
+
+    for required in (
+        "Assistant Preflight is a bounded orientation workflow",
+        "Focus hints and budget controls",
+        "Stale or missing graph handling is explicit",
+        "No PyPI, Docker registry, or hosted publishing automation in v0.5",
+    ):
+        assert required in limitations
+
+    for required in (
+        "JS/TS workspace",
+        "Python package",
+        "Docs-heavy task",
+        "Config-heavy task",
+        "Ambiguous import",
+        "Stale graph",
+        "Package/workspace task",
+    ):
+        assert required in dogfood
