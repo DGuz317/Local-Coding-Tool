@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from repolens.context_pack_contract import (
+    ASSISTANT_PREFLIGHT_VERSION,
     CONTEXT_PACK_VERSION,
     DEFAULT_CONTEXT_PACK_BUDGET,
     HUMAN_LOWER_PRIORITY_LABEL,
@@ -253,6 +254,68 @@ def get_task_context(
             limits=active_budget,
             truncation=truncation,
             warnings=warnings,
+        )
+    )
+
+
+def get_assistant_preflight(
+    repo_path: Path | str,
+    task: str,
+    *,
+    focus_hints: Sequence[str] = (),
+    budget: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Return the v0.5 Assistant Preflight contract shared by CLI and MCP."""
+    context_envelope = get_task_context(
+        repo_path,
+        task,
+        focus_hints=focus_hints,
+        budget=budget,
+    )
+    if not context_envelope.get("ok", False):
+        return context_envelope
+
+    context_pack = _mapping(context_envelope.get("data"))
+    active_budget = _context_budget(budget)
+    normalized_focus_hints = [redact_text(str(hint)) for hint in focus_hints]
+    data = {
+        "assistant_preflight_version": ASSISTANT_PREFLIGHT_VERSION,
+        "ambiguity": _sequence(context_pack.get("ambiguity")),
+        "budget_controls": _preflight_budget_controls(context_pack, active_budget),
+        "candidate_verification_commands": _sequence(
+            context_pack.get("candidate_verification_commands")
+        ),
+        "confidence": str(context_envelope.get("confidence", "low")),
+        "context_pack_id": context_pack.get("context_pack_id", ""),
+        "context_pack_version": context_pack.get("context_pack_version", CONTEXT_PACK_VERSION),
+        "evidence": _safe_evidence(context_envelope.get("evidence", [])),
+        "first_read_files": _sequence(context_pack.get("first_read_files")),
+        "focus_hints": {
+            "items": normalized_focus_hints,
+            "max_items": active_budget["max_items_per_support_group"],
+            "resolution": "resolved_or_warned_by_context_pack",
+        },
+        "freshness": _mapping(context_envelope.get("freshness")),
+        "likely_tests": _sequence(context_pack.get("likely_tests")),
+        "limits": _mapping(context_envelope.get("limits")),
+        "task_context": {
+            "display_task": context_pack.get("task", ""),
+            "fingerprint": context_pack.get("task_fingerprint", ""),
+            "scope": "graph_bounded_orientation",
+        },
+        "truncation": _mapping(context_envelope.get("truncation")),
+        "warnings": _sequence(context_envelope.get("warnings")),
+    }
+    data = guard_context_pack_output(data)
+    return guard_context_pack_output(
+        mcp_success(
+            data=data,
+            confidence=data["confidence"],
+            evidence=data["evidence"],
+            freshness=data["freshness"],
+            limits=data["limits"],
+            truncation=data["truncation"],
+            warnings=data["warnings"],
         )
     )
 
@@ -866,6 +929,21 @@ def _budget_metadata(
     }
 
 
+def _preflight_budget_controls(
+    context_pack: Mapping[str, Any], budget: Mapping[str, int]
+) -> dict[str, Any]:
+    pack_budget = _mapping(context_pack.get("budget"))
+    return {
+        "deterministic": True,
+        "max_candidate_verification_commands": budget["max_candidate_verification_commands"],
+        "max_first_read_files": budget["max_first_read_files"],
+        "max_items_per_support_group": budget["max_items_per_support_group"],
+        "max_total_chars": budget["max_total_chars"],
+        "used_chars": int(pack_budget.get("used_chars", 0)),
+        "units": ["items", "characters"],
+    }
+
+
 def _next_actions(first_read_files: Sequence[Mapping[str, Any]]) -> list[str]:
     actions = []
     if first_read_files:
@@ -1381,5 +1459,78 @@ def human_context_pack(envelope: Mapping[str, Any]) -> str:
             lines.append(f"- {mapped.get('path')} ({mapped.get('confidence')})")
     lines.append(
         f"{HUMAN_LOWER_PRIORITY_LABEL}: {len(_sequence(data.get('lower_priority_context')))}"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def human_assistant_preflight(envelope: Mapping[str, Any]) -> str:
+    """Render a compact source-free Assistant Preflight summary for humans."""
+    if not envelope.get("ok"):
+        error = _mapping(envelope.get("error"))
+        lines = [
+            f"Assistant Preflight failed: {error.get('message') or error.get('code') or 'unknown error'}"
+        ]
+        if error.get("status"):
+            lines.append(f"Status: {error.get('status')}")
+        if error.get("recommended_action"):
+            lines.append(f"Recommended action: {error.get('recommended_action')}")
+        warnings = _sequence(envelope.get("warnings"))
+        if warnings:
+            lines.append("Warnings:")
+            lines.extend(f"- {warning}" for warning in warnings)
+        return "\n".join(lines) + "\n"
+    data = _mapping(envelope.get("data"))
+    task_context = _mapping(data.get("task_context"))
+    budget_controls = _mapping(data.get("budget_controls"))
+    lines = [
+        f"Assistant Preflight: {data.get('context_pack_id')}",
+        f"Task: {task_context.get('display_task')}",
+        f"Freshness: {_mapping(data.get('freshness')).get('status')}",
+        "First-Read Files:",
+    ]
+    first_read = _sequence(data.get("first_read_files"))
+    if not first_read:
+        lines.append("- none")
+    for item in first_read:
+        mapped = _mapping(item)
+        lines.append(
+            f"- {mapped.get('rank')}. {mapped.get('path')} "
+            f"({mapped.get('confidence')}): {mapped.get('reason')}"
+        )
+
+    lines.append("Likely Tests:")
+    likely_tests = _sequence(data.get("likely_tests"))
+    if not likely_tests:
+        lines.append("- none")
+    for item in likely_tests:
+        mapped = _mapping(item)
+        lines.append(f"- {mapped.get('path')} ({mapped.get('confidence')}): {mapped.get('reason')}")
+
+    lines.append("Candidate Verification Commands (discovered only; not run):")
+    commands = _sequence(data.get("candidate_verification_commands"))
+    if not commands:
+        lines.append("- none")
+    for item in commands:
+        mapped = _mapping(item)
+        lines.append(
+            f"- {mapped.get('name')}: found={mapped.get('found')}, "
+            f"run={mapped.get('run')}, risk={mapped.get('risk_bucket')}"
+        )
+
+    warnings = _sequence(data.get("warnings"))
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in warnings)
+
+    lines.extend(
+        [
+            f"Confidence: {data.get('confidence')}",
+            f"Evidence: {len(_sequence(data.get('evidence')))} item(s)",
+            "Budget Controls: "
+            f"{budget_controls.get('max_first_read_files')} first-read files, "
+            f"{budget_controls.get('max_items_per_support_group')} support items/group, "
+            f"{budget_controls.get('max_candidate_verification_commands')} candidate commands, "
+            f"{budget_controls.get('max_total_chars')} chars",
+        ]
     )
     return "\n".join(lines) + "\n"

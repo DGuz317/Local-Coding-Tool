@@ -6,7 +6,12 @@ from textwrap import dedent
 from typer.testing import CliRunner
 
 from repolens.cli import app
-from repolens.context_pack import expand_context, explain_relevance, get_task_context
+from repolens.context_pack import (
+    expand_context,
+    explain_relevance,
+    get_assistant_preflight,
+    get_task_context,
+)
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION, DEFAULT_CONTEXT_PACK_BUDGET
 from repolens.indexer import index_repository
 from repolens.mcp_server import RepoLensMcpTools
@@ -167,6 +172,122 @@ def test_context_pack_cli_and_mcp_use_same_service(tmp_path):
     assert "First-Read Files" in human_result.output
     assert "src/auth/login.ts" in human_result.output
     assert "Lower-priority context to inspect later" in human_result.output
+
+
+def test_assistant_preflight_cli_and_mcp_share_bounded_contract(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    budget = {
+        "max_candidate_verification_commands": 1,
+        "max_first_read_files": 1,
+        "max_items_per_support_group": 1,
+        "max_total_chars": 8_000,
+    }
+    service_envelope = get_assistant_preflight(
+        tmp_path,
+        "Fix API_TOKEN=abc123 login validation",
+        focus_hints=["src/auth/login.ts"],
+        budget=budget,
+    )
+    mcp_envelope = RepoLensMcpTools(tmp_path).assistant_preflight(
+        "Fix API_TOKEN=abc123 login validation",
+        focus_hints=["src/auth/login.ts"],
+        max_candidate_verification_commands=1,
+        max_first_read_files=1,
+        max_items_per_support_group=1,
+        max_total_chars=8_000,
+    )
+    cli_result = runner.invoke(
+        app,
+        [
+            "preflight",
+            str(tmp_path),
+            "Fix API_TOKEN=abc123 login validation",
+            "--focus-hint",
+            "src/auth/login.ts",
+            "--max-first-read-files",
+            "1",
+            "--max-items-per-support-group",
+            "1",
+            "--max-candidate-verification-commands",
+            "1",
+            "--max-total-chars",
+            "8000",
+            "--json",
+        ],
+    )
+
+    assert cli_result.exit_code == 0
+    assert json.loads(cli_result.output) == service_envelope == mcp_envelope
+    assert service_envelope["ok"] is True
+    assert service_envelope["confidence"] == "medium"
+    data = service_envelope["data"]
+    assert data["assistant_preflight_version"] == "0.5.preflight.v1"
+    assert data["task_context"] == {
+        "display_task": "Fix API_TOKEN login validation",
+        "fingerprint": data["task_context"]["fingerprint"],
+        "scope": "graph_bounded_orientation",
+    }
+    assert data["focus_hints"]["items"] == ["src/auth/login.ts"]
+    assert data["budget_controls"] == {
+        "deterministic": True,
+        "max_candidate_verification_commands": 1,
+        "max_first_read_files": 1,
+        "max_items_per_support_group": 1,
+        "max_total_chars": 8000,
+        "units": ["items", "characters"],
+        "used_chars": data["budget_controls"]["used_chars"],
+    }
+    assert [item["path"] for item in data["first_read_files"]] == ["src/auth/login.ts"]
+    assert [item["path"] for item in data["likely_tests"]] == ["tests/login.test.ts"]
+    assert data["candidate_verification_commands"][0]["run"] is False
+    assert data["candidate_verification_commands"][0]["found"] is True
+    assert "abc123" not in json.dumps(service_envelope)
+    assert "return input.user" not in json.dumps(service_envelope)
+
+
+def test_assistant_preflight_golden_outcomes_cover_stale_broad_ambiguity_and_no_match(
+    tmp_path,
+):
+    stale_repo = tmp_path / "stale"
+    _write_context_fixture_repo(stale_repo)
+    index_repository(stale_repo)
+    _write_text(stale_repo / "src" / "auth" / "login.ts", "export const changed = true;\n")
+
+    broad_repo = tmp_path / "broad"
+    _write_context_fixture_repo(broad_repo)
+    _write_text(broad_repo / "src" / "billing" / "invoice.ts", "export const invoice = 1;\n")
+    index_repository(broad_repo)
+
+    ambiguity_repo = tmp_path / "ambiguity"
+    _write_text(ambiguity_repo / "src" / "acme" / "ambiguous.py", "VALUE = 1\n")
+    _write_text(ambiguity_repo / "acme" / "ambiguous.py", "VALUE = 2\n")
+    index_repository(ambiguity_repo)
+
+    stale = get_assistant_preflight(stale_repo, "Fix login validation")
+    broad = get_assistant_preflight(broad_repo, "Update project")
+    no_match = get_assistant_preflight(broad_repo, "Repair quantum banana telemetry")
+    ambiguity = get_assistant_preflight(ambiguity_repo, "ambiguous")
+
+    assert stale["freshness"]["fresh"] is False
+    assert "Graph artifacts may be stale" in " ".join(stale["warnings"])
+    assert broad["ok"] is True
+    assert "Task is broad" in " ".join(broad["warnings"])
+    assert (
+        len(broad["data"]["first_read_files"])
+        <= DEFAULT_CONTEXT_PACK_BUDGET["max_first_read_files"]
+    )
+    assert no_match["ok"] is True
+    assert no_match["confidence"] == "low"
+    assert no_match["data"]["first_read_files"] == []
+    assert ambiguity["ok"] is True
+    assert ambiguity["data"]["first_read_files"] == []
+    assert all(item["kind"] == "ambiguity_candidate" for item in ambiguity["data"]["ambiguity"])
+    assert sorted({item["path"] for item in ambiguity["data"]["ambiguity"]}) == [
+        "acme/ambiguous.py",
+        "src/acme/ambiguous.py",
+    ]
 
 
 def test_context_pack_preserves_missing_graph_unavailable_error(tmp_path):

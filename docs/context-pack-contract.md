@@ -2,6 +2,37 @@
 
 This is the v0.3 assistant-facing contract for Context Packs. Implementation slices should import `src/repolens/context_pack_contract.py` and update this document deliberately when the contract changes.
 
+## Assistant Preflight
+
+Assistant Preflight is the v0.5 bounded orientation workflow assistants should call before broad repository reads. It is exposed through the CLI `repolens preflight` command and the read-only MCP `assistant_preflight` tool. Both surfaces use the same service and return the standard MCP envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`.
+
+Assistant Preflight `data` includes:
+
+- `assistant_preflight_version`
+- `context_pack_id`
+- `context_pack_version`
+- `task_context`
+- `focus_hints`
+- `budget_controls`
+- `freshness`
+- `first_read_files`
+- `likely_tests`
+- `candidate_verification_commands`
+- `ambiguity`
+- `warnings`
+- `evidence`
+- `confidence`
+- `limits`
+- `truncation`
+
+`task_context` contains only redacted display metadata, a deterministic task fingerprint, and the bounded orientation scope. `focus_hints` contains redacted hint metadata and relies on Context Pack warnings for unresolved hints. `budget_controls` uses deterministic item caps and character caps: first-read file count, per-support-group item count, candidate command count, and total character count. It does not define model-specific token budgets.
+
+Preflight freshness comes from graph metadata and carries the canonical graph hash, freshness boolean, status, source, and evidence count. Stale graphs return bounded successful responses when readable, with stale warnings and lowered trust instead of silently pretending the graph is current. Missing graph artifacts keep the existing graph-unavailable error envelope.
+
+Candidate verification commands remain discovered metadata only. They must stay marked `found: true`, `run: false`, `not_run: true`, and `auto_run_recommended: false`, with risk classified separately from purpose.
+
+Default Context Pack behavior remains deterministic and unenriched. Preflight currently reuses the default Context Pack shape; opt-in enrichment is reserved for later contract slices.
+
 ## Schema
 
 Context Pack data must include these top-level fields inside the standard MCP response envelope `data` object:

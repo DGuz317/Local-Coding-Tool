@@ -1,8 +1,8 @@
-# RepoLens MCP v0.3 Tool Examples
+# RepoLens MCP v0.5 Tool Examples
 
 All RepoLens MCP tools are read-only and return the standard MCP response envelope with `ok`, `data`, `warnings`, `limits`, `confidence`, `evidence`, `freshness`, and `truncation`. Some tools also return `pagination`.
 
-Context Pack tools return orientation metadata only. They must not expose full source files, source snippets, code bodies, function or method signatures, paragraph excerpts, raw comments, raw Agent Guidance instructions, raw secret-like task text, absolute host paths, or persisted assistant session state.
+Assistant Preflight and Context Pack tools return orientation metadata only. They must not expose full source files, source snippets, code bodies, function or method signatures, paragraph excerpts, raw comments, raw Agent Guidance instructions, raw secret-like task text, absolute host paths, or persisted assistant session state.
 
 ## Check Graph Status
 
@@ -18,6 +18,27 @@ Use first in each assistant session.
 ```
 
 If `ok` is `false` or `freshness.status` is `stale`, `missing`, or `rebuild_required`, reindex or ask the user before relying on graph facts.
+
+## Run Assistant Preflight
+
+Use `assistant_preflight` as the first task-specific call before broad file reads.
+
+```json
+{
+  "tool": "assistant_preflight",
+  "arguments": {
+    "task": "Fix the auth timeout bug",
+    "focus_hint": "src/auth/session.py",
+    "max_files": 8,
+    "max_tests": 6,
+    "max_commands": 5
+  }
+}
+```
+
+Expected response shape is the standard envelope with `data.assistant_preflight_version`, graph freshness, budget controls, focus hints, `data.first_read_files`, `data.likely_tests`, support groups, `data.candidate_verification_commands`, warnings, confidence, limits, and truncation metadata. Candidate verification commands are found repository facts and remain `run: false`; RepoLens does not execute them.
+
+Read the returned first-read files directly before editing. Use follow-up Context Pack tools only when bounded orientation is still needed.
 
 ## Summarize Repository Shape
 
@@ -51,7 +72,7 @@ Read the suggested files before editing. If the response is ambiguous or low-con
 
 ## Get A Task Context Pack
 
-Use `get_task_context` as the v0.3 default before broad file exploration.
+Use `get_task_context` for bounded follow-up orientation when preflight is not enough.
 
 ```json
 {
@@ -105,6 +126,20 @@ The explanation is still orientation metadata. It must not be treated as proof t
 
 ## CLI Context Pack Examples
 
+Human-readable Assistant Preflight:
+
+```bash
+repolens preflight /absolute/path/to/repo "Fix the auth timeout bug"
+```
+
+Machine-readable Assistant Preflight:
+
+```bash
+repolens preflight /absolute/path/to/repo "Fix the auth timeout bug" --json
+```
+
+Context Pack follow-up remains available when needed.
+
 Human-readable task context:
 
 ```bash
@@ -128,6 +163,11 @@ Emit CI-friendly JSON and fail when the expectation-based release gate fails:
 ```bash
 repolens evaluate-context --json
 ```
+
+The JSON includes deterministic `local_savings_summary` and per-case `local_savings`
+fields comparing the Context Pack result with a local lexical path-search baseline. These
+are fixture-local estimates for exploration cost, not telemetry, exact model-token claims,
+or universal productivity scores.
 
 Use a custom evaluation manifest:
 

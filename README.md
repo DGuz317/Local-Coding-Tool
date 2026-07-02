@@ -7,7 +7,7 @@ Think of it as a local map of your codebase:
 - It scans a repository on your machine.
 - It writes a generated graph under `.repolens/`.
 - It lets assistants ask read-only questions about files, symbols, tests, docs, configs, and relationships.
-- It can return a small task-focused **Context Pack** so an assistant knows what to read first.
+- It can return a bounded **Assistant Preflight** so an assistant knows what to read first.
 
 RepoLens is local-first. Normal indexing and MCP usage do not require AI models, embeddings, telemetry, hosted services, a browser UI, or runtime network calls.
 
@@ -19,7 +19,7 @@ RepoLens gives the assistant a safer and cheaper first step:
 
 1. Build a graph from the repository source, docs, configs, tests, and commands.
 2. Ask RepoLens for task-scoped orientation instead of starting with broad grep or random file reads.
-3. Open only the most relevant source files before editing.
+3. Ask for an Assistant Preflight before broad file reads, then open only the most relevant source files before editing.
 
 RepoLens is meant to replace broad exploratory codebase scanning, not the final targeted source review needed before making a safe edit.
 
@@ -31,7 +31,7 @@ If you are working from this repository checkout, run:
 uv sync
 uv run repolens index .
 uv run repolens status .
-uv run repolens context . "Fix the auth timeout bug"
+uv run repolens preflight . "Fix the auth timeout bug"
 ```
 
 What those commands mean:
@@ -39,7 +39,7 @@ What those commands mean:
 - `uv sync` installs the project environment.
 - `uv run repolens index .` scans the current repository and creates `.repolens/`.
 - `uv run repolens status .` checks whether the generated graph is available and fresh.
-- `uv run repolens context . "..."` asks for a small Context Pack for one task.
+- `uv run repolens preflight . "..."` asks for a bounded Assistant Preflight for one task.
 
 Replace `.` with another repository path if you want to inspect a different project.
 
@@ -94,13 +94,13 @@ If RepoLens says the graph is stale or missing, run `index` again:
 uv run repolens index /path/to/repo
 ```
 
-### 5. Ask For Task Context
+### 5. Ask For Assistant Preflight
 
 ```bash
-uv run repolens context /path/to/repo "Fix the auth timeout bug"
+uv run repolens preflight /path/to/repo "Fix the auth timeout bug"
 ```
 
-The Context Pack is a bounded orientation result. It can include things like:
+Assistant Preflight is the recommended first assistant call before broad file reads. It returns a bounded orientation result that can include things like:
 
 - first files to read;
 - likely tests;
@@ -120,6 +120,8 @@ uv run repolens status /path/to/repo
 uv run repolens report /path/to/repo
 uv run repolens search /path/to/repo "query text"
 uv run repolens context /path/to/repo "Describe your task"
+uv run repolens preflight /path/to/repo "Describe your task"
+uv run repolens audit-artifacts /path/to/repo
 uv run repolens mcp /path/to/repo
 ```
 
@@ -131,6 +133,8 @@ Command meanings:
 - `report`: print the generated Markdown graph report.
 - `search`: search scanner-approved live text with capped previews.
 - `context`: return a task-scoped Context Pack.
+- `preflight`: return the Assistant Preflight contract for a task, including graph freshness, first-read files, likely tests, candidate commands, focus hints, warnings, and budget metadata.
+- `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants.
 - `mcp`: start the read-only stdio MCP server for an assistant.
 
 There is also a developer-oriented `benchmark-update` command for update-speed evidence.
@@ -138,7 +142,7 @@ There is also a developer-oriented `benchmark-update` command for update-speed e
 For machine-readable output, commands that support it accept `--json`:
 
 ```bash
-uv run repolens context /path/to/repo "Fix the auth timeout bug" --json
+uv run repolens preflight /path/to/repo "Fix the auth timeout bug" --json
 ```
 
 ## Using RepoLens With An Assistant
@@ -149,7 +153,7 @@ The basic flow is:
 
 1. Index the repository first.
 2. Configure your MCP client to run `repolens mcp /absolute/path/to/repo`.
-3. Tell the assistant to ask RepoLens for graph status and task context before broad file exploration.
+3. Tell the assistant to call `assistant_preflight` before broad file exploration. `assistant_preflight` already includes graph freshness and bounded task context.
 
 Index first:
 
@@ -170,7 +174,7 @@ Important: `repolens mcp` is not an interactive terminal command. It waits for J
 Recommended assistant prompt:
 
 ```text
-Use RepoLens MCP for this repository before broad file exploration. Start with graph_status. If the graph is available, call get_task_context for the current task. Treat Context Packs as orientation metadata, not source code. Read the actual files before editing.
+Use RepoLens MCP for this repository before broad file exploration. Start each task by calling assistant_preflight with the task description. Treat the response as orientation metadata, not source code. Read the returned first-read files before editing. Candidate commands are found but not run.
 ```
 
 For more assistant setup details, see:
@@ -206,6 +210,42 @@ For local contributor development from this repository, create an OpenCode confi
 
 Use absolute paths. `cwd` should point at this RepoLens checkout when using `uv run`. The MCP argument should point at the repository you want RepoLens to inspect.
 
+## Claude Desktop Example
+
+Claude Desktop uses an `mcpServers` object. For local contributor development from this repository, use absolute paths and point `cwd` at the RepoLens checkout:
+
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "uv",
+      "args": ["run", "repolens", "mcp", "/absolute/path/to/repo"],
+      "cwd": "/absolute/path/to/repolens-checkout"
+    }
+  }
+}
+```
+
+After connecting, ask Claude to call `assistant_preflight` before broad file reads.
+
+## Cursor-Style MCP Example
+
+Cursor-style MCP config also uses an `mcpServers` object. Keep project-specific config local unless you intentionally want to share it:
+
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "uv",
+      "args": ["run", "repolens", "mcp", "/absolute/path/to/repo"],
+      "cwd": "/absolute/path/to/repolens-checkout"
+    }
+  }
+}
+```
+
+Use the same assistant instruction: call `assistant_preflight` for the task before broad file exploration, then read the returned files directly before editing.
+
 If RepoLens is installed as a normal tool, the command can be shorter:
 
 ```json
@@ -233,6 +273,18 @@ Install from a local checkout:
 uv tool install /path/to/repolens
 repolens --help
 ```
+
+Local PyPI-readiness smoke without publishing:
+
+```bash
+uv build --out-dir /tmp/repolens-dist --clear
+uv tool install --force /tmp/repolens-dist/*.whl
+repolens --help
+repolens preflight /absolute/path/to/repo "Check install readiness" --json
+uv tool uninstall repolens
+```
+
+This only builds and installs a local wheel. It does not upload to PyPI.
 
 If you prefer `pipx`:
 
@@ -277,6 +329,17 @@ docker run --rm \
   -v "$PWD:/workspace" \
   repolens:latest \
   status /workspace
+```
+
+Run an Assistant Preflight smoke through Docker:
+
+```bash
+docker run --rm \
+  --network none \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/workspace" \
+  repolens:latest \
+  preflight /workspace "Check Docker install readiness" --json
 ```
 
 Start the MCP server through Docker:
@@ -341,6 +404,19 @@ uv run repolens search-graph . test --kind command --limit 20 --json
 
 If deeper inspection is still needed, query `.repolens/graph.sqlite` or inspect `.repolens/graph.json` with targeted filters. Full or sharded Markdown index export is not enabled by default; if a future release adds it, that export must preserve the same no whole-source disclosure boundary and should not mirror full source files into generated Markdown.
 
+## Setup Diagnostics
+
+Before connecting an assistant, run these local checks:
+
+```bash
+uv run repolens --help
+uv run repolens index /absolute/path/to/repo
+uv run repolens status /absolute/path/to/repo
+uv run repolens preflight /absolute/path/to/repo "Check setup" --json
+```
+
+Expected result: the graph exists, freshness is reported, preflight returns bounded metadata, and candidate verification commands remain `run: false`. If any step fails, fix local installation or graph freshness before relying on MCP output.
+
 ## Troubleshooting
 
 If RepoLens says artifacts are missing:
@@ -402,7 +478,7 @@ Before release, run the full verification gate, review generated artifact behavi
 
 ## Roadmap And Non-Goals
 
-RepoLens v0.4 focuses on making Context Packs trustworthy across package/workspace repositories.
+RepoLens v0.5 focuses on giving assistants one deterministic preflight workflow before broad repository reads.
 
 Current focus:
 

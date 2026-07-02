@@ -45,7 +45,14 @@ SECRET_KEY_TOKENS = (
 )
 SECRET_NAME_TOKENS = ("credential", "password", "passwd", "private-key", "private_key", "secret")
 SECRET_DIRECTORY_NAMES = frozenset({".secrets", "secrets"})
-SAFE_METADATA_KEYS = frozenset({"approx_token_estimate_divisor", "approx_tokens"})
+SAFE_METADATA_KEYS = frozenset(
+    {
+        "approx_token_estimate_divisor",
+        "approx_tokens",
+        "approx_tokens_avoided_vs_lexical",
+        "approximate_token_estimate",
+    }
+)
 COMMAND_SECRET_OPTIONS = (
     "api-key",
     "apikey",

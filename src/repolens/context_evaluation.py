@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from repolens.context_pack import expand_context, get_task_context
+from repolens.artifact_audit import audit_artifacts
+from repolens.context_pack import expand_context, get_assistant_preflight, get_task_context
 from repolens.context_pack_contract import DEFAULT_CONTEXT_PACK_BUDGET, guard_context_pack_output
 from repolens.indexer import index_repository
 from repolens.mcp_envelope import mcp_success, truncation_metadata
@@ -17,6 +18,11 @@ from repolens.query import GraphQueryService
 from repolens.scanner import scan_repository
 
 _CONFIDENCE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+_LOCAL_SAVINGS_EXPLANATION = (
+    "Estimates compare bounded RepoLens output with deterministic lexical filename/path "
+    "search for committed fixtures. They are local evaluation signals, not telemetry, "
+    "exact model-token claims, or universal productivity scores."
+)
 _FORBIDDEN_EVALUATION_STRINGS = (
     "API_TOKEN=abc123",
     "password=hunter2",
@@ -48,12 +54,18 @@ def run_context_evaluation(
     passed_cases = sum(1 for case in cases if case["passed"] is True)
     failed_cases = len(cases) - passed_cases
     corpora = _corpora_summary(cases)
+    artifact_audit_summary = _artifact_audit_summary(cases)
+    local_savings_summary = _local_savings_summary(cases)
+    preflight_summary = _preflight_summary(cases)
     release_cases = [case for case in cases if case.get("corpus") == "release_blocking"]
     release_failed_cases = sum(1 for case in release_cases if case["passed"] is not True)
     data = {
         "cases": cases,
+        "artifact_audit_summary": artifact_audit_summary,
         "corpora": corpora,
+        "local_savings_summary": local_savings_summary,
         "manifest_version": str(manifest.get("manifest_version", "")),
+        "preflight_summary": preflight_summary,
         "release_gate": {
             "gate_type": "expectation_based",
             "passed": release_failed_cases == 0,
@@ -116,6 +128,67 @@ def _corpora_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, 
     return dict(sorted(summary.items()))
 
 
+def _local_savings_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    savings = [_mapping(case.get("local_savings")) for case in cases]
+    return {
+        "approx_tokens_avoided_vs_lexical": sum(
+            int(item.get("approx_tokens_avoided_vs_lexical", 0)) for item in savings
+        ),
+        "baseline": "lexical_path_search",
+        "case_count": len(cases),
+        "estimate_kind": "local_fixture_metadata_estimate",
+        "explanation": _LOCAL_SAVINGS_EXPLANATION,
+        "files_avoided_vs_lexical": sum(
+            int(item.get("files_avoided_vs_lexical", 0)) for item in savings
+        ),
+        "first_read_hit_rate_delta_vs_lexical": _average(
+            float(item.get("first_read_hit_rate_delta_vs_lexical", 0.0)) for item in savings
+        ),
+        "likely_irrelevant_files_avoided_vs_lexical": sum(
+            int(item.get("likely_irrelevant_files_avoided_vs_lexical", 0)) for item in savings
+        ),
+        "not_run_command_count": sum(
+            int(_mapping(item.get("context_pack")).get("not_run_command_count", 0))
+            for item in savings
+        ),
+        "stale_graph_risk_case_count": sum(
+            1
+            for item in savings
+            if _mapping(item.get("context_pack")).get("stale_graph_risk") is True
+        ),
+    }
+
+
+def _preflight_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    evaluated = [case for case in cases if _mapping(case.get("preflight_evidence"))]
+    passed = sum(
+        1 for case in evaluated if _mapping(case.get("preflight_evidence")).get("ok") is True
+    )
+    return {
+        "evaluated_cases": [str(case.get("id", "")) for case in evaluated],
+        "failed_cases": len(evaluated) - passed,
+        "passed_cases": passed,
+        "purpose": "assistant_preflight_before_broad_repository_reads",
+        "total_cases": len(evaluated),
+    }
+
+
+def _artifact_audit_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    evaluated = [case for case in cases if _mapping(case.get("artifact_audit_evidence"))]
+    passed = sum(
+        1
+        for case in evaluated
+        if _mapping(case.get("artifact_audit_evidence")).get("passed") is True
+    )
+    return {
+        "evaluated_cases": [str(case.get("id", "")) for case in evaluated],
+        "failed_cases": len(evaluated) - passed,
+        "passed_cases": passed,
+        "purpose": "artifact_safety_disclosure_gate",
+        "total_cases": len(evaluated),
+    }
+
+
 def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
     """Render a compact human evaluation summary."""
     if not envelope.get("ok", False):
@@ -133,6 +206,17 @@ def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
         mapped = _mapping(case)
         marker = "PASS" if mapped.get("passed") is True else "FAIL"
         lines.append(f"- {marker} [{mapped.get('corpus')}] {mapped.get('id')}")
+    local_savings = _mapping(data.get("local_savings_summary"))
+    lines.extend(
+        [
+            "",
+            "Local Savings Metrics",
+            f"Baseline: {local_savings.get('baseline', 'lexical_path_search')}",
+            f"Files avoided vs baseline: {local_savings.get('files_avoided_vs_lexical', 0)}",
+            "Savings are estimates from local fixtures, not telemetry, exact model-token claims, "
+            "or universal productivity scores.",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -172,6 +256,15 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
                 focus_hints=focus_hints,
             )
 
+        preflight_envelope = (
+            get_assistant_preflight(work_repo, task, focus_hints=focus_hints)
+            if case.get("evaluate_preflight") is True
+            else None
+        )
+        artifact_audit_envelope = (
+            audit_artifacts(work_repo) if case.get("evaluate_artifact_audit") is True else None
+        )
+
         reading = GraphQueryService(work_repo).suggest_reading_order(task)
         lexical_paths = _lexical_baseline_paths(work_repo, task)
         case_result = _case_result(
@@ -180,7 +273,9 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
             pack_envelope=pack_envelope,
             reading_envelope=reading,
             lexical_paths=lexical_paths,
+            preflight_envelope=preflight_envelope,
             expansion_envelope=expansion_envelope,
+            artifact_audit_envelope=artifact_audit_envelope,
             work_repo=work_repo,
         )
         return case_result
@@ -193,13 +288,16 @@ def _case_result(
     pack_envelope: Mapping[str, Any],
     reading_envelope: Mapping[str, Any],
     lexical_paths: Sequence[str],
+    preflight_envelope: Mapping[str, Any] | None,
     expansion_envelope: Mapping[str, Any] | None,
+    artifact_audit_envelope: Mapping[str, Any] | None,
     work_repo: Path,
 ) -> dict[str, Any]:
     pack = _mapping(pack_envelope.get("data"))
     first_read_paths = _paths(pack.get("first_read_files"))
     likely_test_paths = _paths(pack.get("likely_tests"))
     relevant_paths = _expected_relevant_paths(expected)
+    candidate_commands = _all_candidate_commands(pack)
     safety_outcomes = _safety_outcomes(
         case,
         expected=expected,
@@ -211,44 +309,59 @@ def _case_result(
         expected=expected,
         pack_envelope=pack_envelope,
         expansion_envelope=expansion_envelope,
+        preflight_envelope=preflight_envelope,
+        artifact_audit_envelope=artifact_audit_envelope,
         safety_outcomes=safety_outcomes,
+    )
+    context_metrics = _metrics_for_paths(
+        first_read_paths,
+        likely_test_paths=likely_test_paths,
+        relevant_paths=relevant_paths,
+        expected=expected,
+        expansion_count=len(_sequence(pack.get("expansion_handles"))),
+        safety_negative_outcomes=safety_outcomes,
+        approximate_token_estimate=_context_pack_approx_tokens(pack),
+    )
+    lexical_metrics = _metrics_for_paths(
+        lexical_paths,
+        likely_test_paths=[path for path in lexical_paths if _is_test_path(path)],
+        relevant_paths=relevant_paths,
+        expected=expected,
+        expansion_count=0,
+        safety_negative_outcomes={},
+    )
+    reading_paths = _paths(_mapping(reading_envelope.get("data")).get("reading_order"))
+    reading_metrics = _metrics_for_paths(
+        reading_paths,
+        likely_test_paths=[path for path in reading_paths if _is_test_path(path)],
+        relevant_paths=relevant_paths,
+        expected=expected,
+        expansion_count=0,
+        safety_negative_outcomes={},
     )
     return {
         "category": str(case.get("category", "")),
         "checks": checks,
         "corpus": str(case.get("corpus") or "release_blocking"),
+        "artifact_audit_evidence": _artifact_audit_evidence(artifact_audit_envelope),
         "id": str(case.get("id", "")),
+        "local_savings": _local_savings_metrics(
+            context_metrics=context_metrics,
+            lexical_metrics=lexical_metrics,
+            not_run_command_count=sum(
+                1 for command in candidate_commands if _mapping(command).get("not_run") is True
+            ),
+            stale_graph_risk=_stale_graph_risk(pack_envelope),
+        ),
         "metrics": {
-            "context_pack": _metrics_for_paths(
-                first_read_paths,
-                likely_test_paths=likely_test_paths,
-                relevant_paths=relevant_paths,
-                expected=expected,
-                expansion_count=len(_sequence(pack.get("expansion_handles"))),
-                safety_negative_outcomes=safety_outcomes,
-            ),
-            "lexical": _metrics_for_paths(
-                lexical_paths,
-                likely_test_paths=[path for path in lexical_paths if _is_test_path(path)],
-                relevant_paths=relevant_paths,
-                expected=expected,
-                expansion_count=0,
-                safety_negative_outcomes={},
-            ),
-            "suggest_reading_order": _metrics_for_paths(
-                _paths(_mapping(reading_envelope.get("data")).get("reading_order")),
-                likely_test_paths=[
-                    path
-                    for path in _paths(_mapping(reading_envelope.get("data")).get("reading_order"))
-                    if _is_test_path(path)
-                ],
-                relevant_paths=relevant_paths,
-                expected=expected,
-                expansion_count=0,
-                safety_negative_outcomes={},
-            ),
+            "assistant_preflight": _preflight_evidence(preflight_envelope),
+            "artifact_audit": _artifact_audit_evidence(artifact_audit_envelope),
+            "context_pack": context_metrics,
+            "lexical": lexical_metrics,
+            "suggest_reading_order": reading_metrics,
         },
         "passed": all(check["passed"] is True for check in checks),
+        "preflight_evidence": _preflight_evidence(preflight_envelope),
         "safety_negative_outcomes": safety_outcomes,
     }
 
@@ -258,6 +371,8 @@ def _expectation_checks(
     expected: Mapping[str, Any],
     pack_envelope: Mapping[str, Any],
     expansion_envelope: Mapping[str, Any] | None,
+    preflight_envelope: Mapping[str, Any] | None,
+    artifact_audit_envelope: Mapping[str, Any] | None,
     safety_outcomes: Mapping[str, bool],
 ) -> list[dict[str, Any]]:
     pack = _mapping(pack_envelope.get("data"))
@@ -422,9 +537,61 @@ def _expectation_checks(
             expansion_envelope is not None
             and expansion_envelope.get("ok") is expected["expansion_ok"],
         )
+    if "assistant_preflight_ok" in expected:
+        _add_check(
+            checks,
+            "assistant_preflight_ok",
+            preflight_envelope is not None
+            and preflight_envelope.get("ok") is expected["assistant_preflight_ok"],
+        )
+    if "assistant_preflight_version" in expected:
+        _add_check(
+            checks,
+            "assistant_preflight_version",
+            preflight_envelope is not None
+            and _mapping(preflight_envelope.get("data")).get("assistant_preflight_version")
+            == expected["assistant_preflight_version"],
+        )
+    if "artifact_audit_passed" in expected:
+        _add_check(
+            checks,
+            "artifact_audit_passed",
+            artifact_audit_envelope is not None
+            and _mapping(_mapping(artifact_audit_envelope.get("data")).get("summary")).get("passed")
+            is expected["artifact_audit_passed"],
+        )
     for name, passed in safety_outcomes.items():
         _add_check(checks, name, passed)
     return checks
+
+
+def _preflight_evidence(envelope: Mapping[str, Any] | None) -> dict[str, Any]:
+    if envelope is None:
+        return {}
+    data = _mapping(envelope.get("data"))
+    return {
+        "candidate_commands_not_run": all(
+            _mapping(command).get("not_run") is True
+            for command in _sequence(data.get("candidate_verification_commands"))
+        ),
+        "first_read_count": len(_paths(data.get("first_read_files"))),
+        "freshness_status": _mapping(data.get("freshness")).get("status", ""),
+        "ok": envelope.get("ok") is True,
+        "version": str(data.get("assistant_preflight_version", "")),
+    }
+
+
+def _artifact_audit_evidence(envelope: Mapping[str, Any] | None) -> dict[str, Any]:
+    if envelope is None:
+        return {}
+    data = _mapping(envelope.get("data"))
+    summary = _mapping(data.get("summary"))
+    return {
+        "audited_artifact_count": len(_sequence(data.get("audited_artifacts"))),
+        "ok": envelope.get("ok") is True,
+        "passed": summary.get("passed") is True,
+        "violation_count": int(summary.get("violation_count", 0)),
+    }
 
 
 def _safety_outcomes(
@@ -490,6 +657,7 @@ def _metrics_for_paths(
     expected: Mapping[str, Any],
     expansion_count: int,
     safety_negative_outcomes: Mapping[str, bool],
+    approximate_token_estimate: int | None = None,
 ) -> dict[str, Any]:
     expected_first_read = {
         str(path) for path in _sequence(expected.get("first_read_files_include_any"))
@@ -505,6 +673,9 @@ def _metrics_for_paths(
     if relevant_paths:
         irrelevant_file_count = sum(1 for path in paths if path not in relevant_paths)
     return {
+        "approximate_token_estimate": approximate_token_estimate
+        if approximate_token_estimate is not None
+        else _approx_tokens_for_paths(paths),
         "expansion_count": expansion_count,
         "first_read_hit_rate": first_read_hit_rate,
         "irrelevant_file_count": irrelevant_file_count,
@@ -514,6 +685,74 @@ def _metrics_for_paths(
         ),
         "test_inclusion": test_inclusion,
     }
+
+
+def _local_savings_metrics(
+    *,
+    context_metrics: Mapping[str, Any],
+    lexical_metrics: Mapping[str, Any],
+    not_run_command_count: int,
+    stale_graph_risk: bool,
+) -> dict[str, Any]:
+    context_pack = {
+        "approximate_token_estimate": int(context_metrics.get("approximate_token_estimate", 0)),
+        "first_read_hit_rate": float(context_metrics.get("first_read_hit_rate", 0.0)),
+        "likely_irrelevant_file_count": int(context_metrics.get("irrelevant_file_count", 0)),
+        "not_run_command_count": not_run_command_count,
+        "pack_size": int(context_metrics.get("pack_size", 0)),
+        "stale_graph_risk": stale_graph_risk,
+    }
+    lexical = {
+        "approximate_token_estimate": int(lexical_metrics.get("approximate_token_estimate", 0)),
+        "first_read_hit_rate": float(lexical_metrics.get("first_read_hit_rate", 0.0)),
+        "likely_irrelevant_file_count": int(lexical_metrics.get("irrelevant_file_count", 0)),
+        "not_run_command_count": 0,
+        "pack_size": int(lexical_metrics.get("pack_size", 0)),
+        "stale_graph_risk": False,
+    }
+    return {
+        "approx_tokens_avoided_vs_lexical": lexical["approximate_token_estimate"]
+        - context_pack["approximate_token_estimate"],
+        "baseline": "lexical_path_search",
+        "context_pack": context_pack,
+        "estimate_kind": "local_fixture_metadata_estimate",
+        "explanation": _LOCAL_SAVINGS_EXPLANATION,
+        "files_avoided_vs_lexical": lexical["pack_size"] - context_pack["pack_size"],
+        "first_read_hit_rate_delta_vs_lexical": round(
+            context_pack["first_read_hit_rate"] - lexical["first_read_hit_rate"], 3
+        ),
+        "lexical_baseline": lexical,
+        "likely_irrelevant_files_avoided_vs_lexical": lexical["likely_irrelevant_file_count"]
+        - context_pack["likely_irrelevant_file_count"],
+    }
+
+
+def _context_pack_approx_tokens(pack: Mapping[str, Any]) -> int:
+    budget = _mapping(pack.get("budget"))
+    try:
+        return int(budget.get("approx_tokens", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _approx_tokens_for_paths(paths: Sequence[str]) -> int:
+    serialized_chars = len(
+        json.dumps({"first_read_files": [{"path": path} for path in paths]}, sort_keys=True)
+    )
+    return serialized_chars // DEFAULT_CONTEXT_PACK_BUDGET["approx_token_estimate_divisor"] + 1
+
+
+def _stale_graph_risk(envelope: Mapping[str, Any]) -> bool:
+    freshness = _mapping(_mapping(envelope.get("data")).get("freshness"))
+    status = str(freshness.get("status", ""))
+    return status in {"stale", "rebuild_required"} or freshness.get("fresh") is False
+
+
+def _average(values: Iterable[float]) -> float:
+    items = list(values)
+    if not items:
+        return 0.0
+    return round(sum(items) / len(items), 3)
 
 
 def _lexical_baseline_paths(repo_path: Path, task: str, *, max_files: int = 7) -> list[str]:
