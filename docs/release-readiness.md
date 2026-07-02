@@ -30,6 +30,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src/repolens
 uv run repolens evaluate-context --json
+uv run repolens index . --json
+uv run repolens audit-artifacts . --json
 uv build --out-dir /tmp/repolens-dist --clear
 ```
 
@@ -177,6 +179,16 @@ uv run repolens evaluate-context --json
 ```
 
 The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, and no-source-disclosure negatives.
+
+Latest local evidence for issue #149 on 2026-07-02:
+
+- Blocker status: #139, #140, #141, #142, #143, #144, #145, #146, #147, and #148 are closed before final readiness judgment.
+- Assistant-facing docs: README and `docs/assistant-usage-guide.md` explain CLI `preflight`, MCP `assistant_preflight`, deterministic focus hints and budget controls, stale or missing graph handling, candidate commands found but not run, and source-disclosure limitations.
+- Dogfood evidence: `docs/dogfood/2026-07-02-v0.5-dogfood-evaluation-pack.md` covers JS/TS workspace, Python package, docs-heavy, config-heavy, ambiguous import, stale graph, and package/workspace scenarios.
+- Local savings metrics: `uv run repolens evaluate-context --json` reports fixture-derived estimates only; they are not telemetry, exact model-token claims, or universal productivity scores.
+- Artifact audit evidence: `uv run repolens audit-artifacts . --json` checks generated `.repolens/` artifacts and representative preflight output for source snippet leakage, absolute host paths, raw secrets, raw Agent Guidance mirroring, bounded artifact size, candidate commands not run, and MCP/preflight contract preservation.
+- Full verification gate: passed in this branch. `uv run pytest` passed 192/192 tests. `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy src/repolens` passed. `uv run repolens evaluate-context --json` returned `ok: true`, release gate passed, 23/23 total cases passed, 22/22 release-blocking cases passed, and 4/4 Assistant Preflight dogfood cases passed. Local savings summary reported 22 files avoided vs lexical search, 10 likely irrelevant files avoided, 31 candidate commands marked not run, and 1 stale graph risk case. `uv run repolens index . --json` prepared root artifacts for audit with 206 eligible files and 19 skipped paths. `uv run repolens audit-artifacts . --json` returned `ok: true`, audited 8 artifacts, and reported 0 violations. `uv build --out-dir /tmp/repolens-dist --clear` built `repolens-0.5.0.tar.gz` and `repolens-0.5.0-py3-none-any.whl`.
+- Maintainer release judgment: approved for v0.5 release after the full verification gate passes. Publishing to PyPI or a Docker registry remains deferred unless a separate maintainer-approved release issue is opened.
 
 Latest local evidence for issue #128 on 2026-06-30:
 
