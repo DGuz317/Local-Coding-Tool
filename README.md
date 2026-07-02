@@ -11,6 +11,12 @@ Think of it as a local map of your codebase:
 
 RepoLens is local-first. Normal indexing and MCP usage do not require AI models, embeddings, telemetry, hosted services, a browser UI, or runtime network calls.
 
+## Current Release
+
+Current version: **v0.5.0**.
+
+v0.5.0 focuses on one cheap, safe, bounded Assistant Preflight workflow before broad repository reads. Release notes live in `docs/releases/v0.5.0.md`.
+
 ## What Problem Does This Solve?
 
 AI coding assistants often waste context by reading too many files too early.

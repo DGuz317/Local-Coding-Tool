@@ -1,0 +1,57 @@
+name: Release Gate
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  release-gate:
+    name: release-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Full tests
+        run: uv run pytest
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy src/repolens
+
+      - name: Context evaluation
+        run: uv run repolens evaluate-context --json
+
+      - name: Index repository for artifact audit
+        run: uv run repolens index . --json
+
+      - name: Artifact safety audit
+        run: uv run repolens audit-artifacts . --json
+
+      - name: Build distribution
+        run: uv build --out-dir /tmp/repolens-dist --clear
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repolens-dist
+          path: /tmp/repolens-dist/*
+          if-no-files-found: error

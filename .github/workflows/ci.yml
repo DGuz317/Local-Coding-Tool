@@ -7,12 +7,14 @@ on:
       - feature/repolens-v0.3
       - feature/repolens-v0.3.1
       - feature/repolens-v0.4
+      - feature/repolens-v0.5
   pull_request:
     branches:
       - main
       - feature/repolens-v0.3
       - feature/repolens-v0.3.1
       - feature/repolens-v0.4
+      - feature/repolens-v0.5
 
 jobs:
   release-gate:
@@ -54,11 +56,17 @@ jobs:
       - name: Run v0.4 package workspace tests
         run: uv run pytest tests/test_config_index.py tests/test_javascript_index.py tests/test_query_service.py
 
+      - name: Run v0.5 preflight and artifact safety tests
+        run: uv run pytest tests/test_artifact_audit.py tests/test_cli_preflight.py tests/test_mcp_server.py tests/test_resolver_contract.py
+
       - name: Run full test suite
         run: uv run pytest
 
       - name: Run Context Pack evaluation
         run: uv run repolens evaluate-context --manifest tests/fixtures/context_pack/evaluation_manifest.json --json
+
+      - name: Run artifact safety audit
+        run: uv run repolens audit-artifacts tests/fixtures/context_pack/happy-path --json
 
       - name: Build package
         run: uv build --out-dir "${RUNNER_TEMP}/repolens-dist" --clear
@@ -80,3 +88,4 @@ jobs:
           /tmp/repolens-smoke/bin/repolens index "${smoke_fixture}"
           /tmp/repolens-smoke/bin/repolens status "${smoke_fixture}" --json
           /tmp/repolens-smoke/bin/repolens context "${smoke_fixture}" "Find auth-related files" --json
+          /tmp/repolens-smoke/bin/repolens preflight "${smoke_fixture}" "Find auth-related files" --json

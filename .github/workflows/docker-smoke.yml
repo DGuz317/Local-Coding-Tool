@@ -1,0 +1,57 @@
+name: Docker Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+    paths:
+      - Dockerfile
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - tests/fixtures/**
+      - .github/workflows/docker-smoke.yml
+
+jobs:
+  docker-smoke:
+    name: docker-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build local image
+        run: docker build -t repolens:ci .
+
+      - name: CLI help smoke
+        run: docker run --rm repolens:ci --help
+
+      - name: Index smoke
+        run: >-
+          docker run --rm
+          --network none
+          --user "$(id -u):$(id -g)"
+          -v "$PWD/tests/fixtures/context_pack/happy-path:/workspace"
+          repolens:ci
+          index /workspace
+
+      - name: Status smoke
+        run: >-
+          docker run --rm
+          --network none
+          --user "$(id -u):$(id -g)"
+          -v "$PWD/tests/fixtures/context_pack/happy-path:/workspace"
+          repolens:ci
+          status /workspace
+
+      - name: Preflight smoke
+        run: >-
+          docker run --rm
+          --network none
+          --user "$(id -u):$(id -g)"
+          -v "$PWD/tests/fixtures/context_pack/happy-path:/workspace"
+          repolens:ci
+          preflight /workspace "Check Docker install readiness" --json
