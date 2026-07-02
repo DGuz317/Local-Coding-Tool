@@ -9,7 +9,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from repolens.context_pack import expand_context, get_task_context
+from repolens.artifact_audit import audit_artifacts
+from repolens.context_pack import expand_context, get_assistant_preflight, get_task_context
 from repolens.context_pack_contract import DEFAULT_CONTEXT_PACK_BUDGET, guard_context_pack_output
 from repolens.indexer import index_repository
 from repolens.mcp_envelope import mcp_success, truncation_metadata
@@ -53,14 +54,18 @@ def run_context_evaluation(
     passed_cases = sum(1 for case in cases if case["passed"] is True)
     failed_cases = len(cases) - passed_cases
     corpora = _corpora_summary(cases)
+    artifact_audit_summary = _artifact_audit_summary(cases)
     local_savings_summary = _local_savings_summary(cases)
+    preflight_summary = _preflight_summary(cases)
     release_cases = [case for case in cases if case.get("corpus") == "release_blocking"]
     release_failed_cases = sum(1 for case in release_cases if case["passed"] is not True)
     data = {
         "cases": cases,
+        "artifact_audit_summary": artifact_audit_summary,
         "corpora": corpora,
         "local_savings_summary": local_savings_summary,
         "manifest_version": str(manifest.get("manifest_version", "")),
+        "preflight_summary": preflight_summary,
         "release_gate": {
             "gate_type": "expectation_based",
             "passed": release_failed_cases == 0,
@@ -154,6 +159,36 @@ def _local_savings_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     }
 
 
+def _preflight_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    evaluated = [case for case in cases if _mapping(case.get("preflight_evidence"))]
+    passed = sum(
+        1 for case in evaluated if _mapping(case.get("preflight_evidence")).get("ok") is True
+    )
+    return {
+        "evaluated_cases": [str(case.get("id", "")) for case in evaluated],
+        "failed_cases": len(evaluated) - passed,
+        "passed_cases": passed,
+        "purpose": "assistant_preflight_before_broad_repository_reads",
+        "total_cases": len(evaluated),
+    }
+
+
+def _artifact_audit_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    evaluated = [case for case in cases if _mapping(case.get("artifact_audit_evidence"))]
+    passed = sum(
+        1
+        for case in evaluated
+        if _mapping(case.get("artifact_audit_evidence")).get("passed") is True
+    )
+    return {
+        "evaluated_cases": [str(case.get("id", "")) for case in evaluated],
+        "failed_cases": len(evaluated) - passed,
+        "passed_cases": passed,
+        "purpose": "artifact_safety_disclosure_gate",
+        "total_cases": len(evaluated),
+    }
+
+
 def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
     """Render a compact human evaluation summary."""
     if not envelope.get("ok", False):
@@ -221,6 +256,15 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
                 focus_hints=focus_hints,
             )
 
+        preflight_envelope = (
+            get_assistant_preflight(work_repo, task, focus_hints=focus_hints)
+            if case.get("evaluate_preflight") is True
+            else None
+        )
+        artifact_audit_envelope = (
+            audit_artifacts(work_repo) if case.get("evaluate_artifact_audit") is True else None
+        )
+
         reading = GraphQueryService(work_repo).suggest_reading_order(task)
         lexical_paths = _lexical_baseline_paths(work_repo, task)
         case_result = _case_result(
@@ -229,7 +273,9 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
             pack_envelope=pack_envelope,
             reading_envelope=reading,
             lexical_paths=lexical_paths,
+            preflight_envelope=preflight_envelope,
             expansion_envelope=expansion_envelope,
+            artifact_audit_envelope=artifact_audit_envelope,
             work_repo=work_repo,
         )
         return case_result
@@ -242,7 +288,9 @@ def _case_result(
     pack_envelope: Mapping[str, Any],
     reading_envelope: Mapping[str, Any],
     lexical_paths: Sequence[str],
+    preflight_envelope: Mapping[str, Any] | None,
     expansion_envelope: Mapping[str, Any] | None,
+    artifact_audit_envelope: Mapping[str, Any] | None,
     work_repo: Path,
 ) -> dict[str, Any]:
     pack = _mapping(pack_envelope.get("data"))
@@ -261,6 +309,8 @@ def _case_result(
         expected=expected,
         pack_envelope=pack_envelope,
         expansion_envelope=expansion_envelope,
+        preflight_envelope=preflight_envelope,
+        artifact_audit_envelope=artifact_audit_envelope,
         safety_outcomes=safety_outcomes,
     )
     context_metrics = _metrics_for_paths(
@@ -293,6 +343,7 @@ def _case_result(
         "category": str(case.get("category", "")),
         "checks": checks,
         "corpus": str(case.get("corpus") or "release_blocking"),
+        "artifact_audit_evidence": _artifact_audit_evidence(artifact_audit_envelope),
         "id": str(case.get("id", "")),
         "local_savings": _local_savings_metrics(
             context_metrics=context_metrics,
@@ -303,11 +354,14 @@ def _case_result(
             stale_graph_risk=_stale_graph_risk(pack_envelope),
         ),
         "metrics": {
+            "assistant_preflight": _preflight_evidence(preflight_envelope),
+            "artifact_audit": _artifact_audit_evidence(artifact_audit_envelope),
             "context_pack": context_metrics,
             "lexical": lexical_metrics,
             "suggest_reading_order": reading_metrics,
         },
         "passed": all(check["passed"] is True for check in checks),
+        "preflight_evidence": _preflight_evidence(preflight_envelope),
         "safety_negative_outcomes": safety_outcomes,
     }
 
@@ -317,6 +371,8 @@ def _expectation_checks(
     expected: Mapping[str, Any],
     pack_envelope: Mapping[str, Any],
     expansion_envelope: Mapping[str, Any] | None,
+    preflight_envelope: Mapping[str, Any] | None,
+    artifact_audit_envelope: Mapping[str, Any] | None,
     safety_outcomes: Mapping[str, bool],
 ) -> list[dict[str, Any]]:
     pack = _mapping(pack_envelope.get("data"))
@@ -481,9 +537,61 @@ def _expectation_checks(
             expansion_envelope is not None
             and expansion_envelope.get("ok") is expected["expansion_ok"],
         )
+    if "assistant_preflight_ok" in expected:
+        _add_check(
+            checks,
+            "assistant_preflight_ok",
+            preflight_envelope is not None
+            and preflight_envelope.get("ok") is expected["assistant_preflight_ok"],
+        )
+    if "assistant_preflight_version" in expected:
+        _add_check(
+            checks,
+            "assistant_preflight_version",
+            preflight_envelope is not None
+            and _mapping(preflight_envelope.get("data")).get("assistant_preflight_version")
+            == expected["assistant_preflight_version"],
+        )
+    if "artifact_audit_passed" in expected:
+        _add_check(
+            checks,
+            "artifact_audit_passed",
+            artifact_audit_envelope is not None
+            and _mapping(_mapping(artifact_audit_envelope.get("data")).get("summary")).get("passed")
+            is expected["artifact_audit_passed"],
+        )
     for name, passed in safety_outcomes.items():
         _add_check(checks, name, passed)
     return checks
+
+
+def _preflight_evidence(envelope: Mapping[str, Any] | None) -> dict[str, Any]:
+    if envelope is None:
+        return {}
+    data = _mapping(envelope.get("data"))
+    return {
+        "candidate_commands_not_run": all(
+            _mapping(command).get("not_run") is True
+            for command in _sequence(data.get("candidate_verification_commands"))
+        ),
+        "first_read_count": len(_paths(data.get("first_read_files"))),
+        "freshness_status": _mapping(data.get("freshness")).get("status", ""),
+        "ok": envelope.get("ok") is True,
+        "version": str(data.get("assistant_preflight_version", "")),
+    }
+
+
+def _artifact_audit_evidence(envelope: Mapping[str, Any] | None) -> dict[str, Any]:
+    if envelope is None:
+        return {}
+    data = _mapping(envelope.get("data"))
+    summary = _mapping(data.get("summary"))
+    return {
+        "audited_artifact_count": len(_sequence(data.get("audited_artifacts"))),
+        "ok": envelope.get("ok") is True,
+        "passed": summary.get("passed") is True,
+        "violation_count": int(summary.get("violation_count", 0)),
+    }
 
 
 def _safety_outcomes(

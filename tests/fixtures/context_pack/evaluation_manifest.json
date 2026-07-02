@@ -313,6 +313,84 @@
       }
     },
     {
+      "id": "v0_5_dogfood_js_ts_workspace_preflight_audit",
+      "corpus": "release_blocking",
+      "category": "dogfood_js_ts_workspace",
+      "task": "Use preflight before changing the @dog/lib workspace import",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": ["packages/app/src/index.ts"],
+      "evaluate_preflight": true,
+      "evaluate_artifact_audit": true,
+      "expected_outcomes": {
+        "assistant_preflight_ok": true,
+        "assistant_preflight_version": "0.5.preflight.v1",
+        "artifact_audit_passed": true,
+        "first_read_files_include_any": ["packages/lib/src/index.ts"],
+        "package_boundaries_include": [
+          {"name": "@dog/lib", "path": "packages/lib"}
+        ],
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_5_dogfood_python_package_preflight",
+      "corpus": "release_blocking",
+      "category": "dogfood_python_package",
+      "task": "Fix dogpkg build_message normalization and update tests",
+      "fixture_repo": "tests/fixtures/dogfood/python-local-imports",
+      "focus_hints": ["src/dogpkg/service.py"],
+      "evaluate_preflight": true,
+      "expected_outcomes": {
+        "assistant_preflight_ok": true,
+        "assistant_preflight_version": "0.5.preflight.v1",
+        "first_read_files_include_any": ["src/dogpkg/service.py", "src/dogpkg/util.py"],
+        "likely_tests_include_any": ["tests/service_spec.py"],
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_5_dogfood_docs_heavy_preflight",
+      "corpus": "release_blocking",
+      "category": "dogfood_docs_heavy",
+      "task": "Orient me to release runbook docs before changing service settings",
+      "fixture_repo": "tests/fixtures/dogfood/mixed-docs-config",
+      "focus_hints": ["docs/runbook.md"],
+      "evaluate_preflight": true,
+      "expected_outcomes": {
+        "assistant_preflight_ok": true,
+        "assistant_preflight_version": "0.5.preflight.v1",
+        "supporting_docs_include_any": ["README.md", "docs/runbook.md"],
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_5_dogfood_config_heavy_artifact_audit",
+      "corpus": "release_blocking",
+      "category": "dogfood_config_heavy",
+      "task": "Review config/service.yaml and command safety before deployment docs change",
+      "fixture_repo": "tests/fixtures/dogfood/mixed-docs-config",
+      "focus_hints": ["config/service.yaml"],
+      "evaluate_preflight": true,
+      "evaluate_artifact_audit": true,
+      "expected_outcomes": {
+        "assistant_preflight_ok": true,
+        "assistant_preflight_version": "0.5.preflight.v1",
+        "artifact_audit_passed": true,
+        "supporting_configs_include_any": ["config/service.yaml"],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "risky_or_external"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
       "id": "expanded_cli_invoice_export",
       "corpus": "expanded",
       "category": "cli_export",
