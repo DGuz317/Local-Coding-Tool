@@ -1,8 +1,8 @@
-# RepoLens MCP v0.3 Assistant Usage Guide
+# RepoLens MCP v0.5 Assistant Usage Guide
 
-RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.3, start with a Context Pack: a bounded, task-scoped bundle of files, symbols, tests, docs, configs, commands, risks, reasons, confidence, freshness, and expansion handles.
+RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.5, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata.
 
-Context Packs are orientation-only. They do not include source snippets, function or method signatures, code bodies, raw comments, paragraph excerpts, raw Agent Guidance instructions, or persisted assistant session state. Use them to choose what to read next, not as a substitute for reading files before editing.
+Assistant Preflight and Context Packs are orientation-only. They do not include source snippets, function or method signatures, code bodies, raw comments, paragraph excerpts, raw Agent Guidance instructions, or persisted assistant session state. Use them to choose what to read next, not as a substitute for reading files before editing.
 
 ## Setup Flow
 
@@ -18,19 +18,28 @@ repolens index /absolute/path/to/repo
 repolens mcp /absolute/path/to/repo
 ```
 
-3. Ask the assistant to check graph freshness before relying on graph facts, then request a task-scoped Context Pack.
+3. Ask the assistant to call `assistant_preflight` before broad file exploration. The preflight response includes graph freshness and bounded task context.
 
 ## Recommended Assistant Prompt
 
 ```text
-Use RepoLens MCP for this repository before broad file exploration. Start with graph_status. If the graph is available, call get_task_context for the current task and inspect the ranked First-Read Files, likely tests, support groups, warnings, limits, freshness, and confidence. Treat Context Packs as static, evidence-backed orientation metadata, not source preview. If graph_status reports missing or rebuild_required artifacts, ask before relying on graph facts. If freshness is stale but readable, use the warning and lower confidence in your plan.
+Use RepoLens MCP for this repository before broad file exploration. For each task, call assistant_preflight with the task description first. Inspect graph freshness, warnings, budget controls, focus hints, first-read files, likely tests, and candidate verification commands. Treat the response as orientation metadata, not source code. Read the returned files directly before editing. Candidate commands are found by RepoLens, not run by RepoLens, and must not be executed automatically.
 ```
 
 For edit-planning tasks:
 
 ```text
-Before editing, call get_task_context for the task. Read the top First-Read Files yourself, then use expand_context only on returned item handles when you need bounded follow-up context. Use explain_relevance when you need to understand why an item appeared. Treat candidate_verification_commands as commands found in the repository, not commands RepoLens ran or recommends for automatic execution.
+Before editing, call assistant_preflight for the task. Read the top First-Read Files yourself, then use get_task_context or expand_context only when you need bounded follow-up context. Use explain_relevance when you need to understand why an item appeared. Treat candidate_verification_commands as commands found in the repository, not commands RepoLens ran or recommends for automatic execution.
 ```
+
+## Assistant Preflight Workflow
+
+1. Call `assistant_preflight` with the natural-language task before broad file reads.
+2. Check `freshness`, `warnings`, `limits`, `truncation`, `confidence`, and `budget_controls` before trusting ranked items.
+3. Read `first_read_files` first, then inspect `likely_tests`, `supporting_docs`, `supporting_configs`, `risk_signals`, and `candidate_verification_commands` as needed.
+4. Use `focus_hint` or `--focus-hint` when the task names a repo-relative path, module, package, or symbol and the initial result is too broad.
+5. If artifacts are missing or require rebuild, ask the user to run `repolens index` or `repolens update`; MCP tools remain read-only and do not update artifacts.
+6. If a follow-up Context Pack is needed, request it for the same task instead of asking RepoLens for source snippets.
 
 ## Context Pack Workflow
 
@@ -127,10 +136,84 @@ Docker form:
 
 Replace `1000:1000` with the output of `id -u` and `id -g` on the host.
 
+After connecting OpenCode, instruct the assistant to call `assistant_preflight` before broad file reads.
+
+## Claude Desktop Example
+
+Claude Desktop uses an `mcpServers` object. For local contributor development from this repository:
+
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "uv",
+      "args": ["run", "repolens", "mcp", "/absolute/path/to/repo"],
+      "cwd": "/absolute/path/to/repolens-checkout"
+    }
+  }
+}
+```
+
+For an installed CLI, use `"command": "repolens"` and `"args": ["mcp", "/absolute/path/to/repo"]`.
+
+## Cursor-Style MCP Example
+
+Cursor-style MCP config also uses an `mcpServers` object:
+
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "uv",
+      "args": ["run", "repolens", "mcp", "/absolute/path/to/repo"],
+      "cwd": "/absolute/path/to/repolens-checkout"
+    }
+  }
+}
+```
+
+Keep active editor config local unless you intentionally want to share it. After connecting, ask Cursor to call `assistant_preflight` before broad file reads.
+
+## Setup Diagnostics
+
+Run these checks before connecting an assistant:
+
+```bash
+uv run repolens --help
+uv run repolens index /absolute/path/to/repo
+uv run repolens status /absolute/path/to/repo
+uv run repolens preflight /absolute/path/to/repo "Check setup" --json
+```
+
+Expected result: status reports available artifacts, preflight reports freshness and bounded orientation metadata, and candidate verification commands remain marked as found but not run.
+
+## Docker And PyPI Readiness Smokes
+
+Docker smoke without registry publishing:
+
+```bash
+docker build -t repolens:latest .
+docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/workspace" repolens:latest index /workspace
+docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/workspace" repolens:latest preflight /workspace "Check Docker setup" --json
+```
+
+PyPI readiness smoke without publishing:
+
+```bash
+uv build --out-dir /tmp/repolens-dist --clear
+uv tool install --force /tmp/repolens-dist/*.whl
+repolens --help
+repolens preflight /absolute/path/to/repo "Check wheel setup" --json
+uv tool uninstall repolens
+```
+
+These commands build and exercise local artifacts only. They do not publish to PyPI, push a Docker image, contact a package registry at runtime, or start a hosted service.
+
 ## Assistant Operating Rules
 
 - Prefer `graph_status` before any other RepoLens tool.
-- Use `get_task_context` as the v0.3 default for task-scoped orientation.
+- Prefer `assistant_preflight` as the first task-specific call before broad file reads.
+- Use `get_task_context` for bounded follow-up Context Packs when preflight is not enough.
 - Use `expand_context` only for returned Context Pack item handles.
 - Use `explain_relevance` to inspect why a returned item appears in the pack.
 - Use `repo_summary`, `suggest_reading_order`, and `impact_analysis` as lower-level graph tools when you need repository shape, a legacy reading-order baseline, or target-based impact context.

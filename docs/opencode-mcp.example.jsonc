@@ -1,6 +1,7 @@
 {
   // Documentation-only OpenCode MCP example. Keep active config outside this repo.
   // Replace paths and numeric user/group IDs before use.
+  // After connecting, ask the assistant to call assistant_preflight before broad file reads.
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "repolens": {

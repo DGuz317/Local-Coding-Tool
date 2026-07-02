@@ -1,6 +1,8 @@
-# RepoLens MCP v0.4 Release Readiness
+# RepoLens MCP v0.5 Release Readiness
 
 This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
+
+v0.5 release readiness is about a stable Assistant Preflight adoption path. Assistants should call preflight before broad file reads, then use the returned first-read files, likely tests, warnings, freshness, budget metadata, and candidate commands as orientation only.
 
 v0.4 release readiness is about trust in package/workspace repositories. The package/workspace evidence must show that RepoLens preserves uncertainty through Relationship Candidates, Graph Quality Warnings, unresolved statuses, and known limitations instead of inventing package facts.
 
@@ -10,11 +12,13 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 
 - Project and distribution name: `repolens` / RepoLens MCP.
 - License wording and whether a license file should be added before release.
-- PyPI publishing remains deferred for v0.4.
-- Docker registry publishing remains deferred for v0.4.
+- PyPI publishing remains deferred for v0.5 unless a maintainer opens an explicit release issue.
+- Docker registry publishing remains deferred for v0.5 unless a maintainer opens an explicit release issue.
+- Assistant client config examples for OpenCode, Claude Desktop, and Cursor-style MCP are accurate for the current CLI command shape.
 - Final README positioning and whether the README should target users, contributors, or both.
 - Known limitations in `docs/known-limitations.md` reflect dogfooding outcomes and are acceptable for release.
-- Maintainer release judgment for issue #128 is recorded before v0.4 is cut.
+- v0.4 maintainer release judgment for issue #128 remains recorded as the v0.5 prerequisite.
+- Final v0.5 maintainer release judgment is recorded before v0.5 is cut.
 
 ## Local Verification Gate
 
@@ -96,6 +100,53 @@ docker run --rm -i --network none --user "$(id -u):$(id -g)" -v "$PWD:/workspace
 ```
 
 Use an MCP client to list tools and call at least `graph_status`, `get_task_context`, `expand_context`, and `explain_relevance`.
+
+## Assistant Preflight Adoption Smoke
+
+Run setup diagnostics before connecting an assistant:
+
+```bash
+uv run repolens --help
+uv run repolens index /absolute/path/to/repo
+uv run repolens status /absolute/path/to/repo
+uv run repolens preflight /absolute/path/to/repo "Check setup readiness" --json
+```
+
+Expected smoke result:
+
+- `assistant_preflight_version` is present.
+- Graph freshness is included.
+- First-read files, likely tests, warnings, confidence, limits, truncation, and budget controls are bounded.
+- Candidate verification commands, when present, are marked found and `run: false`.
+- Output contains repo-relative paths and structural metadata, not source snippets.
+
+Use an MCP client to list tools and call `assistant_preflight` before broad file reads. OpenCode, Claude Desktop, and Cursor-style config examples live in `docs/assistant-usage-guide.md` and the README.
+
+## Docker Preflight Smoke
+
+Build and exercise a local image without registry publishing:
+
+```bash
+docker build -t repolens:latest .
+docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/workspace" repolens:latest index /workspace
+docker run --rm --network none --user "$(id -u):$(id -g)" -v "$PWD:/workspace" repolens:latest preflight /workspace "Check Docker setup" --json
+```
+
+This smoke must not push an image, publish a package, or require runtime network access.
+
+## PyPI Readiness Smoke
+
+Build and install a local wheel without publishing:
+
+```bash
+uv build --out-dir /tmp/repolens-dist --clear
+uv tool install --force /tmp/repolens-dist/*.whl
+repolens --help
+repolens preflight /absolute/path/to/repo "Check wheel setup" --json
+uv tool uninstall repolens
+```
+
+This checks local packaging readiness only. Publishing to PyPI remains deferred unless a maintainer opens an explicit release issue.
 
 ## Context Pack CLI Smoke
 
