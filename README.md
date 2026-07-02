@@ -120,6 +120,7 @@ uv run repolens status /path/to/repo
 uv run repolens report /path/to/repo
 uv run repolens search /path/to/repo "query text"
 uv run repolens context /path/to/repo "Describe your task"
+uv run repolens audit-artifacts /path/to/repo
 uv run repolens mcp /path/to/repo
 ```
 
@@ -131,6 +132,7 @@ Command meanings:
 - `report`: print the generated Markdown graph report.
 - `search`: search scanner-approved live text with capped previews.
 - `context`: return a task-scoped Context Pack.
+- `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants.
 - `mcp`: start the read-only stdio MCP server for an assistant.
 
 There is also a developer-oriented `benchmark-update` command for update-speed evidence.

@@ -9,6 +9,12 @@ from typing import Annotated
 
 import typer
 
+from repolens.artifact_audit import (
+    DEFAULT_MAX_ARTIFACT_BYTES,
+    RepoLensArtifactAuditError,
+    audit_artifacts,
+    human_artifact_audit,
+)
 from repolens.benchmark import RepoLensBenchmarkError, run_update_benchmark
 from repolens.context_evaluation import human_context_evaluation, run_context_evaluation
 from repolens.context_pack import (
@@ -625,6 +631,61 @@ def evaluate_context(
 
     typer.echo(human_context_evaluation(envelope), nl=False)
     if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+        raise typer.Exit(1)
+
+
+@app.command("audit-artifacts")
+def audit_artifacts_command(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path whose generated RepoLens artifacts should be audited.",
+        ),
+    ],
+    max_artifact_bytes: Annotated[
+        int,
+        typer.Option(
+            "--max-artifact-bytes",
+            min=1,
+            help="Maximum allowed size for any one generated artifact.",
+        ),
+    ] = DEFAULT_MAX_ARTIFACT_BYTES,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Audit local RepoLens artifacts for disclosure and safety invariants."""
+    try:
+        envelope = audit_artifacts(repo_path, max_artifact_bytes=max_artifact_bytes)
+    except RepoLensArtifactAuditError as exc:
+        error = str(exc) or exc.__class__.__name__
+        envelope = {
+            "data": {},
+            "error": {"message": error},
+            "limits": {"max_artifact_bytes": max_artifact_bytes},
+            "ok": False,
+            "warnings": [],
+        }
+        if json_output:
+            typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        else:
+            typer.echo(f"Artifact audit failed: {error}", err=True)
+        raise typer.Exit(1) from exc
+
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False):
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_artifact_audit(envelope), nl=False)
+    if not envelope.get("ok", False):
         raise typer.Exit(1)
 
 
