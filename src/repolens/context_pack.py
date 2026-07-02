@@ -1467,7 +1467,18 @@ def human_assistant_preflight(envelope: Mapping[str, Any]) -> str:
     """Render a compact source-free Assistant Preflight summary for humans."""
     if not envelope.get("ok"):
         error = _mapping(envelope.get("error"))
-        return f"Assistant Preflight failed: {error.get('message') or error.get('code') or 'unknown error'}\n"
+        lines = [
+            f"Assistant Preflight failed: {error.get('message') or error.get('code') or 'unknown error'}"
+        ]
+        if error.get("status"):
+            lines.append(f"Status: {error.get('status')}")
+        if error.get("recommended_action"):
+            lines.append(f"Recommended action: {error.get('recommended_action')}")
+        warnings = _sequence(envelope.get("warnings"))
+        if warnings:
+            lines.append("Warnings:")
+            lines.extend(f"- {warning}" for warning in warnings)
+        return "\n".join(lines) + "\n"
     data = _mapping(envelope.get("data"))
     task_context = _mapping(data.get("task_context"))
     budget_controls = _mapping(data.get("budget_controls"))
@@ -1486,10 +1497,40 @@ def human_assistant_preflight(envelope: Mapping[str, Any]) -> str:
             f"- {mapped.get('rank')}. {mapped.get('path')} "
             f"({mapped.get('confidence')}): {mapped.get('reason')}"
         )
-    lines.append(
-        "Budget Controls: "
-        f"{budget_controls.get('max_first_read_files')} first-read files, "
-        f"{budget_controls.get('max_items_per_support_group')} support items/group, "
-        f"{budget_controls.get('max_total_chars')} chars"
+
+    lines.append("Likely Tests:")
+    likely_tests = _sequence(data.get("likely_tests"))
+    if not likely_tests:
+        lines.append("- none")
+    for item in likely_tests:
+        mapped = _mapping(item)
+        lines.append(f"- {mapped.get('path')} ({mapped.get('confidence')}): {mapped.get('reason')}")
+
+    lines.append("Candidate Verification Commands (discovered only; not run):")
+    commands = _sequence(data.get("candidate_verification_commands"))
+    if not commands:
+        lines.append("- none")
+    for item in commands:
+        mapped = _mapping(item)
+        lines.append(
+            f"- {mapped.get('name')}: found={mapped.get('found')}, "
+            f"run={mapped.get('run')}, risk={mapped.get('risk_bucket')}"
+        )
+
+    warnings = _sequence(data.get("warnings"))
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in warnings)
+
+    lines.extend(
+        [
+            f"Confidence: {data.get('confidence')}",
+            f"Evidence: {len(_sequence(data.get('evidence')))} item(s)",
+            "Budget Controls: "
+            f"{budget_controls.get('max_first_read_files')} first-read files, "
+            f"{budget_controls.get('max_items_per_support_group')} support items/group, "
+            f"{budget_controls.get('max_candidate_verification_commands')} candidate commands, "
+            f"{budget_controls.get('max_total_chars')} chars",
+        ]
     )
     return "\n".join(lines) + "\n"
