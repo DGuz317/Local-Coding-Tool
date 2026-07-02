@@ -129,6 +129,11 @@ Emit CI-friendly JSON and fail when the expectation-based release gate fails:
 repolens evaluate-context --json
 ```
 
+The JSON includes deterministic `local_savings_summary` and per-case `local_savings`
+fields comparing the Context Pack result with a local lexical path-search baseline. These
+are fixture-local estimates for exploration cost, not telemetry, exact model-token claims,
+or universal productivity scores.
+
 Use a custom evaluation manifest:
 
 ```bash
