@@ -192,6 +192,79 @@ def test_mcp_tools_preserve_candidate_only_resolution_metadata(tmp_path):
     assert result["truncation"] == {"fields": [], "truncated": False}
 
 
+def test_mcp_assistant_preflight_returns_standard_envelope_with_focus_and_budget(
+    tmp_path,
+):
+    _write_preflight_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.assistant_preflight(
+        "Fix API_TOKEN=abc123 login validation",
+        focus_hints=["src/auth/login.ts"],
+        max_first_read_files=1,
+        max_items_per_support_group=1,
+        max_candidate_verification_commands=1,
+        max_total_chars=8_000,
+    )
+
+    data = result["data"]
+    assert set(result) >= {
+        "confidence",
+        "data",
+        "evidence",
+        "freshness",
+        "limits",
+        "ok",
+        "truncation",
+        "warnings",
+    }
+    assert result["ok"] is True
+    assert data["assistant_preflight_version"] == "0.5.preflight.v1"
+    assert data["task_context"]["display_task"] == "Fix API_TOKEN login validation"
+    assert data["focus_hints"]["items"] == ["src/auth/login.ts"]
+    assert data["budget_controls"]["max_first_read_files"] == 1
+    assert data["budget_controls"]["max_items_per_support_group"] == 1
+    assert data["budget_controls"]["max_candidate_verification_commands"] == 1
+    assert data["budget_controls"]["max_total_chars"] == 8_000
+    assert data["freshness"]["fresh"] is True
+    assert [item["path"] for item in data["first_read_files"]] == ["src/auth/login.ts"]
+    assert [item["path"] for item in data["likely_tests"]] == ["tests/login.test.ts"]
+    assert len(data["candidate_verification_commands"]) == 1
+    assert all(command["found"] is True for command in data["candidate_verification_commands"])
+    assert all(command["run"] is False for command in data["candidate_verification_commands"])
+    assert "abc123" not in str(result)
+    assert "return input.user" not in str(result)
+
+
+def test_mcp_assistant_preflight_missing_graph_returns_standard_error(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.assistant_preflight("Fix login validation")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "missing_graph_artifacts"
+    assert result["error"]["recommended_action"].startswith("repolens index ")
+    assert result["data"] == {}
+    assert result["freshness"]["fresh"] is False
+    assert result["truncation"] == {"fields": [], "truncated": False}
+
+
+def test_mcp_assistant_preflight_stale_graph_returns_bounded_warning(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_text(tmp_path / "src" / "auth" / "login.ts", "export const changed = true;\n")
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.assistant_preflight("Fix login validation")
+
+    assert result["ok"] is True
+    assert result["freshness"]["fresh"] is False
+    assert result["data"]["freshness"]["status"] == "stale"
+    assert "Graph artifacts may be stale" in " ".join(result["warnings"])
+
+
 def test_mcp_envelope_redacts_secret_like_metadata_at_output_boundary(tmp_path):
     tools = RepoLensMcpTools(tmp_path)
     envelope = {
@@ -252,6 +325,49 @@ def _write_fixture_repo(root) -> None:
             """
             [project]
             name = "demo"
+            """
+        ).lstrip(),
+    )
+
+
+def _write_preflight_fixture_repo(root) -> None:
+    _write_text(
+        root / "package.json",
+        dedent(
+            """
+            {
+              "name": "auth-demo",
+              "scripts": {
+                "test": "vitest run tests/login.test.ts",
+                "lint": "eslint src/auth/login.ts"
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "auth" / "login.ts",
+        dedent(
+            """
+            export function validateLogin(input: { user: string }) {
+              return input.user.length > 0;
+            }
+
+            export function loginFlow(input: { user: string }) {
+              return validateLogin(input);
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "tests" / "login.test.ts",
+        dedent(
+            """
+            import { validateLogin } from "../src/auth/login";
+
+            test("validates login", () => {
+              expect(validateLogin({ user: "demo" })).toBe(true);
+            });
             """
         ).lstrip(),
     )
