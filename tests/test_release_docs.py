@@ -241,6 +241,30 @@ def test_v0_4_release_readiness_docs_cover_required_topics() -> None:
         assert required in limitations
 
     assert (
-        "RepoLens v0.4 focuses on making Context Packs trustworthy across package/workspace repositories."
-        in readme
+        "RepoLens v0.5 focuses on giving assistants one deterministic preflight workflow" in readme
     )
+
+
+def test_v0_5_install_and_adoption_docs_cover_preflight_setup() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "assistant-usage-guide.md").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    opencode_example = (ROOT / "docs" / "opencode-mcp.example.jsonc").read_text(encoding="utf-8")
+
+    combined = "\n".join((readme, guide, readiness, opencode_example))
+
+    for required in (
+        "assistant_preflight before broad file reads",
+        "uv run repolens preflight /absolute/path/to/repo",
+        "OpenCode",
+        "Claude Desktop",
+        "Cursor-style MCP",
+        "Docker smoke without registry publishing",
+        "PyPI readiness smoke without publishing",
+        "uv build --out-dir /tmp/repolens-dist --clear",
+        "does not publish to PyPI",
+        "candidate verification commands remain marked as found but not run",
+    ):
+        assert required in combined
+
+    assert "assistant_preflight" in opencode_example
