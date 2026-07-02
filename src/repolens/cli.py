@@ -11,7 +11,12 @@ import typer
 
 from repolens.benchmark import RepoLensBenchmarkError, run_update_benchmark
 from repolens.context_evaluation import human_context_evaluation, run_context_evaluation
-from repolens.context_pack import get_task_context, human_context_pack
+from repolens.context_pack import (
+    get_assistant_preflight,
+    get_task_context,
+    human_assistant_preflight,
+    human_context_pack,
+)
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import RepoLensIndexError, index_repository, update_repository
 from repolens.mcp_server import run_mcp_server
@@ -525,6 +530,72 @@ def context(
         raise typer.Exit(1)
 
 
+@app.command()
+def preflight(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path to inspect.",
+        ),
+    ],
+    task: Annotated[str, typer.Argument(help="Natural-language task to orient around.")],
+    focus_hint: Annotated[
+        list[str] | None,
+        typer.Option("--focus-hint", help="Repo-relative path or symbol hint to focus preflight."),
+    ] = None,
+    max_first_read_files: Annotated[
+        int | None,
+        typer.Option("--max-first-read-files", help="Deterministic first-read file cap."),
+    ] = None,
+    max_items_per_support_group: Annotated[
+        int | None,
+        typer.Option("--max-items-per-support-group", help="Deterministic per-group item cap."),
+    ] = None,
+    max_candidate_verification_commands: Annotated[
+        int | None,
+        typer.Option(
+            "--max-candidate-verification-commands",
+            help="Deterministic candidate command cap.",
+        ),
+    ] = None,
+    max_total_chars: Annotated[
+        int | None,
+        typer.Option("--max-total-chars", help="Deterministic character cap."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Return the bounded v0.5 Assistant Preflight contract for a task."""
+    budget = _preflight_budget_overrides(
+        max_first_read_files=max_first_read_files,
+        max_items_per_support_group=max_items_per_support_group,
+        max_candidate_verification_commands=max_candidate_verification_commands,
+        max_total_chars=max_total_chars,
+    )
+    envelope = get_assistant_preflight(
+        repo_path,
+        task,
+        focus_hints=focus_hint or [],
+        budget=budget,
+    )
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False):
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_assistant_preflight(envelope), nl=False)
+    if not envelope.get("ok", False):
+        raise typer.Exit(1)
+
+
 @app.command("evaluate-context")
 def evaluate_context(
     manifest_path: Annotated[
@@ -685,3 +756,22 @@ def _print_change_summary(freshness: dict[str, object]) -> None:
         for changed_file in changed_files[:10]:
             if isinstance(changed_file, dict):
                 typer.echo(f"- {changed_file.get('path')}: {changed_file.get('change_type')}")
+
+
+def _preflight_budget_overrides(
+    *,
+    max_first_read_files: int | None,
+    max_items_per_support_group: int | None,
+    max_candidate_verification_commands: int | None,
+    max_total_chars: int | None,
+) -> dict[str, int]:
+    budget = {}
+    if max_first_read_files is not None:
+        budget["max_first_read_files"] = max_first_read_files
+    if max_items_per_support_group is not None:
+        budget["max_items_per_support_group"] = max_items_per_support_group
+    if max_candidate_verification_commands is not None:
+        budget["max_candidate_verification_commands"] = max_candidate_verification_commands
+    if max_total_chars is not None:
+        budget["max_total_chars"] = max_total_chars
+    return budget
