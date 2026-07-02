@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 
 from repolens.context_pack_contract import (
+    ASSISTANT_PREFLIGHT_CONTRACT,
+    ASSISTANT_PREFLIGHT_REQUIRED_TOP_LEVEL_FIELDS,
+    ASSISTANT_PREFLIGHT_VERSION,
     CONTEXT_PACK_ITEM_REQUIRED_FIELDS,
     CONTEXT_PACK_REQUIRED_TOP_LEVEL_FIELDS,
     DEFAULT_CONTEXT_PACK_BUDGET,
@@ -35,6 +38,32 @@ def test_context_pack_schema_contract_names_required_pack_and_mcp_fields():
         "truncation",
         "warnings",
     }
+
+
+def test_assistant_preflight_schema_contract_is_bounded_and_shared():
+    assert ASSISTANT_PREFLIGHT_VERSION == "0.5.preflight.v1"
+    assert set(ASSISTANT_PREFLIGHT_REQUIRED_TOP_LEVEL_FIELDS) == {
+        "assistant_preflight_version",
+        "context_pack_id",
+        "context_pack_version",
+        "task_context",
+        "focus_hints",
+        "budget_controls",
+        "freshness",
+        "first_read_files",
+        "likely_tests",
+        "candidate_verification_commands",
+        "ambiguity",
+        "warnings",
+        "evidence",
+        "confidence",
+        "limits",
+        "truncation",
+    }
+    assert ASSISTANT_PREFLIGHT_CONTRACT["budget_units"] == ("items", "characters")
+    assert "model_specific_tokens" in ASSISTANT_PREFLIGHT_CONTRACT["forbidden_budget_units"]
+    assert ASSISTANT_PREFLIGHT_CONTRACT["default_context_pack_enrichment"] == "none"
+    assert ASSISTANT_PREFLIGHT_CONTRACT["opt_in_enrichment_reserved_for_later"] is True
 
 
 def test_context_pack_budget_contract_sets_explicit_support_group_caps():

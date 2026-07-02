@@ -13,6 +13,7 @@ from typing import Any
 from repolens.redaction import redact_payload, redact_text
 
 CONTEXT_PACK_VERSION = "0.3.contract.v1"
+ASSISTANT_PREFLIGHT_VERSION = "0.5.preflight.v1"
 
 CONFIDENCE_LEVELS = ("high", "medium", "low", "none")
 
@@ -47,6 +48,34 @@ MCP_ENVELOPE_REQUIRED_FIELDS = (
     "truncation",
     "warnings",
 )
+
+ASSISTANT_PREFLIGHT_REQUIRED_TOP_LEVEL_FIELDS = (
+    "assistant_preflight_version",
+    "context_pack_id",
+    "context_pack_version",
+    "task_context",
+    "focus_hints",
+    "budget_controls",
+    "freshness",
+    "first_read_files",
+    "likely_tests",
+    "candidate_verification_commands",
+    "ambiguity",
+    "warnings",
+    "evidence",
+    "confidence",
+    "limits",
+    "truncation",
+)
+
+ASSISTANT_PREFLIGHT_CONTRACT = {
+    "purpose": "bounded_assistant_orientation_before_broad_repository_reads",
+    "shared_surfaces": ("cli_preflight", "mcp_assistant_preflight"),
+    "budget_units": ("items", "characters"),
+    "forbidden_budget_units": ("model_specific_tokens",),
+    "default_context_pack_enrichment": "none",
+    "opt_in_enrichment_reserved_for_later": True,
+}
 
 CONTEXT_PACK_ITEM_KINDS = (
     "first_read_file",

@@ -8,7 +8,12 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from repolens.context_pack import expand_context, explain_relevance, get_task_context
+from repolens.context_pack import (
+    expand_context,
+    explain_relevance,
+    get_assistant_preflight,
+    get_task_context,
+)
 from repolens.mcp_envelope import (
     MCP_GRAPH_UNAVAILABLE_CODES,
     mcp_error,
@@ -40,6 +45,7 @@ MCP_TOOL_NAMES = (
     "shortest_path",
     "impact_analysis",
     "suggest_reading_order",
+    "assistant_preflight",
     "get_task_context",
     "expand_context",
     "explain_relevance",
@@ -203,6 +209,28 @@ class RepoLensMcpTools:
     def get_task_context(self, task: str) -> dict[str, Any]:
         return get_task_context(self.repo_path, task)
 
+    def assistant_preflight(
+        self,
+        task: str,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> dict[str, Any]:
+        budget = _preflight_budget_overrides(
+            max_first_read_files=max_first_read_files,
+            max_items_per_support_group=max_items_per_support_group,
+            max_candidate_verification_commands=max_candidate_verification_commands,
+            max_total_chars=max_total_chars,
+        )
+        return get_assistant_preflight(
+            self.repo_path,
+            task,
+            focus_hints=focus_hints or [],
+            budget=budget,
+        )
+
     def expand_context(
         self,
         task: str,
@@ -264,6 +292,25 @@ class RepoLensMcpTools:
         )
         result["error"] = graph_error["error"]
         return result
+
+
+def _preflight_budget_overrides(
+    *,
+    max_first_read_files: int | None,
+    max_items_per_support_group: int | None,
+    max_candidate_verification_commands: int | None,
+    max_total_chars: int | None,
+) -> dict[str, int]:
+    budget = {}
+    if max_first_read_files is not None:
+        budget["max_first_read_files"] = max_first_read_files
+    if max_items_per_support_group is not None:
+        budget["max_items_per_support_group"] = max_items_per_support_group
+    if max_candidate_verification_commands is not None:
+        budget["max_candidate_verification_commands"] = max_candidate_verification_commands
+    if max_total_chars is not None:
+        budget["max_total_chars"] = max_total_chars
+    return budget
 
 
 def create_mcp_server(repo_path: Path | str) -> FastMCP:
@@ -354,6 +401,25 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
     def get_task_context(task: str) -> dict[str, Any]:
         """Return a deterministic v0.3 Context Pack for a natural-language task."""
         return tools.get_task_context(task)
+
+    @server.tool()
+    def assistant_preflight(
+        task: str,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Return the bounded v0.5 Assistant Preflight contract before broad reads."""
+        return tools.assistant_preflight(
+            task,
+            focus_hints,
+            max_first_read_files,
+            max_items_per_support_group,
+            max_candidate_verification_commands,
+            max_total_chars,
+        )
 
     @server.tool()
     def expand_context(
