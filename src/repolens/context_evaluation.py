@@ -677,6 +677,7 @@ def _metrics_for_paths(
         if approximate_token_estimate is not None
         else _approx_tokens_for_paths(paths),
         "expansion_count": expansion_count,
+        "first_relevant_rank": _first_relevant_rank(paths, relevant_paths),
         "first_read_hit_rate": first_read_hit_rate,
         "irrelevant_file_count": irrelevant_file_count,
         "pack_size": len(paths),
@@ -694,22 +695,26 @@ def _local_savings_metrics(
     not_run_command_count: int,
     stale_graph_risk: bool,
 ) -> dict[str, Any]:
-    context_pack = {
+    context_pack: dict[str, Any] = {
         "approximate_token_estimate": int(context_metrics.get("approximate_token_estimate", 0)),
+        "first_relevant_rank": context_metrics.get("first_relevant_rank"),
         "first_read_hit_rate": float(context_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(context_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": not_run_command_count,
         "pack_size": int(context_metrics.get("pack_size", 0)),
         "stale_graph_risk": stale_graph_risk,
     }
-    lexical = {
+    lexical: dict[str, Any] = {
         "approximate_token_estimate": int(lexical_metrics.get("approximate_token_estimate", 0)),
+        "first_relevant_rank": lexical_metrics.get("first_relevant_rank"),
         "first_read_hit_rate": float(lexical_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(lexical_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": 0,
         "pack_size": int(lexical_metrics.get("pack_size", 0)),
         "stale_graph_risk": False,
     }
+    context_rank = _optional_int(context_metrics.get("first_relevant_rank"))
+    lexical_rank = _optional_int(lexical_metrics.get("first_relevant_rank"))
     return {
         "approx_tokens_avoided_vs_lexical": lexical["approximate_token_estimate"]
         - context_pack["approximate_token_estimate"],
@@ -718,6 +723,9 @@ def _local_savings_metrics(
         "estimate_kind": "local_fixture_metadata_estimate",
         "explanation": _LOCAL_SAVINGS_EXPLANATION,
         "files_avoided_vs_lexical": lexical["pack_size"] - context_pack["pack_size"],
+        "first_relevant_rank_delta_vs_lexical": _rank_delta(
+            context_rank=context_rank, lexical_rank=lexical_rank
+        ),
         "first_read_hit_rate_delta_vs_lexical": round(
             context_pack["first_read_hit_rate"] - lexical["first_read_hit_rate"], 3
         ),
@@ -725,6 +733,28 @@ def _local_savings_metrics(
         "likely_irrelevant_files_avoided_vs_lexical": lexical["likely_irrelevant_file_count"]
         - context_pack["likely_irrelevant_file_count"],
     }
+
+
+def _first_relevant_rank(paths: Sequence[str], relevant_paths: set[str]) -> int | None:
+    if not relevant_paths:
+        return None
+    for index, path in enumerate(paths, start=1):
+        if path in relevant_paths:
+            return index
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_delta(*, context_rank: int | None, lexical_rank: int | None) -> int | None:
+    if context_rank is None or lexical_rank is None:
+        return None
+    return lexical_rank - context_rank
 
 
 def _context_pack_approx_tokens(pack: Mapping[str, Any]) -> int:
