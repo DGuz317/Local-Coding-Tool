@@ -53,7 +53,7 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == "15"
     assert len(metadata["canonical_graph_hash"]) == 64
     assert {"confidence", "resolution_strategy", "evidence_json"} <= edge_columns
     assert len(import_edges) == 1
@@ -82,6 +82,69 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     assert exported_edge["resolution_strategy"] == "external_import"
     assert sorted(item["line"] for item in exported_edge["evidence"]) == [1, 2]
     assert {item["specifier"] for item in exported_edge["evidence"]} == {"react"}
+
+
+def test_javascript_call_chains_are_metadata_facts_not_call_edges(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "query.ts").write_text(
+        "export function loadUsers() {\n  return db.select().from().where();\n}\n",
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+    export_graph_artifacts(tmp_path)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        chain_rows = list(
+            connection.execute(
+                """
+                SELECT path, receiver_shape, method_names_json, parser_evidence_labels_json
+                FROM javascript_call_chains
+                ORDER BY path, start_line, id
+                """
+            )
+        )
+        call_edges = list(connection.execute("SELECT id FROM edges WHERE kind = 'CALLS'"))
+
+    assert len(chain_rows) == 1
+    assert chain_rows[0][0] == "src/query.ts"
+    assert chain_rows[0][1] == "identifier"
+    assert json.loads(chain_rows[0][2]) == ["select", "from", "where"]
+    assert json.loads(chain_rows[0][3]) == [
+        "line_local_member_call_sequence",
+        "source_free_shape",
+    ]
+    assert call_edges == []
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    assert graph_json["counts"]["javascript_call_chains"] == 1
+    assert graph_json["javascript"]["call_chains"][0]["method_names"] == [
+        "select",
+        "from",
+        "where",
+    ]
+    assert "db.select" not in json.dumps(graph_json, sort_keys=True)
+
+    metadata = GraphQueryService(tmp_path).context_pack_file_metadata(["src/query.ts"])
+    chains = metadata["data"]["structural_summaries"]["src/query.ts"]["call_chains"]
+    assert chains == [
+        {
+            "evidence": [
+                {
+                    "line_range": {"end": 2, "start": 2},
+                    "source": "javascript_call_chains",
+                }
+            ],
+            "line_range": {"end": 2, "start": 2},
+            "method_names": ["select", "from", "where"],
+            "parser_evidence_labels": [
+                "line_local_member_call_sequence",
+                "source_free_shape",
+            ],
+            "receiver_shape": "identifier",
+        }
+    ]
 
 
 def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_path):

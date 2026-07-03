@@ -69,7 +69,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 14
+GRAPH_SCHEMA_VERSION = 15
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -865,6 +865,18 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
+        CREATE TABLE javascript_call_chains (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            enclosing_symbol_id TEXT REFERENCES javascript_symbols(id) ON DELETE SET NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            receiver_shape TEXT NOT NULL,
+            method_names_json TEXT NOT NULL,
+            parser_evidence_labels_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
         CREATE TABLE config_files (
             path TEXT PRIMARY KEY REFERENCES files(path) ON DELETE CASCADE,
             node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
@@ -1432,6 +1444,22 @@ def _file_signatures_by_path(
             js_assignment.path,
             "javascript_commonjs_assignment",
             {"line": js_assignment.line},
+        )
+    for js_chain in extracted.javascript.call_chains:
+        add_graph(
+            js_chain.path,
+            "javascript_call_chain",
+            {
+                "enclosing_symbol_id": js_chain.enclosing_symbol_id,
+                "method_names": js_chain.method_names,
+                "parser_evidence_labels": js_chain.parser_evidence_labels,
+                "receiver_shape": js_chain.receiver_shape,
+            },
+        )
+        add_line_range(
+            js_chain.path,
+            "javascript_call_chain",
+            {"start_line": js_chain.start_line, "end_line": js_chain.end_line},
         )
 
     for config in extracted.config.config_files:
@@ -2441,6 +2469,36 @@ def _insert_javascript_tables(
                 assignment.line,
             )
             for assignment in javascript_index.commonjs_assignments
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_call_chains(
+            id,
+            path,
+            module_node_id,
+            enclosing_symbol_id,
+            start_line,
+            end_line,
+            receiver_shape,
+            method_names_json,
+            parser_evidence_labels_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                chain.id,
+                chain.path,
+                chain.module_node_id,
+                chain.enclosing_symbol_id,
+                chain.start_line,
+                chain.end_line,
+                chain.receiver_shape,
+                _json_value(chain.method_names),
+                _json_value(chain.parser_evidence_labels),
+            )
+            for chain in javascript_index.call_chains
         ),
     )
 
@@ -4294,6 +4352,26 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
+        javascript_call_chains = _decode_javascript_call_chain_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        enclosing_symbol_id,
+                        start_line,
+                        end_line,
+                        receiver_shape,
+                        method_names_json,
+                        parser_evidence_labels_json
+                    FROM javascript_call_chains
+                    ORDER BY path, start_line, id
+                    """
+                )
+            )
+        )
         config_files = _decode_config_file_rows(
             _rows(
                 connection.execute(
@@ -4515,6 +4593,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
+        "javascript_call_chains": len(javascript_call_chains),
         "javascript_commonjs_assignments": len(javascript_commonjs_assignments),
         "javascript_exports": len(javascript_exports),
         "javascript_imports": len(javascript_imports),
@@ -4567,6 +4646,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "relationship_candidates": _decode_relationship_candidate_rows(relationship_candidates),
         "files": files,
         "javascript": {
+            "call_chains": javascript_call_chains,
             "commonjs_assignments": javascript_commonjs_assignments,
             "exports": javascript_exports,
             "imports": javascript_imports,
@@ -5037,6 +5117,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- JavaScript packages: {counts['javascript_packages']}",
         f"- JavaScript exports: {counts['javascript_exports']}",
         f"- JavaScript CommonJS assignments: {counts['javascript_commonjs_assignments']}",
+        f"- JavaScript call chains: {counts['javascript_call_chains']}",
         f"- Config files: {counts['config_files']}",
         f"- Config packages: {counts['config_packages']}",
         f"- Config commands: {counts['config_commands']}",
@@ -5253,6 +5334,28 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Call Chains",
+            "",
+            "| Path | Receiver shape | Methods | Lines | Evidence |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["call_chains"]:
+        lines.extend(
+            "| "
+            f"`{chain['path']}` | "
+            f"{chain['receiver_shape']} | "
+            f"`{_md_cell(_join_list(chain['method_names']))}` | "
+            f"{chain['start_line']}-{chain['end_line']} | "
+            f"{_md_cell(_join_list(chain['parser_evidence_labels']))} |"
+            for chain in javascript["call_chains"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
 
     lines.extend(
         [
@@ -5924,6 +6027,22 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             f"`{_md_cell(assignment['exported_name'])}`",
             f"`{_md_cell(assignment['assigned_name'] or '')}`",
             str(assignment["line"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_call_chains",
+        title="JavaScript Call Chains",
+        item_label="JavaScript call chains",
+        rows=javascript["call_chains"],
+        headers=("Fact ID", "Path", "Receiver shape", "Methods", "Lines", "Evidence"),
+        row=lambda chain: (
+            f"`{_md_cell(chain['id'])}`",
+            f"`{_md_cell(chain['path'])}`",
+            str(chain["receiver_shape"]),
+            f"`{_md_cell(_join_list(chain['method_names']))}`",
+            f"{chain['start_line']}-{chain['end_line']}",
+            _graph_index_cell(_join_list(chain["parser_evidence_labels"])),
         ),
     )
     _append_graph_index_section(
@@ -7341,6 +7460,16 @@ def _decode_python_package_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     for row in rows:
         decoded = dict(row)
         decoded["inferred"] = bool(decoded["inferred"])
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_javascript_call_chain_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["method_names"] = json.loads(decoded.pop("method_names_json"))
+        decoded["parser_evidence_labels"] = json.loads(decoded.pop("parser_evidence_labels_json"))
         decoded_rows.append(decoded)
     return decoded_rows
 

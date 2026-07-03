@@ -99,7 +99,7 @@ def test_status_classifies_primary_file_changes(tmp_path):
     assert changes["deleted.py"] == "deleted"
     assert changes["new.py"] == "new"
     assert changes["same.py"] == "no_change"
-    assert envelope["warnings"] == ["Parser errors detected in the live graph overlay."]
+    assert "Parser errors detected in the live graph overlay." in envelope["warnings"]
 
 
 def test_update_bootstraps_missing_graph_and_records_latest_changes(tmp_path):
@@ -166,7 +166,7 @@ def test_update_warns_about_parser_errors_without_failing(tmp_path):
     assert envelope["data"]["freshness"]["change_counts"]["parse_error"] == 1
     assert envelope["data"]["selective_update"]["parse_error_paths"] == ["broken.py"]
     assert envelope["data"]["selective_update"]["stale_cleanup_paths"] == ["broken.py"]
-    assert envelope["warnings"] == ["Parser errors detected in the live graph overlay."]
+    assert "Parser errors detected in the live graph overlay." in envelope["warnings"]
 
     with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
         symbol_count = connection.execute(

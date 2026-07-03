@@ -9,6 +9,7 @@ from repolens.javascript_index import (
     JAVASCRIPT_EXTRACTOR_VERSION,
     PROMOTED_JAVASCRIPT_FACT_FIELDS,
     PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+    JavaScriptCallChainFact,
     JavaScriptCommonJSAssignmentFact,
     JavaScriptExportFact,
     JavaScriptImportFact,
@@ -37,6 +38,7 @@ def test_promoted_javascript_fact_contract_allows_only_source_free_fields():
         "commonjs_assignments": tuple(
             field.name for field in fields(JavaScriptCommonJSAssignmentFact)
         ),
+        "call_chains": tuple(field.name for field in fields(JavaScriptCallChainFact)),
     }
 
     forbidden_terms = {
@@ -51,6 +53,43 @@ def test_promoted_javascript_fact_contract_allows_only_source_free_fields():
     for allowed_fields in PROMOTED_JAVASCRIPT_FACT_FIELDS.values():
         for field_name in allowed_fields:
             assert not any(term in field_name for term in forbidden_terms)
+
+
+def test_javascript_index_extracts_source_free_call_chain_facts(tmp_path):
+    _write_text(
+        tmp_path / "src" / "query.ts",
+        dedent(
+            """
+            export function loadUsers() {
+              return db.select().from().where();
+            }
+
+            const ignored = "client.get().post()";
+            const single = client.get();
+            const built = new Builder().step().finish();
+            """
+        ).lstrip(),
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    chains = {
+        (chain.start_line, chain.receiver_shape): chain for chain in javascript_index.call_chains
+    }
+    assert set(chains) == {(2, "identifier"), (7, "new_expression")}
+    assert chains[(2, "identifier")].method_names == ("select", "from", "where")
+    assert chains[(2, "identifier")].end_line == 2
+    assert chains[(2, "identifier")].enclosing_symbol_id is not None
+    assert chains[(2, "identifier")].parser_evidence_labels == (
+        "line_local_member_call_sequence",
+        "source_free_shape",
+    )
+    assert chains[(7, "new_expression")].method_names == ("step", "finish")
+
+    serialized = repr(javascript_index.call_chains)
+    assert "db.select" not in serialized
+    assert "client.get" not in serialized
+    assert "new Builder" not in serialized
 
 
 def test_javascript_index_supports_scanner_approved_source_extensions(tmp_path):

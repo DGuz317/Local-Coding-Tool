@@ -69,6 +69,17 @@ PROMOTED_JAVASCRIPT_FACT_FIELDS = {
         "assigned_name",
         "line",
     ),
+    "call_chains": (
+        "id",
+        "path",
+        "module_node_id",
+        "enclosing_symbol_id",
+        "start_line",
+        "end_line",
+        "receiver_shape",
+        "method_names",
+        "parser_evidence_labels",
+    ),
 }
 
 EXPERIMENTAL_JAVASCRIPT_FACT_POLICY = (
@@ -274,6 +285,21 @@ class JavaScriptCommonJSAssignmentFact:
 
 
 @dataclass(frozen=True)
+class JavaScriptCallChainFact:
+    """A source-free JS/TS fluent call chain shape."""
+
+    id: str
+    path: str
+    module_node_id: str
+    enclosing_symbol_id: str | None
+    start_line: int
+    end_line: int
+    receiver_shape: str
+    method_names: tuple[str, ...]
+    parser_evidence_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class JavaScriptIndex:
     """All JS/TS facts extracted for one scan result."""
 
@@ -283,6 +309,7 @@ class JavaScriptIndex:
     symbols: tuple[JavaScriptSymbolFact, ...]
     exports: tuple[JavaScriptExportFact, ...]
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
+    call_chains: tuple[JavaScriptCallChainFact, ...]
 
     @property
     def parser_status_by_path(self) -> dict[str, str]:
@@ -393,6 +420,7 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -430,6 +458,7 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         symbols.extend(file_facts.symbols)
         exports.extend(file_facts.exports)
         commonjs_assignments.extend(file_facts.commonjs_assignments)
+        call_chains.extend(file_facts.call_chains)
         for import_fact in file_facts.imports:
             if import_fact.root_name is not None:
                 observed_packages.add((import_fact.classification, import_fact.root_name))
@@ -451,6 +480,9 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         commonjs_assignments=tuple(
             sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
         ),
+        call_chains=tuple(
+            sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
+        ),
     )
 
 
@@ -470,6 +502,7 @@ def extract_javascript_index_with_tree_sitter(
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -508,6 +541,7 @@ def extract_javascript_index_with_tree_sitter(
         symbols.extend(file_facts.symbols)
         exports.extend(file_facts.exports)
         commonjs_assignments.extend(file_facts.commonjs_assignments)
+        call_chains.extend(file_facts.call_chains)
         for import_fact in file_facts.imports:
             if import_fact.root_name is not None:
                 observed_packages.add((import_fact.classification, import_fact.root_name))
@@ -528,6 +562,9 @@ def extract_javascript_index_with_tree_sitter(
         exports=tuple(sorted(exports, key=lambda fact: (fact.path, fact.line, fact.id))),
         commonjs_assignments=tuple(
             sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
+        ),
+        call_chains=tuple(
+            sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
         ),
     )
 
@@ -635,6 +672,7 @@ class _JavaScriptFileFacts:
     symbols: tuple[JavaScriptSymbolFact, ...]
     exports: tuple[JavaScriptExportFact, ...]
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
+    call_chains: tuple[JavaScriptCallChainFact, ...]
 
 
 def _extract_file_facts(
@@ -648,10 +686,12 @@ def _extract_file_facts(
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
     import_id_counts: Counter[str] = Counter()
     symbol_id_counts: Counter[str] = Counter()
     export_id_counts: Counter[str] = Counter()
     commonjs_id_counts: Counter[str] = Counter()
+    call_chain_id_counts: Counter[str] = Counter()
     brace_depth = 0
 
     stripped_lines = tuple(_strip_comments_preserving_strings(source))
@@ -725,6 +765,17 @@ def _extract_file_facts(
             if commonjs_assignment is not None:
                 commonjs_assignments.append(commonjs_assignment)
 
+        call_chains.extend(
+            _call_chain_facts(
+                path,
+                module_node_id,
+                line,
+                line_number,
+                symbols,
+                call_chain_id_counts,
+            )
+        )
+
         brace_depth = max(0, brace_depth + _brace_delta_outside_strings(line))
 
     return _JavaScriptFileFacts(
@@ -732,6 +783,7 @@ def _extract_file_facts(
         symbols=tuple(symbols),
         exports=tuple(exports),
         commonjs_assignments=tuple(commonjs_assignments),
+        call_chains=tuple(call_chains),
     )
 
 
@@ -1040,6 +1092,86 @@ def _assigned_name(rhs: str) -> str | None:
         return None
     remainder = normalized[match.end() :].strip()
     return name if not remainder else None
+
+
+def _call_chain_facts(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    symbols: list[JavaScriptSymbolFact],
+    id_counts: Counter[str],
+) -> tuple[JavaScriptCallChainFact, ...]:
+    masked_line = _mask_string_contents(line)
+    method_names = tuple(match.group("name") for match in _method_call_matches(masked_line))
+    if len(method_names) < 2:
+        return ()
+
+    receiver_shape = _receiver_shape(masked_line)
+    enclosing_symbol_id = _enclosing_symbol_id(symbols, line_number)
+    key = "|".join((path, str(line_number), receiver_shape, ".".join(method_names)))
+    occurrence = id_counts[key]
+    id_counts[key] += 1
+    suffix = f":{occurrence}" if occurrence else ""
+    return (
+        JavaScriptCallChainFact(
+            id=f"javascript_call_chain:{path}:{_short_hash(key)}{suffix}",
+            path=path,
+            module_node_id=module_node_id,
+            enclosing_symbol_id=enclosing_symbol_id,
+            start_line=line_number,
+            end_line=line_number,
+            receiver_shape=receiver_shape,
+            method_names=method_names,
+            parser_evidence_labels=("line_local_member_call_sequence", "source_free_shape"),
+        ),
+    )
+
+
+def _method_call_matches(line: str) -> tuple[re.Match[str], ...]:
+    matches = []
+    pattern = re.compile(rf"\.\s*(?P<name>{IDENTIFIER_PATTERN})\s*\(")
+    for match in pattern.finditer(line):
+        name = match.group("name")
+        if name not in JS_KEYWORDS:
+            matches.append(match)
+    return tuple(matches)
+
+
+def _receiver_shape(line: str) -> str:
+    first_match = re.search(rf"\.\s*{IDENTIFIER_PATTERN}\s*\(", line)
+    if first_match is None:
+        return "unknown"
+    prefix = line[: first_match.start()].strip()
+    if not prefix:
+        return "unknown"
+    if re.search(r"\bnew\s+.+\)$", prefix) or re.search(r"\bnew\s+[^()]+$", prefix):
+        return "new_expression"
+    if prefix.endswith(")"):
+        return "call_result"
+    if prefix.endswith("]"):
+        return "element_access"
+    tail = prefix.rsplit("=", 1)[-1].strip()
+    tail = tail.rsplit("return", 1)[-1].strip()
+    if tail == "this":
+        return "this"
+    if re.fullmatch(IDENTIFIER_PATTERN, tail):
+        return "identifier"
+    if re.fullmatch(rf"(?:this|{IDENTIFIER_PATTERN})(?:\s*\.\s*{IDENTIFIER_PATTERN})+", tail):
+        return "member"
+    return "unknown"
+
+
+def _enclosing_symbol_id(symbols: list[JavaScriptSymbolFact], line_number: int) -> str | None:
+    matches = [
+        symbol
+        for symbol in symbols
+        if symbol.start_line <= line_number <= symbol.end_line
+        and symbol.kind in {"arrow_function", "class", "function"}
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0].id
 
 
 def _import_fact(
@@ -1556,6 +1688,28 @@ def _strip_comments_preserving_strings(source: str) -> tuple[str, ...]:
             index += 1
         lines.append("".join(line))
     return tuple(lines)
+
+
+def _mask_string_contents(line: str) -> str:
+    masked: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            masked.append(" ")
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            masked.append(" ")
+            continue
+        masked.append(character)
+    return "".join(masked)
 
 
 def _brace_delta_outside_strings(line: str) -> int:
