@@ -1068,6 +1068,7 @@ class GraphQueryService:
             "directories",
             "edges",
             "files",
+            "javascript_call_chains",
             "javascript_exports",
             "javascript_imports",
             "javascript_modules",
@@ -2246,6 +2247,9 @@ class GraphQueryService:
             config_summary = _config_summary(connection, path)
             if config_summary:
                 summary.update(config_summary)
+            call_chains = _javascript_call_chain_summaries(connection, path)
+            if call_chains:
+                summary["call_chains"] = call_chains
             if len(summary) > 2:
                 summaries[path] = summary
         return summaries
@@ -3044,6 +3048,51 @@ def _symbol_summary(
         "public": public,
         "qualified_name": qualified_name,
     }
+
+
+def _javascript_call_chain_summaries(
+    connection: sqlite3.Connection, path: str, *, limit: int = 5
+) -> list[dict[str, Any]]:
+    rows = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT
+                start_line,
+                end_line,
+                receiver_shape,
+                method_names_json,
+                parser_evidence_labels_json
+            FROM javascript_call_chains
+            WHERE path = ?
+            ORDER BY start_line, id
+            LIMIT ?
+            """,
+            (path, limit),
+        )
+    )
+    chains: list[dict[str, Any]] = []
+    for row in rows:
+        chains.append(
+            {
+                "evidence": [
+                    {
+                        "line_range": {
+                            "end": int(row["end_line"]),
+                            "start": int(row["start_line"]),
+                        },
+                        "source": "javascript_call_chains",
+                    }
+                ],
+                "line_range": {
+                    "end": int(row["end_line"]),
+                    "start": int(row["start_line"]),
+                },
+                "method_names": json.loads(str(row["method_names_json"])),
+                "parser_evidence_labels": json.loads(str(row["parser_evidence_labels_json"])),
+                "receiver_shape": str(row["receiver_shape"]),
+            }
+        )
+    return chains
 
 
 def _documentation_summary(connection: sqlite3.Connection, path: str) -> dict[str, Any]:

@@ -155,7 +155,7 @@ def test_graph_export_javascript_fields_match_promoted_contract(tmp_path):
     (tmp_path / "src" / "app.ts").write_text(
         "import React from 'react';\n"
         "import { value } from './value';\n"
-        "export function run() { return value; }\n"
+        "export function run() { return client.get().json(); }\n"
         "exports.run = run;\n",
         encoding="utf-8",
     )

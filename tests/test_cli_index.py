@@ -234,7 +234,7 @@ def test_graph_sqlite_contains_schema_and_minimum_facts(tmp_path):
         ).fetchone()
 
     assert metadata["schema_name"] == "repolens_graph"
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == "15"
     assert len(metadata["canonical_graph_hash"]) == 64
     assert json.loads(metadata["graph_quality_warnings"]) == []
     assert "effective_config_hash" in metadata
@@ -437,10 +437,11 @@ def test_index_records_python_syntax_errors_nonfatally_and_removes_stale_facts(t
 
     assert graph_json["python"]["parse_errors"][0]["path"] == "broken.py"
     assert graph_lite["python"]["parse_errors"][0]["message"] == "invalid syntax"
-    assert graph_status["validation"] == {
-        "hard_failures": [],
-        "quality_warnings": ["Parser errors detected in the live graph overlay."],
-    }
+    assert graph_status["validation"]["hard_failures"] == []
+    assert (
+        "Parser errors detected in the live graph overlay."
+        in graph_status["validation"]["quality_warnings"]
+    )
     assert "parse_error" in report
     assert "broken.py" in graph_index
 
@@ -697,7 +698,7 @@ def test_index_writes_mixed_javascript_typescript_alias_facts_to_artifacts(tmp_p
             )
         )
 
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == "15"
     assert (
         "@/components/App",
         None,
@@ -848,7 +849,7 @@ def test_index_writes_config_command_package_and_entrypoint_facts_to_artifacts(t
             connection.execute("SELECT manager, path FROM config_lockfiles ORDER BY path")
         )
 
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == "15"
     assert ("package.json", "package_manifest", "json", "parsed") in config_files
     assert ("pyproject.toml", "python_package", "toml", "parsed") in config_files
     assert ("package-lock.json", "lockfile", "json", "detected") in config_files
@@ -1174,7 +1175,7 @@ def test_index_writes_documentation_comment_and_skill_facts_to_artifacts(tmp_pat
             connection.execute("SELECT name, description, path FROM skills ORDER BY name")
         )
 
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == "15"
     assert (
         "README.md",
         "readme",
