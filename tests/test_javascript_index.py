@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from textwrap import dedent
+from types import SimpleNamespace
 
-from repolens.javascript_index import extract_javascript_index
+from repolens.javascript_index import (
+    JavaScriptParserProvenance,
+    TreeSitterJavaScriptSupport,
+    extract_javascript_index,
+    extract_javascript_index_with_tree_sitter,
+)
 from repolens.scanner import scan_repository
 
 
@@ -424,6 +430,67 @@ def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_pat
     assert second_index.symbols[0].line == 3
 
 
+def test_tree_sitter_javascript_index_reports_parse_failure_without_facts(tmp_path):
+    _write_text(tmp_path / "src" / "broken.ts", 'import dep from "pkg";\n')
+
+    javascript_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        scan_repository(tmp_path).files,
+        _fake_tree_sitter_support(has_error=True),
+    )
+
+    assert [(module.path, module.parser_status) for module in javascript_index.modules] == [
+        ("src/broken.ts", "parse_error")
+    ]
+    assert javascript_index.imports == ()
+    assert javascript_index.symbols == ()
+
+
+def test_tree_sitter_javascript_index_is_deterministic_and_scanner_bounded(tmp_path):
+    _write_text(tmp_path / "src" / "b.ts", 'import b from "b";\n')
+    _write_text(tmp_path / "src" / "a.ts", 'import a from "a";\n')
+    _write_text(tmp_path / "notes.txt", 'import ignored from "not-js";\n')
+
+    first_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        tuple(reversed(scan_repository(tmp_path).files)),
+        _fake_tree_sitter_support(),
+    )
+    second_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        scan_repository(tmp_path).files,
+        _fake_tree_sitter_support(),
+    )
+
+    assert [module.path for module in first_index.modules] == ["src/a.ts", "src/b.ts"]
+    assert [item.specifier for item in first_index.imports] == ["a", "b"]
+    assert first_index == second_index
+
+
 def _write_text(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _fake_tree_sitter_support(*, has_error: bool = False) -> TreeSitterJavaScriptSupport:
+    class FakeParser:
+        def __init__(self, language):
+            self.language = language
+
+        def parse(self, source: bytes):
+            return SimpleNamespace(root_node=SimpleNamespace(has_error=has_error))
+
+    return TreeSitterJavaScriptSupport(
+        parser_class=FakeParser,
+        language_class=object,
+        javascript_language="javascript",
+        typescript_language="typescript",
+        tsx_language="tsx",
+        provenance=JavaScriptParserProvenance(
+            backend_name="tree_sitter_js_ts",
+            parser_package_version="parser-test",
+            javascript_grammar_version="grammar-js-test",
+            typescript_grammar_version="grammar-ts-test",
+            promoted_fact_schema_version="javascript-promoted-facts-v1",
+        ),
+    )

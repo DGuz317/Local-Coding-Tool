@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.metadata
 import json
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from repolens.scanner import ScannedFile
 
-JAVASCRIPT_EXTRACTOR_VERSION = "issue-39-js-ts-relative-import-resolution-v1"
+PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION = "javascript-promoted-facts-v1"
+JAVASCRIPT_EXTRACTOR_VERSION = (
+    f"issue-163-js-ts-parser-backend-v1+{PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION}"
+)
 
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
@@ -225,6 +231,98 @@ class JavaScriptIndex:
         return {module.path: module.parser_status for module in self.modules}
 
 
+@dataclass(frozen=True)
+class JavaScriptParserProvenance:
+    """Source-free JS/TS parser backend identity for artifact freshness."""
+
+    backend_name: str
+    parser_package_version: str | None
+    javascript_grammar_version: str | None
+    typescript_grammar_version: str | None
+    promoted_fact_schema_version: str
+
+    def to_metadata(self) -> dict[str, str | None]:
+        return {
+            "backend_name": self.backend_name,
+            "parser_package_version": self.parser_package_version,
+            "javascript_grammar_version": self.javascript_grammar_version,
+            "typescript_grammar_version": self.typescript_grammar_version,
+            "promoted_fact_schema_version": self.promoted_fact_schema_version,
+        }
+
+
+@dataclass(frozen=True)
+class TreeSitterJavaScriptSupport:
+    """Initialized optional Tree-sitter support for JS/TS files."""
+
+    parser_class: Any
+    language_class: Any
+    javascript_language: Any
+    typescript_language: Any
+    tsx_language: Any
+    provenance: JavaScriptParserProvenance
+
+
+@dataclass(frozen=True)
+class TreeSitterJavaScriptAvailability:
+    """Optional Tree-sitter availability result without raising to callers."""
+
+    support: TreeSitterJavaScriptSupport | None
+    warning: str | None = None
+
+
+def tree_sitter_javascript_availability() -> TreeSitterJavaScriptAvailability:
+    """Return optional Tree-sitter JS/TS support, or a bounded fallback warning."""
+    try:
+        tree_sitter = importlib.import_module("tree_sitter")
+        Parser = getattr(tree_sitter, "Parser")
+        Language = getattr(tree_sitter, "Language")
+    except (ImportError, AttributeError):
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:missing_tree_sitter",
+        )
+
+    try:
+        tree_sitter_javascript = importlib.import_module("tree_sitter_javascript")
+        tree_sitter_typescript = importlib.import_module("tree_sitter_typescript")
+    except ImportError:
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:missing_grammar",
+        )
+
+    try:
+        javascript_language = Language(tree_sitter_javascript.language())
+        typescript_language = Language(tree_sitter_typescript.language_typescript())
+        tsx_language = Language(tree_sitter_typescript.language_tsx())
+        _parser_for(Parser, javascript_language)
+        _parser_for(Parser, typescript_language)
+        _parser_for(Parser, tsx_language)
+    except Exception:
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:grammar_init_failed",
+        )
+
+    return TreeSitterJavaScriptAvailability(
+        TreeSitterJavaScriptSupport(
+            parser_class=Parser,
+            language_class=Language,
+            javascript_language=javascript_language,
+            typescript_language=typescript_language,
+            tsx_language=tsx_language,
+            provenance=JavaScriptParserProvenance(
+                backend_name="tree_sitter_js_ts",
+                parser_package_version=_package_version("tree-sitter"),
+                javascript_grammar_version=_package_version("tree-sitter-javascript"),
+                typescript_grammar_version=_package_version("tree-sitter-typescript"),
+                promoted_fact_schema_version=PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+            ),
+        )
+    )
+
+
 def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> JavaScriptIndex:
     """Extract deterministic JS/TS facts from scanner-approved source files only."""
     javascript_files = tuple(
@@ -298,6 +396,95 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
     )
 
 
+def extract_javascript_index_with_tree_sitter(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+    support: TreeSitterJavaScriptSupport,
+) -> JavaScriptIndex:
+    """Extract JS/TS facts after a real Tree-sitter parse of scanner-approved files."""
+    javascript_files = tuple(
+        file for file in sorted(files, key=lambda item: item.path) if _is_javascript(file)
+    )
+    javascript_paths = frozenset(file.path for file in javascript_files)
+    alias_rules = _load_typescript_alias_rules(root, files)
+    modules: list[JavaScriptModuleFact] = []
+    imports: list[JavaScriptImportFact] = []
+    symbols: list[JavaScriptSymbolFact] = []
+    exports: list[JavaScriptExportFact] = []
+    commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    observed_packages: set[tuple[str, str]] = set()
+
+    for scanned_file in javascript_files:
+        path = scanned_file.path
+        module_node_id = javascript_module_node_id(path)
+        module = JavaScriptModuleFact(
+            path=path,
+            node_id=module_node_id,
+            module_name=_module_name(path),
+            extension=PurePosixPath(path).suffix.lower(),
+            parser_status="parsed",
+        )
+        try:
+            source = _read_scanner_approved_text(root, path)
+            tree = _parse_tree_sitter_source(support, path, source)
+        except OSError:
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+        except Exception:
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+
+        if bool(getattr(tree.root_node, "has_error", False)):
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+
+        modules.append(module)
+        file_facts = _extract_file_facts(
+            path,
+            module_node_id,
+            source,
+            alias_rules,
+            javascript_paths,
+        )
+        imports.extend(file_facts.imports)
+        symbols.extend(file_facts.symbols)
+        exports.extend(file_facts.exports)
+        commonjs_assignments.extend(file_facts.commonjs_assignments)
+        for import_fact in file_facts.imports:
+            if import_fact.root_name is not None:
+                observed_packages.add((import_fact.classification, import_fact.root_name))
+
+    packages = tuple(
+        JavaScriptPackageFact(
+            id=javascript_package_node_id(name, classification),
+            name=name,
+            classification=classification,
+        )
+        for classification, name in sorted(observed_packages)
+    )
+    return JavaScriptIndex(
+        modules=tuple(sorted(modules, key=lambda fact: fact.path)),
+        imports=tuple(sorted(imports, key=lambda fact: (fact.path, fact.line, fact.id))),
+        packages=packages,
+        symbols=tuple(sorted(symbols, key=lambda fact: (fact.path, fact.qualified_name, fact.id))),
+        exports=tuple(sorted(exports, key=lambda fact: (fact.path, fact.line, fact.id))),
+        commonjs_assignments=tuple(
+            sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
+        ),
+    )
+
+
+def bounded_javascript_parser_provenance() -> JavaScriptParserProvenance:
+    """Return provenance for the legacy bounded JS/TS scanner fallback."""
+    return JavaScriptParserProvenance(
+        backend_name="bounded_js_ts_scanner",
+        parser_package_version=None,
+        javascript_grammar_version=None,
+        typescript_grammar_version=None,
+        promoted_fact_schema_version=PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+    )
+
+
 def javascript_module_node_id(path: str) -> str:
     return f"javascript_module:{path}"
 
@@ -319,6 +506,46 @@ def _read_scanner_approved_text(root: Path, path: str) -> str:
     source_path = resolved_root / PurePosixPath(path)
     source_path.resolve(strict=False).relative_to(resolved_root)
     return source_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _parser_for(parser_class: Any, language: Any) -> Any:
+    try:
+        return parser_class(language)
+    except TypeError:
+        parser = parser_class()
+        parser.language = language
+        return parser
+
+
+def _parse_tree_sitter_source(support: TreeSitterJavaScriptSupport, path: str, source: str) -> Any:
+    parser = _parser_for(support.parser_class, _tree_sitter_language_for_path(support, path))
+    return parser.parse(source.encode("utf-8"))
+
+
+def _tree_sitter_language_for_path(support: TreeSitterJavaScriptSupport, path: str) -> Any:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".tsx":
+        return support.tsx_language
+    if suffix in {".ts", ".mts", ".cts"}:
+        return support.typescript_language
+    return support.javascript_language
+
+
+def _module_with_status(module: JavaScriptModuleFact, parser_status: str) -> JavaScriptModuleFact:
+    return JavaScriptModuleFact(
+        path=module.path,
+        node_id=module.node_id,
+        module_name=module.module_name,
+        extension=module.extension,
+        parser_status=parser_status,
+    )
+
+
+def _package_version(package_name: str) -> str | None:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _module_name(path: str) -> str:

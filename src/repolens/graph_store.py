@@ -57,7 +57,7 @@ class GraphStore(Protocol):
         scan: ScanResult,
         *,
         file_changes: tuple[FileChange, ...] = (),
-        parser_backend: ParserBackendOption = "stable",
+        parser_backend: ParserBackendOption = "default",
     ) -> tuple[str, ...]:
         """Replace graph store and deterministic exports after a full rebuild."""
 
@@ -67,7 +67,7 @@ class GraphStore(Protocol):
         plan: SelectiveUpdatePlan,
         *,
         file_changes: tuple[FileChange, ...] = (),
-        parser_backend: ParserBackendOption = "stable",
+        parser_backend: ParserBackendOption = "default",
     ) -> tuple[str, ...]:
         """Replace graph artifacts through the validated selective update path."""
 
@@ -112,7 +112,7 @@ class SqliteGraphStore:
         scan: ScanResult,
         *,
         file_changes: tuple[FileChange, ...] = (),
-        parser_backend: ParserBackendOption = "stable",
+        parser_backend: ParserBackendOption = "default",
     ) -> tuple[str, ...]:
         return rebuild_graph_artifacts(
             self.root,
@@ -127,7 +127,7 @@ class SqliteGraphStore:
         plan: SelectiveUpdatePlan,
         *,
         file_changes: tuple[FileChange, ...] = (),
-        parser_backend: ParserBackendOption = "stable",
+        parser_backend: ParserBackendOption = "default",
     ) -> tuple[str, ...]:
         return replace_graph_artifacts_selectively(
             self.root,

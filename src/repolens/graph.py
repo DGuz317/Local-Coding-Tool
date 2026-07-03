@@ -43,6 +43,7 @@ from repolens.javascript_index import (
 from repolens.parser_backends import (
     ParserBackendOption,
     ParserIndexes,
+    default_parser_backend_provenance,
     extract_with_parser_backend,
 )
 from repolens.python_index import (
@@ -328,7 +329,7 @@ def rebuild_graph_artifacts(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> tuple[str, ...]:
     """Rebuild the graph store and exports from one safe discovery result."""
     build_graph_store(root, scan, file_changes=file_changes, parser_backend=parser_backend)
@@ -417,7 +418,7 @@ def replace_graph_artifacts_selectively(
     plan: SelectiveUpdatePlan,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> tuple[str, ...]:
     """Replace graph artifacts through the validated selective update path."""
     if not plan.safe:
@@ -435,7 +436,7 @@ def build_graph_store(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> Path:
     """Build ``graph.sqlite`` in a temporary file and replace it after success."""
     artifact_dir = root / ARTIFACT_DIR_NAME
@@ -588,6 +589,22 @@ def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
                 root,
                 stored_metadata=stored_metadata,
                 reason="extractor_version_changed",
+            ),
+        )
+
+    current_parser_provenance = _json_value(default_parser_backend_provenance())
+    if stored_metadata.get("parser_backend_provenance_json") != current_parser_provenance:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="parser_backend_provenance_changed",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Parser backend provenance changed. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata=stored_metadata,
+                reason="parser_backend_provenance_changed",
             ),
         )
 
@@ -1029,7 +1046,7 @@ def _populate_store(
     *,
     indexed_at_utc: str,
     file_changes: tuple[FileChange, ...],
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> None:
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
@@ -1052,6 +1069,11 @@ def _populate_store(
             ("artifact_version", str(GRAPH_ARTIFACT_VERSION)),
             ("exporter_version", GRAPH_EXPORTER_VERSION),
             ("effective_config_hash", effective_config_hash),
+            ("parser_backend_warnings", _json_value(extracted.parser_backend_warnings)),
+            (
+                "parser_backend_provenance_json",
+                _json_value(extracted.extractor_provenance or {}),
+            ),
             ("git_branch", git_metadata.branch or ""),
             ("git_commit", git_metadata.commit or ""),
             ("git_detected", "1" if git_metadata.detected else "0"),
@@ -1185,7 +1207,7 @@ def _extract_indexes(
     root: Path,
     files: tuple[ScannedFile, ...],
     *,
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> _ExtractedIndexes:
     return extract_with_parser_backend(root, files, parser_backend=parser_backend)
 
@@ -4587,6 +4609,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "files": snapshot["files"],
         "javascript": snapshot["javascript"],
         "limits": snapshot["limits"],
+        "parser_backend": _parser_backend_payload(snapshot["metadata"]),
         "python": snapshot["python"],
         "repository": snapshot["repository"],
         "relationship_candidates": snapshot["relationship_candidates"],
@@ -4619,6 +4642,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "documentation": _documentation_lite_payload(snapshot),
         "freshness": _stored_freshness_payload(),
         "javascript": _javascript_lite_payload(snapshot),
+        "parser_backend": _parser_backend_payload(snapshot["metadata"]),
         "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
         "relationship_candidates": snapshot["relationship_candidates"],
@@ -4626,6 +4650,13 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
         "validation": _validation_payload(snapshot),
+    }
+
+
+def _parser_backend_payload(metadata: dict[str, str]) -> dict[str, Any]:
+    return {
+        "provenance": _metadata_json_value(metadata, "parser_backend_provenance_json", {}),
+        "warnings": _metadata_json_value(metadata, "parser_backend_warnings", []),
     }
 
 
@@ -6766,15 +6797,25 @@ def _ambiguous_workspace_membership_count(connection: sqlite3.Connection) -> int
 
 
 def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    warnings: list[str] = []
     raw_warnings = metadata.get("graph_quality_warnings")
-    if raw_warnings is None:
-        return []
-    try:
-        warnings = json.loads(raw_warnings)
-    except json.JSONDecodeError:
-        return ["Graph quality warnings metadata is unreadable."]
-    if not isinstance(warnings, list):
-        return []
+    if raw_warnings is not None:
+        try:
+            decoded_warnings = json.loads(raw_warnings)
+        except json.JSONDecodeError:
+            warnings.append("Graph quality warnings metadata is unreadable.")
+        else:
+            if isinstance(decoded_warnings, list):
+                warnings.extend(str(warning) for warning in decoded_warnings)
+    parser_backend_warnings = metadata.get("parser_backend_warnings")
+    if parser_backend_warnings is not None:
+        try:
+            decoded = json.loads(parser_backend_warnings)
+        except json.JSONDecodeError:
+            warnings.append("Parser backend warnings metadata is unreadable.")
+        else:
+            if isinstance(decoded, list):
+                warnings.extend(str(warning) for warning in decoded)
     return [str(warning) for warning in warnings]
 
 
@@ -7421,6 +7462,16 @@ def _metadata_json(value: dict[str, Any]) -> str:
 
 def _json_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _metadata_json_value(metadata: dict[str, str], key: str, default: Any) -> Any:
+    raw_value = metadata.get(key)
+    if raw_value is None:
+        return default
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return default
 
 
 def _json_text(payload: dict[str, Any]) -> str:
