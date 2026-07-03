@@ -391,6 +391,42 @@
       }
     },
     {
+      "id": "v0_6_js_ts_resolved_workspace_import_rank_improvement",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix workspace package import from app to @dog/lib using TypeScript alias",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["packages/lib/src/index.ts"],
+        "package_boundaries_include": [
+          {"name": "@dog/lib", "path": "packages/lib"}
+        ],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "quality_check_likely"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_6_js_ts_route_hint_first_read",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix the account route loading state",
+      "fixture_repo": "tests/fixtures/context_pack/route-navigation",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["app/account/page.tsx"],
+        "confidence_at_least": "medium",
+        "requires_evidence": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
       "id": "expanded_cli_invoice_export",
       "corpus": "expanded",
       "category": "cli_export",

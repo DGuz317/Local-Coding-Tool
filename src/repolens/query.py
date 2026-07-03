@@ -2130,6 +2130,14 @@ class GraphQueryService:
             if _node_reading_priority(node) < _node_reading_priority(current["node"]):
                 current["node"] = node
 
+        for item in self._javascript_metadata_recommendations(
+            connection,
+            tokens=tokens,
+            files_by_path=files_by_path,
+            nodes_by_id=self._nodes_by_id(connection),
+        ):
+            _merge_reading_recommendation(recommendations_by_path, item)
+
         primary = sorted(
             recommendations_by_path.values(),
             key=lambda item: (
@@ -2162,6 +2170,41 @@ class GraphQueryService:
                 ordered.append(_strip_internal_recommendation_fields(test))
                 seen_paths.add(test_path)
         return ordered
+
+    def _javascript_metadata_recommendations(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        tokens: tuple[str, ...],
+        files_by_path: dict[str, dict[str, Any]],
+        nodes_by_id: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        items.extend(
+            _javascript_import_recommendations(
+                connection,
+                tokens=tokens,
+                files_by_path=files_by_path,
+                nodes_by_id=nodes_by_id,
+            )
+        )
+        items.extend(
+            _javascript_route_hint_recommendations(
+                connection,
+                tokens=tokens,
+                files_by_path=files_by_path,
+                nodes_by_id=nodes_by_id,
+            )
+        )
+        items.extend(
+            _javascript_call_chain_recommendations(
+                connection,
+                tokens=tokens,
+                files_by_path=files_by_path,
+                nodes_by_id=nodes_by_id,
+            )
+        )
+        return _dedupe_reading_items(items)
 
     def _reading_order_tests(
         self,
@@ -3482,6 +3525,195 @@ def _score_reading_order_node(
     return score, evidence[:3], "task_token_match"
 
 
+def _javascript_import_recommendations(
+    connection: sqlite3.Connection,
+    *,
+    tokens: tuple[str, ...],
+    files_by_path: dict[str, dict[str, Any]],
+    nodes_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _task_mentions_javascript_relationship(tokens):
+        return []
+    rows = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT path, specifier, root_name, resolved_path, resolution_status, line
+            FROM javascript_imports
+            WHERE resolved_path IS NOT NULL
+            ORDER BY path, line, specifier
+            """
+        )
+    )
+    recommendations: list[dict[str, Any]] = []
+    for row in rows:
+        importer_path = str(row["path"])
+        resolved_path = str(row["resolved_path"])
+        if importer_path not in files_by_path or resolved_path not in files_by_path:
+            continue
+        matched = _metadata_matched_tokens(
+            tokens,
+            str(row["specifier"]),
+            str(row["root_name"] or ""),
+        )
+        if not matched:
+            continue
+        evidence = [
+            {
+                "line": row["line"],
+                "matched_tokens": matched,
+                "resolution_status": str(row["resolution_status"]),
+                "source": "javascript_imports",
+            }
+        ]
+        recommendations.append(
+            _reading_order_item(
+                path=resolved_path,
+                reason="js_ts_resolved_import_matches_task",
+                confidence="high",
+                evidence=evidence,
+                category="source",
+                node=_preferred_node_for_path(nodes_by_id, resolved_path),
+                score=520 + len(matched) * 40,
+            )
+        )
+        recommendations.append(
+            _reading_order_item(
+                path=importer_path,
+                reason="js_ts_importer_matches_task",
+                confidence="medium",
+                evidence=evidence,
+                category="source",
+                node=_preferred_node_for_path(nodes_by_id, importer_path),
+                score=170 + len(matched) * 20,
+            )
+        )
+    return recommendations
+
+
+def _javascript_route_hint_recommendations(
+    connection: sqlite3.Connection,
+    *,
+    tokens: tuple[str, ...],
+    files_by_path: dict[str, dict[str, Any]],
+    nodes_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _task_mentions_route(tokens):
+        return []
+    rows = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT path, framework, kind, route_path, confidence
+            FROM javascript_route_hints
+            ORDER BY path, framework, kind, route_path
+            """
+        )
+    )
+    recommendations: list[dict[str, Any]] = []
+    for row in rows:
+        path = str(row["path"])
+        if path not in files_by_path:
+            continue
+        matched = _metadata_matched_tokens(
+            tokens,
+            path,
+            str(row["route_path"]),
+            str(row["kind"]),
+        )
+        if not matched:
+            continue
+        recommendations.append(
+            _reading_order_item(
+                path=path,
+                reason="route_hint_metadata_matches_task",
+                confidence=str(row["confidence"]),
+                evidence=[
+                    {
+                        "framework": str(row["framework"]),
+                        "kind": str(row["kind"]),
+                        "matched_tokens": matched,
+                        "source": "framework_route_hint",
+                    }
+                ],
+                category="source",
+                node=_preferred_node_for_path(nodes_by_id, path),
+                score=190 + len(matched) * 30,
+            )
+        )
+    return recommendations
+
+
+def _javascript_call_chain_recommendations(
+    connection: sqlite3.Connection,
+    *,
+    tokens: tuple[str, ...],
+    files_by_path: dict[str, dict[str, Any]],
+    nodes_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = _rows_to_dicts(
+        connection.execute(
+            """
+            SELECT path, receiver_shape, method_names_json, start_line, end_line
+            FROM javascript_call_chains
+            ORDER BY path, start_line, end_line
+            """
+        )
+    )
+    recommendations: list[dict[str, Any]] = []
+    for row in rows:
+        path = str(row["path"])
+        if path not in files_by_path:
+            continue
+        method_names = json.loads(str(row["method_names_json"]))
+        matched = _metadata_matched_tokens(
+            tokens,
+            path,
+            str(row["receiver_shape"]),
+            " ".join(str(name) for name in method_names),
+        )
+        if not matched:
+            continue
+        recommendations.append(
+            _reading_order_item(
+                path=path,
+                reason="call_chain_metadata_matches_task",
+                confidence="medium",
+                evidence=[
+                    {
+                        "line_range": {"end": row["end_line"], "start": row["start_line"]},
+                        "matched_tokens": matched,
+                        "source": "javascript_call_chains",
+                    }
+                ],
+                category="source",
+                node=_preferred_node_for_path(nodes_by_id, path),
+                score=120 + len(matched) * 20,
+            )
+        )
+    return recommendations
+
+
+def _task_mentions_javascript_relationship(tokens: tuple[str, ...]) -> bool:
+    return bool(
+        set(tokens)
+        & {
+            "alias",
+            "dependency",
+            "export",
+            "import",
+            "package",
+            "typescript",
+            "workspace",
+        }
+    )
+
+
+def _metadata_matched_tokens(tokens: tuple[str, ...], *values: str) -> list[str]:
+    value_tokens: set[str] = set()
+    for value in values:
+        value_tokens.update(_meaningful_tokens(value))
+    return sorted(set(tokens) & value_tokens)
+
+
 def _route_path_score(
     node: dict[str, Any], tokens: tuple[str, ...], category: str
 ) -> tuple[int, list[dict[str, Any]]]:
@@ -3581,20 +3813,28 @@ def _merge_evidence(
 
 def _preferred_reading_reason(current: str, candidate: str) -> str:
     priority = {
-        "route_path_matches_task": 0,
-        "task_matches_symbols": 1,
-        "config_matches_task": 2,
-        "documentation_matches_task": 3,
-        "task_token_match": 4,
+        "js_ts_resolved_import_matches_task": 0,
+        "route_hint_metadata_matches_task": 0,
+        "route_path_matches_task": 1,
+        "call_chain_metadata_matches_task": 2,
+        "task_matches_symbols": 3,
+        "js_ts_importer_matches_task": 4,
+        "config_matches_task": 5,
+        "documentation_matches_task": 6,
+        "task_token_match": 7,
     }
     return candidate if priority.get(candidate, 100) < priority.get(current, 100) else current
 
 
 def _ranking_reason(reason: str) -> str:
     reasons = {
+        "call_chain_metadata_matches_task": "Task tokens matched source-free JS/TS call-chain metadata.",
         "config_matches_task": "Task tokens matched indexed config or command metadata.",
         "documentation_matches_task": "Task tokens matched indexed documentation context.",
+        "js_ts_importer_matches_task": "Task tokens matched JS/TS import resolver metadata.",
+        "js_ts_resolved_import_matches_task": "Task tokens matched resolved JS/TS import metadata.",
         "likely_related_test": "Likely related test from graph evidence.",
+        "route_hint_metadata_matches_task": "Task tokens matched indexed framework route metadata.",
         "route_path_matches_task": "Task tokens matched route-like file path segments.",
         "task_matches_symbols": "Task tokens matched indexed source symbols.",
         "task_token_match": "Task tokens matched indexed graph metadata.",
@@ -3638,11 +3878,39 @@ def _tests_by_source_path(items: list[dict[str, Any]]) -> dict[str, list[dict[st
 def _dedupe_reading_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: dict[str, dict[str, Any]] = {}
     for item in items:
-        path = str(item["path"])
-        current = deduped.get(path)
-        if current is None or int(item["_score"]) > int(current["_score"]):
-            deduped[path] = item
+        _merge_reading_recommendation(deduped, item)
     return list(deduped.values())
+
+
+def _merge_reading_recommendation(
+    recommendations_by_path: dict[str, dict[str, Any]], item: dict[str, Any]
+) -> None:
+    path = str(item.get("path", ""))
+    if not path:
+        return
+    current = recommendations_by_path.get(path)
+    if current is None:
+        recommendations_by_path[path] = item
+        return
+    current["_score"] = int(current.get("_score", 0)) + int(item.get("_score", 0))
+    current["evidence"] = _merge_evidence(
+        _list_value(current.get("evidence")), _list_value(item.get("evidence"))
+    )
+    current["confidence"] = _confidence_for_reading_score(int(current["_score"]))
+    current["reason"] = _preferred_reading_reason(str(current["reason"]), str(item["reason"]))
+    current["ranking_reason"] = _ranking_reason(str(current["reason"]))
+    raw_node = item.get("node")
+    node = raw_node if isinstance(raw_node, dict) else None
+    if node is not None and _node_reading_priority(node) < _node_reading_priority(
+        current.get("node")
+    ):
+        current["node"] = node
+
+
+def _list_value(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def _confidence_rank(confidence: str) -> int:

@@ -290,6 +290,51 @@ def test_assistant_preflight_golden_outcomes_cover_stale_broad_ambiguity_and_no_
     ]
 
 
+def test_v0_6_js_ts_metadata_improves_first_read_ranking(tmp_path):
+    _write_v0_6_js_ts_context_fixture(tmp_path)
+    index_repository(tmp_path)
+
+    import_pack = get_task_context(
+        tmp_path,
+        "Fix workspace package import from app to @dog/lib using TypeScript alias",
+    )["data"]
+    route_pack = get_task_context(tmp_path, "Fix account route loading state")["data"]
+    call_chain_pack = get_task_context(tmp_path, "Fix query where order call chain")["data"]
+
+    assert [item["path"] for item in import_pack["first_read_files"][:2]] == [
+        "packages/lib/src/index.ts",
+        "packages/app/src/index.ts",
+    ]
+    assert import_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched resolved JS/TS import metadata."
+    )
+    assert import_pack["first_read_files"][0]["package_boundary"] == {
+        "confidence": "high",
+        "ecosystem": "javascript",
+        "evidence": [
+            {
+                "package_root": "packages/lib",
+                "source": "config_package_roots",
+                "source_path": "packages/lib/package.json",
+            }
+        ],
+        "name": "@dog/lib",
+        "path": "packages/lib",
+    }
+
+    assert route_pack["first_read_files"][0]["path"] == "app/account/page.tsx"
+    assert route_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched indexed framework route metadata."
+    )
+    assert route_pack["first_read_files"][0]["route_hints"][0]["route_path"] == "/account"
+
+    assert call_chain_pack["first_read_files"][0]["path"] == "src/query.ts"
+    assert call_chain_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched source-free JS/TS call-chain metadata."
+    )
+    assert "call_chains" in call_chain_pack["first_read_files"][0]["structural_summary"]
+
+
 def test_context_pack_preserves_missing_graph_unavailable_error(tmp_path):
     _write_context_fixture_repo(tmp_path)
 
@@ -897,6 +942,102 @@ def test_context_pack_mcp_expansion_and_relevance_use_same_service(tmp_path):
     assert tools.explain_relevance(
         task, pack["context_pack_id"], item["handle"]
     ) == explain_relevance(tmp_path, task, pack["context_pack_id"], item["handle"])
+
+
+def _write_v0_6_js_ts_context_fixture(root) -> None:
+    _write_text(
+        root / "package.json",
+        dedent(
+            """
+            {
+              "name": "v06-js-ts-demo",
+              "private": true,
+              "workspaces": ["packages/*"],
+              "scripts": {
+                "test": "vitest run",
+                "typecheck": "tsc -b"
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                  "@dog/lib": ["packages/lib/src/index.ts"]
+                }
+              },
+              "references": [
+                {"path": "./packages/app"},
+                {"path": "./packages/lib"}
+              ]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "app" / "package.json",
+        dedent(
+            """
+            {"name": "@dog/app", "dependencies": {"@dog/lib": "workspace:*"}}
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "app" / "src" / "index.ts",
+        dedent(
+            """
+            import { describeValue } from "@dog/lib";
+
+            export function render(): string {
+              return describeValue("demo");
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "lib" / "package.json",
+        dedent(
+            """
+            {"name": "@dog/lib"}
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "lib" / "src" / "index.ts",
+        dedent(
+            """
+            export function describeValue(value: string): string {
+              return `value:${value}`;
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "app" / "account" / "page.tsx",
+        dedent(
+            """
+            export default function AccountPage() {
+              return null;
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "query.ts",
+        dedent(
+            """
+            export function loadUsers(client: any) {
+              return client.query().where().order();
+            }
+            """
+        ).lstrip(),
+    )
 
 
 def _write_context_fixture_repo(root) -> None:
