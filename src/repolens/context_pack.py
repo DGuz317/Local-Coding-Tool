@@ -700,6 +700,10 @@ def _attach_file_metadata(
     package_boundary = _mapping(package_boundaries.get(path))
     if package_boundary:
         item["package_boundary"] = package_boundary
+    route_hints = _mapping(file_metadata.get("route_hints"))
+    hints = _sequence(route_hints.get(path))
+    if hints:
+        item["route_hints"] = hints
     workspace_memberships = _mapping(file_metadata.get("workspace_memberships"))
     workspace_membership = _mapping(workspace_memberships.get(path))
     if workspace_membership:

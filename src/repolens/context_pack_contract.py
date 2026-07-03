@@ -301,7 +301,7 @@ def _guard_value(value: Any, *, path: str, sanitize: bool) -> tuple[Any, list[st
 
 def _string_violations(value: str, *, path: str) -> list[str]:
     violations: list[str] = []
-    if _ABSOLUTE_PATH_RE.match(value):
+    if not path.endswith(".route_path") and _ABSOLUTE_PATH_RE.match(value):
         violations.append(f"{path}: absolute path")
     if _SECRET_ASSIGNMENT_RE.search(value):
         violations.append(f"{path}: secret-like text")

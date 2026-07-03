@@ -69,7 +69,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 16
+GRAPH_SCHEMA_VERSION = 17
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -878,6 +878,19 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             receiver_shape TEXT NOT NULL,
             method_names_json TEXT NOT NULL,
             parser_evidence_labels_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_route_hints (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            framework TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            route_path TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            line_range_json TEXT NOT NULL,
+            evidence_labels_json TEXT NOT NULL,
+            warnings_json TEXT NOT NULL
         ) WITHOUT ROWID;
 
         CREATE TABLE config_files (
@@ -2508,6 +2521,38 @@ def _insert_javascript_tables(
                 _json_value(chain.parser_evidence_labels),
             )
             for chain in javascript_index.call_chains
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_route_hints(
+            id,
+            path,
+            module_node_id,
+            framework,
+            kind,
+            route_path,
+            confidence,
+            line_range_json,
+            evidence_labels_json,
+            warnings_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                hint.id,
+                hint.path,
+                hint.module_node_id,
+                hint.framework,
+                hint.kind,
+                hint.route_path,
+                hint.confidence,
+                _json_value(hint.line_range),
+                _json_value(hint.evidence_labels),
+                _json_value(hint.warnings),
+            )
+            for hint in javascript_index.route_hints
         ),
     )
 
@@ -4419,6 +4464,27 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 )
             )
         )
+        javascript_route_hints = _decode_javascript_route_hint_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        framework,
+                        kind,
+                        route_path,
+                        confidence,
+                        line_range_json,
+                        evidence_labels_json,
+                        warnings_json
+                    FROM javascript_route_hints
+                    ORDER BY path, framework, kind, route_path, id
+                    """
+                )
+            )
+        )
         config_files = _decode_config_file_rows(
             _rows(
                 connection.execute(
@@ -4646,6 +4712,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "javascript_imports": len(javascript_imports),
         "javascript_modules": len(javascript_modules),
         "javascript_packages": len(javascript_packages),
+        "javascript_route_hints": len(javascript_route_hints),
         "javascript_symbols": len(javascript_symbols),
         "nodes": len(nodes),
         "python_calls": len(python_calls),
@@ -4699,6 +4766,7 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
             "imports": javascript_imports,
             "modules": javascript_modules,
             "packages": javascript_packages,
+            "route_hints": javascript_route_hints,
             "symbols": javascript_symbols,
         },
         "limits": {"max_file_size_bytes": run["max_file_size_bytes"]},
@@ -7534,6 +7602,17 @@ def _decode_javascript_import_rows(rows: list[dict[str, Any]]) -> list[dict[str,
         decoded = dict(row)
         decoded["evidence_labels"] = json.loads(decoded.pop("evidence_labels_json"))
         decoded["candidate_paths"] = json.loads(decoded.pop("candidate_paths_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_javascript_route_hint_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["line_range"] = json.loads(decoded.pop("line_range_json"))
+        decoded["evidence_labels"] = json.loads(decoded.pop("evidence_labels_json"))
+        decoded["warnings"] = json.loads(decoded.pop("warnings_json"))
         decoded_rows.append(decoded)
     return decoded_rows
 
