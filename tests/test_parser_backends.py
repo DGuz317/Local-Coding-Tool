@@ -10,6 +10,7 @@ from repolens.context_pack import get_task_context
 from repolens.graph import inspect_graph_artifacts
 from repolens.indexer import index_repository
 from repolens.javascript_index import (
+    PROMOTED_JAVASCRIPT_FACT_FIELDS,
     JavaScriptParserProvenance,
     TreeSitterJavaScriptAvailability,
     TreeSitterJavaScriptSupport,
@@ -147,6 +148,30 @@ def test_experimental_facts_are_excluded_from_stable_hash_and_context_identity(t
     assert "experimental-facts-fixture" not in (tmp_path / ".repolens" / "graph.json").read_text(
         encoding="utf-8"
     )
+
+
+def test_graph_export_javascript_fields_match_promoted_contract(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.ts").write_text(
+        "import React from 'react';\n"
+        "import { value } from './value';\n"
+        "export function run() { return value; }\n"
+        "exports.run = run;\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "value.ts").write_text(
+        "export const value = 1;\n",
+        encoding="utf-8",
+    )
+
+    result = index_repository(tmp_path)
+    graph = json.loads((tmp_path / result.graph_exports[0]).read_text(encoding="utf-8"))
+
+    for group_name, allowed_fields in PROMOTED_JAVASCRIPT_FACT_FIELDS.items():
+        assert graph["javascript"][group_name]
+        assert {
+            field_name for fact in graph["javascript"][group_name] for field_name in fact
+        } == set(allowed_fields)
 
 
 def test_experimental_parser_backend_failure_is_nonfatal(tmp_path):

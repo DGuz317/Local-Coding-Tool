@@ -50,6 +50,7 @@ v0.6 should improve Assistant Preflight and Context Packs for JS/TS tasks with r
 ## Stable JS/TS Parser Fact Contract
 
 v0.6 must define which Tree-sitter-extracted JS/TS facts are promoted into the stable graph contract.
+The allowed-field contract is documented in `docs/js-ts-parser-fact-contract.md` and test-locked by parser backend contract tests.
 
 Stable facts may include:
 

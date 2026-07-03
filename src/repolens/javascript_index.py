@@ -19,6 +19,64 @@ JAVASCRIPT_EXTRACTOR_VERSION = (
     f"issue-163-js-ts-parser-backend-v1+{PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION}"
 )
 
+PROMOTED_JAVASCRIPT_FACT_FIELDS = {
+    "modules": (
+        "path",
+        "node_id",
+        "module_name",
+        "extension",
+        "parser_status",
+    ),
+    "imports": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "specifier",
+        "root_name",
+        "classification",
+        "resolved_path",
+        "resolution_status",
+        "line",
+    ),
+    "packages": ("id", "name", "classification"),
+    "symbols": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "name",
+        "qualified_name",
+        "line",
+        "start_line",
+        "end_line",
+    ),
+    "exports": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "exported_name",
+        "local_name",
+        "line",
+    ),
+    "commonjs_assignments": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "exported_name",
+        "assigned_name",
+        "line",
+    ),
+}
+
+EXPERIMENTAL_JAVASCRIPT_FACT_POLICY = (
+    "Tree-sitter AST nodes, source snippets, raw expressions, comments, signatures, bodies, "
+    "absolute paths, and parser-only research facts are not promoted. They must stay out of "
+    "Canonical Graph Hash and default Context Pack identity until this schema version changes."
+)
+
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
 )
