@@ -79,6 +79,17 @@ def test_ci_runs_v0_4_release_branch_and_workspace_gates() -> None:
     assert "tests/test_query_service.py" in workflow
 
 
+def test_ci_indexes_fixture_before_artifact_safety_audit() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    index_command = "uv run repolens index tests/fixtures/context_pack/happy-path --json"
+    audit_command = "uv run repolens audit-artifacts tests/fixtures/context_pack/happy-path --json"
+
+    assert index_command in workflow
+    assert audit_command in workflow
+    assert workflow.index(index_command) < workflow.index(audit_command)
+
+
 def test_release_notes_document_v0_3_1_graph_index_policy() -> None:
     release_notes = (ROOT / "docs" / "releases" / "v0.3.1.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

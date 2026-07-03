@@ -65,6 +65,9 @@ jobs:
       - name: Run Context Pack evaluation
         run: uv run repolens evaluate-context --manifest tests/fixtures/context_pack/evaluation_manifest.json --json
 
+      - name: Index artifact audit fixture
+        run: uv run repolens index tests/fixtures/context_pack/happy-path --json
+
       - name: Run artifact safety audit
         run: uv run repolens audit-artifacts tests/fixtures/context_pack/happy-path --json
 
