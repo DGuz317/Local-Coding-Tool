@@ -840,6 +840,7 @@ class GraphQueryService:
                 "relationship_candidates": self._relationship_candidates_for_paths(
                     connection, normalized_paths
                 ),
+                "route_hints": self._route_hints_for_paths(connection, normalized_paths),
                 "structural_summaries": self._structural_summaries_for_paths(
                     connection, normalized_paths
                 ),
@@ -2304,6 +2305,57 @@ class GraphQueryService:
                 "path": package_root,
             }
         return boundaries
+
+    def _route_hints_for_paths(
+        self, connection: sqlite3.Connection, paths: tuple[str, ...]
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not paths:
+            return {}
+        placeholders = ",".join("?" for _ in paths)
+        rows = _rows_to_dicts(
+            connection.execute(
+                f"""
+                SELECT
+                    path,
+                    framework,
+                    kind,
+                    route_path,
+                    confidence,
+                    line_range_json,
+                    evidence_labels_json,
+                    warnings_json
+                FROM javascript_route_hints
+                WHERE path IN ({placeholders})
+                ORDER BY path, framework, kind, route_path
+                """,
+                paths,
+            )
+        )
+        hints_by_path: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            line_range = json.loads(str(row["line_range_json"]))
+            evidence_labels = json.loads(str(row["evidence_labels_json"]))
+            warnings = json.loads(str(row["warnings_json"]))
+            path = str(row["path"])
+            hints_by_path.setdefault(path, []).append(
+                {
+                    "confidence": str(row["confidence"]),
+                    "evidence": [
+                        {
+                            "labels": evidence_labels,
+                            "line_range": line_range,
+                            "source": "framework_route_hint",
+                        }
+                    ],
+                    "framework": str(row["framework"]),
+                    "kind": str(row["kind"]),
+                    "path": path,
+                    "relationship": "framework_route_hint",
+                    "route_path": str(row["route_path"]),
+                    "warnings": warnings,
+                }
+            )
+        return hints_by_path
 
     def _workspace_memberships_for_paths(
         self, connection: sqlite3.Connection, paths: tuple[str, ...]

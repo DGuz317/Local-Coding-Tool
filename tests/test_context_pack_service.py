@@ -551,6 +551,7 @@ def test_context_pack_surfaces_package_workspace_contract_tracer(tmp_path):
     assert sorted(query_data) == [
         "package_boundaries",
         "relationship_candidates",
+        "route_hints",
         "structural_summaries",
         "workspace_memberships",
     ]
@@ -683,6 +684,90 @@ def test_context_pack_surfaces_ambiguous_workspace_package_import_candidates(tmp
         for edge in graph_json["edges"]
         if edge["kind"] == "IMPORTS"
     )
+
+
+def test_context_pack_and_preflight_surface_next_app_router_route_hints(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            """
+            {
+              "name": "next-route-demo",
+              "dependencies": {"next": "workspace:*"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "app" / "page.tsx",
+        "export default function HomePage() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "dashboard" / "layout.tsx",
+        "export default function DashboardLayout() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "api" / "users" / "route.ts",
+        "export function GET() { return Response.json({}); }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "blog" / "[slug]" / "page.tsx",
+        "export default function BlogPage() { return null; }\n",
+    )
+    index_repository(tmp_path)
+
+    query_metadata = GraphQueryService(tmp_path).context_pack_file_metadata(
+        [
+            "app/api/users/route.ts",
+            "app/blog/[slug]/page.tsx",
+            "app/dashboard/layout.tsx",
+            "app/page.tsx",
+        ]
+    )
+    context_envelope = get_task_context(
+        tmp_path,
+        "Update the home page route",
+        focus_hints=["app/page.tsx"],
+    )
+    preflight_envelope = get_assistant_preflight(
+        tmp_path,
+        "Update the home page route",
+        focus_hints=["app/page.tsx"],
+    )
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+
+    hints = query_metadata["data"]["route_hints"]
+    assert hints["app/page.tsx"][0] == {
+        "confidence": "medium",
+        "evidence": [
+            {
+                "labels": [
+                    "repo_relative_path",
+                    "next_app_router_file_convention",
+                    "framework_runtime_not_executed",
+                ],
+                "line_range": [1, 1],
+                "source": "framework_route_hint",
+            }
+        ],
+        "framework": "nextjs_app_router",
+        "kind": "page",
+        "path": "app/page.tsx",
+        "relationship": "framework_route_hint",
+        "route_path": "/",
+        "warnings": [],
+    }
+    assert hints["app/dashboard/layout.tsx"][0]["route_path"] == "/dashboard"
+    assert hints["app/api/users/route.ts"][0]["kind"] == "api_route_handler"
+    assert hints["app/api/users/route.ts"][0]["route_path"] == "/api/users"
+    assert hints["app/blog/[slug]/page.tsx"][0]["confidence"] == "low"
+    assert hints["app/blog/[slug]/page.tsx"][0]["warnings"] == [
+        "framework_route_hint:next_app_router_dynamic_segment_candidate"
+    ]
+    assert context_envelope["data"]["first_read_files"][0]["route_hints"] == hints["app/page.tsx"]
+    assert preflight_envelope["data"]["first_read_files"][0]["route_hints"] == hints["app/page.tsx"]
+    assert not any(edge["kind"] == "ROUTES_TO" for edge in graph_json["edges"])
+    assert "return Response" not in json.dumps(preflight_envelope)
 
 
 def test_expand_context_is_pack_scoped_bounded_and_source_free(tmp_path):

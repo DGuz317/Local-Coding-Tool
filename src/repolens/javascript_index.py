@@ -84,6 +84,18 @@ PROMOTED_JAVASCRIPT_FACT_FIELDS = {
         "method_names",
         "parser_evidence_labels",
     ),
+    "route_hints": (
+        "id",
+        "path",
+        "module_node_id",
+        "framework",
+        "kind",
+        "route_path",
+        "confidence",
+        "line_range",
+        "evidence_labels",
+        "warnings",
+    ),
 }
 
 EXPERIMENTAL_JAVASCRIPT_FACT_POLICY = (
@@ -311,6 +323,22 @@ class JavaScriptCallChainFact:
 
 
 @dataclass(frozen=True)
+class JavaScriptRouteHintFact:
+    """A deterministic framework route hint derived from repo-relative file structure."""
+
+    id: str
+    path: str
+    module_node_id: str
+    framework: str
+    kind: str
+    route_path: str
+    confidence: str
+    line_range: tuple[int, int] | None
+    evidence_labels: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class JavaScriptIndex:
     """All JS/TS facts extracted for one scan result."""
 
@@ -321,6 +349,7 @@ class JavaScriptIndex:
     exports: tuple[JavaScriptExportFact, ...]
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
     call_chains: tuple[JavaScriptCallChainFact, ...]
+    route_hints: tuple[JavaScriptRouteHintFact, ...]
 
     @property
     def parser_status_by_path(self) -> dict[str, str]:
@@ -432,6 +461,7 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
     call_chains: list[JavaScriptCallChainFact] = []
+    route_hints: list[JavaScriptRouteHintFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -457,6 +487,10 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
                 parser_status="parse_error",
             )
             continue
+
+        route_hint = _next_app_router_route_hint(path, module_node_id, source)
+        if route_hint is not None:
+            route_hints.append(route_hint)
 
         file_facts = _extract_file_facts(
             path,
@@ -494,6 +528,7 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         call_chains=tuple(
             sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
         ),
+        route_hints=tuple(sorted(route_hints, key=lambda fact: (fact.path, fact.id))),
     )
 
 
@@ -514,6 +549,7 @@ def extract_javascript_index_with_tree_sitter(
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
     call_chains: list[JavaScriptCallChainFact] = []
+    route_hints: list[JavaScriptRouteHintFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -541,6 +577,9 @@ def extract_javascript_index_with_tree_sitter(
             continue
 
         modules.append(module)
+        route_hint = _next_app_router_route_hint(path, module_node_id, source)
+        if route_hint is not None:
+            route_hints.append(route_hint)
         file_facts = _extract_file_facts(
             path,
             module_node_id,
@@ -577,6 +616,7 @@ def extract_javascript_index_with_tree_sitter(
         call_chains=tuple(
             sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
         ),
+        route_hints=tuple(sorted(route_hints, key=lambda fact: (fact.path, fact.id))),
     )
 
 
@@ -601,6 +641,10 @@ def javascript_package_node_id(name: str, classification: str) -> str:
 
 def javascript_symbol_node_id(path: str, kind: str, name: str) -> str:
     return f"javascript_symbol:{path}:{kind}:{name}"
+
+
+def javascript_route_hint_id(path: str) -> str:
+    return f"javascript_route_hint:{path}"
 
 
 def _is_javascript(file: ScannedFile) -> bool:
@@ -656,6 +700,80 @@ def _package_version(package_name: str) -> str | None:
 
 def _module_name(path: str) -> str:
     return PurePosixPath(path).with_suffix("").as_posix()
+
+
+def _next_app_router_route_hint(
+    path: str,
+    module_node_id: str,
+    source: str,
+) -> JavaScriptRouteHintFact | None:
+    posix_path = PurePosixPath(path)
+    parts = posix_path.parts
+    app_index = _app_directory_index(parts)
+    if app_index is None:
+        return None
+
+    filename = posix_path.name
+    route_kind_by_filename = {
+        "layout.tsx": "layout",
+        "page.tsx": "page",
+        "route.ts": "api_route_handler",
+    }
+    kind = route_kind_by_filename.get(filename)
+    if kind is None:
+        return None
+    if kind == "api_route_handler" and (
+        len(parts) <= app_index + 1 or parts[app_index + 1] != "api"
+    ):
+        return None
+
+    route_segments = parts[app_index + 1 : -1]
+    route_path = _normalized_next_route_path(route_segments)
+    warnings = _next_route_warnings(route_segments)
+    line_count = max(1, source.count("\n") + (0 if source.endswith("\n") else 1))
+    return JavaScriptRouteHintFact(
+        id=javascript_route_hint_id(path),
+        path=path,
+        module_node_id=module_node_id,
+        framework="nextjs_app_router",
+        kind=kind,
+        route_path=route_path,
+        confidence="low" if warnings else "medium",
+        line_range=(1, line_count),
+        evidence_labels=(
+            "repo_relative_path",
+            "next_app_router_file_convention",
+            "framework_runtime_not_executed",
+        ),
+        warnings=warnings,
+    )
+
+
+def _app_directory_index(parts: tuple[str, ...]) -> int | None:
+    for index, part in enumerate(parts[:-1]):
+        if part == "app":
+            return index
+    return None
+
+
+def _normalized_next_route_path(route_segments: tuple[str, ...]) -> str:
+    visible_segments = [segment for segment in route_segments if not _next_route_group(segment)]
+    if not visible_segments:
+        return "/"
+    return "/" + "/".join(visible_segments)
+
+
+def _next_route_warnings(route_segments: tuple[str, ...]) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if any(_next_route_group(segment) for segment in route_segments):
+        warnings.append("framework_route_hint:next_app_router_route_group_candidate")
+    if any("[" in segment or "]" in segment for segment in route_segments):
+        warnings.append("framework_route_hint:next_app_router_dynamic_segment_candidate")
+    return tuple(warnings)
+
+
+def _next_route_group(segment: str) -> bool:
+    return segment.startswith("(") and segment.endswith(")")
 
 
 @dataclass(frozen=True)

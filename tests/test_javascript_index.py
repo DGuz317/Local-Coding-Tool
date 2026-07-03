@@ -16,6 +16,7 @@ from repolens.javascript_index import (
     JavaScriptModuleFact,
     JavaScriptPackageFact,
     JavaScriptParserProvenance,
+    JavaScriptRouteHintFact,
     JavaScriptSymbolFact,
     TreeSitterJavaScriptSupport,
     extract_javascript_index,
@@ -39,6 +40,7 @@ def test_promoted_javascript_fact_contract_allows_only_source_free_fields():
             field.name for field in fields(JavaScriptCommonJSAssignmentFact)
         ),
         "call_chains": tuple(field.name for field in fields(JavaScriptCallChainFact)),
+        "route_hints": tuple(field.name for field in fields(JavaScriptRouteHintFact)),
     }
 
     forbidden_terms = {
@@ -111,6 +113,51 @@ def test_javascript_index_supports_scanner_approved_source_extensions(tmp_path):
     }
     assert {module.parser_status for module in javascript_index.modules} == {"parsed"}
     assert len(javascript_index.imports) == 8
+
+
+def test_javascript_index_extracts_next_app_router_route_hints(tmp_path):
+    _write_text(tmp_path / "app" / "page.tsx", "export default function Home() { return null; }\n")
+    _write_text(
+        tmp_path / "app" / "dashboard" / "layout.tsx",
+        "export default function Layout() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "api" / "users" / "route.ts",
+        "export function GET() { return Response.json({}); }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "blog" / "[slug]" / "page.tsx",
+        "export default function Blog() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "pages" / "index.tsx", "export default function Legacy() { return null; }\n"
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    hints = {hint.path: hint for hint in javascript_index.route_hints}
+    assert set(hints) == {
+        "app/api/users/route.ts",
+        "app/blog/[slug]/page.tsx",
+        "app/dashboard/layout.tsx",
+        "app/page.tsx",
+    }
+    assert hints["app/page.tsx"].kind == "page"
+    assert hints["app/page.tsx"].route_path == "/"
+    assert hints["app/dashboard/layout.tsx"].kind == "layout"
+    assert hints["app/dashboard/layout.tsx"].route_path == "/dashboard"
+    assert hints["app/api/users/route.ts"].kind == "api_route_handler"
+    assert hints["app/api/users/route.ts"].route_path == "/api/users"
+    assert hints["app/blog/[slug]/page.tsx"].confidence == "low"
+    assert hints["app/blog/[slug]/page.tsx"].warnings == (
+        "framework_route_hint:next_app_router_dynamic_segment_candidate",
+    )
+    assert hints["app/page.tsx"].evidence_labels == (
+        "repo_relative_path",
+        "next_app_router_file_convention",
+        "framework_runtime_not_executed",
+    )
+    assert hints["app/page.tsx"].line_range == (1, 1)
 
 
 def test_javascript_index_extracts_imports_and_classifies_packages(tmp_path):
