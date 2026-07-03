@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from repolens.resolver_contract import ResolverOutcomeClass
 from repolens.scanner import ScannedFile
 
 PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION = "javascript-promoted-facts-v1"
@@ -37,6 +38,9 @@ PROMOTED_JAVASCRIPT_FACT_FIELDS = {
         "classification",
         "resolved_path",
         "resolution_status",
+        "outcome_class",
+        "evidence_labels",
+        "candidate_paths",
         "line",
     ),
     "packages": ("id", "name", "classification"),
@@ -195,6 +199,10 @@ EXPORT_CLASS_PATTERN = re.compile(
 EXPORT_CONST_PATTERN = re.compile(rf"^\s*export\s+const\s+(?P<name>{IDENTIFIER_PATTERN})\b")
 EXPORT_DEFAULT_PATTERN = re.compile(r"^\s*export\s+default\b(?P<body>.*)$")
 EXPORT_LIST_PATTERN = re.compile(r"^\s*export\s*\{(?P<items>[^}]+)\}")
+RE_EXPORT_FROM_PATTERN = re.compile(
+    r"^\s*export\s*(?:type\s*)?\{[^}]+\}\s*from\s*"
+    r"(?P<quote>['\"])(?P<specifier>[^'\"]+)(?P=quote)"
+)
 EXPORT_LIST_ITEM_PATTERN = re.compile(
     rf"^(?:type\s+)?(?P<local>{IDENTIFIER_PATTERN}|default)"
     rf"(?:\s+as\s+(?P<exported>{IDENTIFIER_PATTERN}|default))?$"
@@ -231,6 +239,9 @@ class JavaScriptImportFact:
     classification: str
     resolved_path: str | None
     resolution_status: str
+    outcome_class: ResolverOutcomeClass
+    evidence_labels: tuple[str, ...]
+    candidate_paths: tuple[str, ...]
     line: int
 
 
@@ -664,6 +675,9 @@ class _ImportResolution:
     classification: str
     resolved_path: str | None
     resolution_status: str
+    outcome_class: ResolverOutcomeClass
+    evidence_labels: tuple[str, ...]
+    candidate_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -707,6 +721,17 @@ def _extract_file_facts(
         )
         if static_import is not None:
             imports.append(static_import)
+        re_export_import = _re_export_import_fact(
+            path,
+            module_node_id,
+            line,
+            line_number,
+            import_id_counts,
+            alias_rules,
+            javascript_paths,
+        )
+        if re_export_import is not None:
+            imports.append(re_export_import)
 
         for specifier in _literal_call_specifiers(line, "require"):
             imports.append(
@@ -831,6 +856,30 @@ def _static_import_kind(clause: str) -> str:
     if normalized.startswith("{") or "{" in normalized:
         return "named_import"
     return "default_import"
+
+
+def _re_export_import_fact(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> JavaScriptImportFact | None:
+    match = RE_EXPORT_FROM_PATTERN.match(line)
+    if match is None:
+        return None
+    return _import_fact(
+        path,
+        module_node_id,
+        "re_export",
+        match.group("specifier"),
+        line_number,
+        id_counts,
+        alias_rules,
+        javascript_paths,
+    )
 
 
 def _top_level_symbol_fact(
@@ -1198,6 +1247,9 @@ def _import_fact(
         classification=resolution.classification,
         resolved_path=resolution.resolved_path,
         resolution_status=resolution.resolution_status,
+        outcome_class=resolution.outcome_class,
+        evidence_labels=resolution.evidence_labels,
+        candidate_paths=resolution.candidate_paths,
         line=line,
     )
 
@@ -1209,7 +1261,13 @@ def _resolve_import_specifier(
     javascript_paths: frozenset[str],
 ) -> _ImportResolution:
     if specifier.startswith("/"):
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_unsupported_absolute")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_unsupported_absolute",
+            outcome_class="unsupported",
+        )
 
     if specifier.startswith("."):
         return _resolve_relative_specifier(source_path, specifier, javascript_paths)
@@ -1228,9 +1286,37 @@ def _resolve_import_specifier(
 
     node_builtin = _node_builtin_name(specifier)
     if node_builtin is not None:
-        return _ImportResolution(node_builtin, "node_builtin", None, "external")
+        return _import_resolution(node_builtin, "node_builtin", None, "external")
 
-    return _ImportResolution(_package_root(specifier), "third_party", None, "external")
+    return _import_resolution(_package_root(specifier), "third_party", None, "external")
+
+
+def _import_resolution(
+    root_name: str | None,
+    classification: str,
+    resolved_path: str | None,
+    resolution_status: str,
+    *,
+    outcome_class: ResolverOutcomeClass | None = None,
+    evidence_labels: tuple[str, ...] = ("javascript_import_specifier",),
+    candidate_paths: tuple[str, ...] = (),
+) -> _ImportResolution:
+    if outcome_class is None:
+        if resolved_path is not None or resolution_status == "external":
+            outcome_class = "resolved_edge"
+        elif candidate_paths:
+            outcome_class = "relationship_candidate"
+        else:
+            outcome_class = "unresolved"
+    return _ImportResolution(
+        root_name=root_name,
+        classification=classification,
+        resolved_path=resolved_path,
+        resolution_status=resolution_status,
+        outcome_class=outcome_class,
+        evidence_labels=evidence_labels,
+        candidate_paths=tuple(sorted(candidate_paths)),
+    )
 
 
 def _resolve_relative_specifier(
@@ -1243,19 +1329,25 @@ def _resolve_relative_specifier(
         source_dir = ""
     base_path = _normalize_repo_path(source_dir, specifier)
     if base_path is None:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_outside_root")
+        return _import_resolution(None, "local_unresolved", None, "unresolved_outside_root")
 
     candidate_paths = _module_path_candidates(base_path, javascript_paths)
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_relative",
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_relative")
-    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_relative")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_relative",
+            candidate_paths=tuple(candidate_paths),
+        )
+    return _import_resolution(None, "local_unresolved", None, "unresolved_missing_relative")
 
 
 def _resolve_alias_specifier(
@@ -1274,10 +1366,17 @@ def _resolve_alias_specifier(
         if _typescript_config_scope_applies(source_path, rule.scope_dir)
     )
     if not matches:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_out_of_scope_alias")
+        return _import_resolution(None, "local_unresolved", None, "unresolved_out_of_scope_alias")
 
     if any(rule.status in {"complex", "unsupported"} for rule in matches):
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_complex_alias")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_complex_alias",
+            outcome_class="unsupported",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+        )
 
     candidate_paths: set[str] = set()
     for rule in matches:
@@ -1288,15 +1387,29 @@ def _resolve_alias_specifier(
             )
 
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_alias",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_alias")
-    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_alias")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_alias",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+            candidate_paths=tuple(candidate_paths),
+        )
+    return _import_resolution(
+        None,
+        "local_unresolved",
+        None,
+        "unresolved_missing_alias",
+        evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+    )
 
 
 def _resolve_base_url_specifier(
@@ -1322,14 +1435,22 @@ def _resolve_base_url_specifier(
             )
 
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_base_url",
+            evidence_labels=("javascript_import_specifier", "typescript_base_url"),
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_base_url")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_base_url",
+            evidence_labels=("javascript_import_specifier", "typescript_base_url"),
+            candidate_paths=tuple(candidate_paths),
+        )
     return None
 
 

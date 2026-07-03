@@ -185,6 +185,11 @@ def test_javascript_index_resolves_relative_imports_with_extension_and_index_pro
     assert imports[("named_import", "../lib/format")].root_name is None
     assert imports[("named_import", "../lib/format")].resolved_path == "src/lib/format.ts"
     assert imports[("named_import", "../lib/format")].resolution_status == "resolved_relative"
+    assert imports[("named_import", "../lib/format")].outcome_class == "resolved_edge"
+    assert imports[("named_import", "../lib/format")].evidence_labels == (
+        "javascript_import_specifier",
+    )
+    assert imports[("named_import", "../lib/format")].candidate_paths == ()
     assert imports[("named_import", "../ui")].resolved_path == "src/ui/index.tsx"
     assert imports[("require", "../exact.js")].resolved_path == "src/exact.js"
     assert imports[("dynamic_import", "../lib/format")].resolved_path == "src/lib/format.ts"
@@ -212,10 +217,16 @@ def test_javascript_index_leaves_ambiguous_and_unresolved_relative_imports_unres
     assert imports["../lib/ambiguous"].classification == "local_unresolved"
     assert imports["../lib/ambiguous"].resolved_path is None
     assert imports["../lib/ambiguous"].resolution_status == "unresolved_ambiguous_relative"
+    assert imports["../lib/ambiguous"].outcome_class == "relationship_candidate"
+    assert imports["../lib/ambiguous"].candidate_paths == (
+        "src/lib/ambiguous.ts",
+        "src/lib/ambiguous.tsx",
+    )
     assert imports["../lib/missing"].classification == "local_unresolved"
     assert imports["../lib/missing"].resolution_status == "unresolved_missing_relative"
     assert imports["/src/lib/ambiguous"].classification == "local_unresolved"
     assert imports["/src/lib/ambiguous"].resolution_status == "unresolved_unsupported_absolute"
+    assert imports["/src/lib/ambiguous"].outcome_class == "unsupported"
     assert imports["next/image"].classification == "third_party"
 
 
@@ -353,6 +364,10 @@ def test_javascript_index_resolves_simple_typescript_path_aliases(tmp_path):
     assert imports["@/shared/format"].root_name is None
     assert imports["@/shared/format"].resolved_path == "src/shared/format.ts"
     assert imports["@/shared/format"].resolution_status == "resolved_alias"
+    assert imports["@/shared/format"].evidence_labels == (
+        "javascript_import_specifier",
+        "typescript_path_alias",
+    )
     assert imports["@app/entry"].resolved_path == "src/app/entry.tsx"
     assert imports["react"].classification == "third_party"
 
@@ -387,6 +402,7 @@ def test_javascript_index_leaves_complex_aliases_unresolved_without_packages(tmp
     assert imports["@ambiguous/thing"].root_name is None
     assert imports["@ambiguous/thing"].resolved_path is None
     assert imports["@ambiguous/thing"].resolution_status == "unresolved_complex_alias"
+    assert imports["@ambiguous/thing"].outcome_class == "unsupported"
     assert imports["@missing/thing"].classification == "local_unresolved"
     assert imports["@missing/thing"].resolved_path is None
     assert imports["@missing/thing"].resolution_status == "unresolved_missing_alias"
@@ -459,6 +475,10 @@ def test_javascript_index_resolves_exact_path_aliases_and_base_url_imports(tmp_p
     assert imports["@settings"].resolution_status == "resolved_alias"
     assert imports["shared/format"].resolved_path == "app/src/shared/format.ts"
     assert imports["shared/format"].resolution_status == "resolved_base_url"
+    assert imports["shared/format"].evidence_labels == (
+        "javascript_import_specifier",
+        "typescript_base_url",
+    )
     assert imports["react"].classification == "third_party"
     assert imports["react"].resolution_status == "external"
 
@@ -488,6 +508,23 @@ def test_javascript_index_marks_ambiguous_scoped_alias_matches_unresolved(tmp_pa
     assert import_fact.classification == "local_unresolved"
     assert import_fact.resolved_path is None
     assert import_fact.resolution_status == "unresolved_ambiguous_alias"
+    assert import_fact.outcome_class == "relationship_candidate"
+    assert import_fact.candidate_paths == (
+        "packages/app/src/shared/format.ts",
+        "src/shared/format.ts",
+    )
+
+
+def test_javascript_index_represents_deterministic_re_export_imports(tmp_path):
+    _write_text(tmp_path / "src" / "value.ts", "export const value = 1;\n")
+    _write_text(tmp_path / "src" / "index.ts", 'export { value } from "./value";\n')
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    imports = {(item.kind, item.specifier): item for item in javascript_index.imports}
+    assert imports[("re_export", "./value")].resolved_path == "src/value.ts"
+    assert imports[("re_export", "./value")].resolution_status == "resolved_relative"
+    assert imports[("re_export", "./value")].outcome_class == "resolved_edge"
 
 
 def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_path):

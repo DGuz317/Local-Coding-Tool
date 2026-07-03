@@ -69,7 +69,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 15
+GRAPH_SCHEMA_VERSION = 16
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -836,6 +836,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             classification TEXT NOT NULL,
             resolved_path TEXT,
             resolution_status TEXT NOT NULL,
+            outcome_class TEXT NOT NULL,
+            evidence_labels_json TEXT NOT NULL,
+            candidate_paths_json TEXT NOT NULL,
             line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
@@ -2389,9 +2392,12 @@ def _insert_javascript_tables(
             classification,
             resolved_path,
             resolution_status,
+            outcome_class,
+            evidence_labels_json,
+            candidate_paths_json,
             line
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2404,6 +2410,9 @@ def _insert_javascript_tables(
                 import_fact.classification,
                 import_fact.resolved_path,
                 import_fact.resolution_status,
+                import_fact.outcome_class,
+                _json_value(import_fact.evidence_labels),
+                _json_value(import_fact.candidate_paths),
                 import_fact.line,
             )
             for import_fact in javascript_index.imports
@@ -3246,11 +3255,25 @@ def _insert_edges(
         UPDATE javascript_imports
         SET classification = 'local_resolved',
             resolved_path = ?,
-            resolution_status = 'resolved_workspace_package'
+            resolution_status = 'resolved_workspace_package',
+            outcome_class = 'resolved_edge',
+            evidence_labels_json = ?
         WHERE id = ?
         """,
         (
-            (resolution.resolved_path, import_id)
+            (
+                resolution.resolved_path,
+                _json_value(
+                    (
+                        "javascript_import_specifier",
+                        "package_manifest_dependency",
+                        "package_manifest_identity",
+                        "package_entrypoint_metadata",
+                        "workspace_declaration",
+                    )
+                ),
+                import_id,
+            )
             for import_id, resolution in sorted(workspace_package_resolutions.items())
         ),
     )
@@ -3289,6 +3312,14 @@ def _insert_edges(
                     "package_root": workspace_resolution.package_root,
                     "resolved_path": workspace_resolution.resolved_path,
                     "resolution_status": "resolved_workspace_package",
+                    "outcome_class": "resolved_edge",
+                    "evidence_labels": (
+                        "javascript_import_specifier",
+                        "package_manifest_dependency",
+                        "package_manifest_identity",
+                        "package_entrypoint_metadata",
+                        "workspace_declaration",
+                    ),
                     "specifier": javascript_import.specifier,
                     "workspace_path": workspace_resolution.workspace_path,
                     "workspace_source_path": workspace_resolution.workspace_source_path,
@@ -3322,6 +3353,9 @@ def _insert_edges(
                     "line": javascript_import.line,
                     "resolved_path": javascript_import.resolved_path,
                     "resolution_status": javascript_import.resolution_status,
+                    "outcome_class": javascript_import.outcome_class,
+                    "evidence_labels": javascript_import.evidence_labels,
+                    "candidate_paths": javascript_import.candidate_paths,
                     "specifier": javascript_import.specifier,
                 }
             )
@@ -3354,6 +3388,9 @@ def _insert_edges(
                 "id": javascript_import.id,
                 "kind": javascript_import.kind,
                 "line": javascript_import.line,
+                "outcome_class": javascript_import.outcome_class,
+                "evidence_labels": javascript_import.evidence_labels,
+                "candidate_paths": javascript_import.candidate_paths,
                 "resolution_status": javascript_import.resolution_status,
                 "specifier": javascript_import.specifier,
             }
@@ -3820,11 +3857,16 @@ def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, A
             "import_id": fact["id"],
             "kind": "javascript_import",
             "line": fact["line"],
+            "outcome_class": fact.get("outcome_class", "resolved_edge"),
             "resolved_path": fact.get("resolved_path"),
             "resolution_status": fact["resolution_status"],
             "specifier": fact["specifier"],
             "statement_kind": fact["kind"],
         }
+        if fact.get("evidence_labels"):
+            item["evidence_labels"] = sorted(fact["evidence_labels"])
+        if fact.get("candidate_paths"):
+            item["candidate_paths"] = sorted(fact["candidate_paths"])
         for key in (
             "dependency_source_path",
             "entrypoint_kind",
@@ -4306,23 +4348,28 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
-        javascript_imports = _rows(
-            connection.execute(
-                """
-                SELECT
-                    id,
-                    path,
-                    module_node_id,
-                    kind,
-                    specifier,
-                    root_name,
-                    classification,
-                    resolved_path,
-                    resolution_status,
-                    line
-                FROM javascript_imports
-                ORDER BY path, line, id
-                """
+        javascript_imports = _decode_javascript_import_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        kind,
+                        specifier,
+                        root_name,
+                        classification,
+                        resolved_path,
+                        resolution_status,
+                        outcome_class,
+                        evidence_labels_json,
+                        candidate_paths_json,
+                        line
+                    FROM javascript_imports
+                    ORDER BY path, line, id
+                    """
+                )
             )
         )
         javascript_packages = _rows(
@@ -5045,6 +5092,9 @@ def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "path": import_fact["path"],
                 "resolved_path": import_fact["resolved_path"],
                 "resolution_status": import_fact["resolution_status"],
+                "outcome_class": import_fact["outcome_class"],
+                "evidence_labels": import_fact["evidence_labels"],
+                "candidate_paths": import_fact["candidate_paths"],
                 "root_name": import_fact["root_name"],
                 "specifier": import_fact["specifier"],
             }
@@ -5970,6 +6020,8 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             "Classification",
             "Resolved path",
             "Resolution",
+            "Outcome",
+            "Candidates",
             "Line",
         ),
         row=lambda import_fact: (
@@ -5981,6 +6033,8 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             str(import_fact["classification"]),
             f"`{_md_cell(import_fact['resolved_path'] or '')}`",
             str(import_fact["resolution_status"]),
+            str(import_fact["outcome_class"]),
+            ", ".join(f"`{_md_cell(path)}`" for path in import_fact["candidate_paths"]),
             str(import_fact["line"]),
         ),
     )
@@ -7470,6 +7524,16 @@ def _decode_javascript_call_chain_rows(rows: list[dict[str, Any]]) -> list[dict[
         decoded = dict(row)
         decoded["method_names"] = json.loads(decoded.pop("method_names_json"))
         decoded["parser_evidence_labels"] = json.loads(decoded.pop("parser_evidence_labels_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_javascript_import_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["evidence_labels"] = json.loads(decoded.pop("evidence_labels_json"))
+        decoded["candidate_paths"] = json.loads(decoded.pop("candidate_paths_json"))
         decoded_rows.append(decoded)
     return decoded_rows
 
