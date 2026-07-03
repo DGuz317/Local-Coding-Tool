@@ -1,15 +1,56 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from textwrap import dedent
 from types import SimpleNamespace
 
 from repolens.javascript_index import (
+    EXPERIMENTAL_JAVASCRIPT_FACT_POLICY,
+    JAVASCRIPT_EXTRACTOR_VERSION,
+    PROMOTED_JAVASCRIPT_FACT_FIELDS,
+    PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+    JavaScriptCommonJSAssignmentFact,
+    JavaScriptExportFact,
+    JavaScriptImportFact,
+    JavaScriptModuleFact,
+    JavaScriptPackageFact,
     JavaScriptParserProvenance,
+    JavaScriptSymbolFact,
     TreeSitterJavaScriptSupport,
     extract_javascript_index,
     extract_javascript_index_with_tree_sitter,
 )
 from repolens.scanner import scan_repository
+
+
+def test_promoted_javascript_fact_contract_allows_only_source_free_fields():
+    assert PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION in JAVASCRIPT_EXTRACTOR_VERSION
+    assert "Canonical Graph Hash" in EXPERIMENTAL_JAVASCRIPT_FACT_POLICY
+    assert "source snippets" in EXPERIMENTAL_JAVASCRIPT_FACT_POLICY
+
+    assert PROMOTED_JAVASCRIPT_FACT_FIELDS == {
+        "modules": tuple(field.name for field in fields(JavaScriptModuleFact)),
+        "imports": tuple(field.name for field in fields(JavaScriptImportFact)),
+        "packages": tuple(field.name for field in fields(JavaScriptPackageFact)),
+        "symbols": tuple(field.name for field in fields(JavaScriptSymbolFact)),
+        "exports": tuple(field.name for field in fields(JavaScriptExportFact)),
+        "commonjs_assignments": tuple(
+            field.name for field in fields(JavaScriptCommonJSAssignmentFact)
+        ),
+    }
+
+    forbidden_terms = {
+        "absolute",
+        "body",
+        "comment",
+        "expression",
+        "signature",
+        "snippet",
+        "source",
+    }
+    for allowed_fields in PROMOTED_JAVASCRIPT_FACT_FIELDS.values():
+        for field_name in allowed_fields:
+            assert not any(term in field_name for term in forbidden_terms)
 
 
 def test_javascript_index_supports_scanner_approved_source_extensions(tmp_path):
@@ -167,6 +208,7 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
 
             export default Widget;
             export { helper, Internal as PublicInternal };
+            export { value as ReExportedValue } from "./value";
 
             module.exports = Widget;
             exports.helper = helper;
@@ -201,8 +243,8 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
     assert symbols[("function", "exportedFunction")].end_line == 3
     assert symbols[("function", "helper")].start_line == 5
     assert symbols[("function", "helper")].end_line == 7
-    assert symbols[("function", "outer")].start_line == 28
-    assert symbols[("function", "outer")].end_line == 32
+    assert symbols[("function", "outer")].start_line == 29
+    assert symbols[("function", "outer")].end_line == 33
     assert symbols[("arrow_function", "makeThing")].start_line == 9
     assert symbols[("arrow_function", "makeThing")].end_line == 9
     assert ("function", "nested") not in symbols
@@ -219,6 +261,7 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
         ("default_export", "default", "Widget"),
         ("function_export", "exportedFunction", "exportedFunction"),
         ("named_export", "PublicInternal", "Internal"),
+        ("named_export", "ReExportedValue", "value"),
         ("named_export", "helper", "helper"),
     }
 
