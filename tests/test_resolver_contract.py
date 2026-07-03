@@ -14,6 +14,8 @@ def test_resolver_taxonomy_contract_uses_stable_public_labels() -> None:
         "package_manifest_identity",
         "package_entrypoint_metadata",
         "workspace_declaration",
+        "typescript_path_alias",
+        "typescript_base_url",
     )
     assert RESOLVER_OUTCOME_CLASSES == (
         "resolved_edge",
