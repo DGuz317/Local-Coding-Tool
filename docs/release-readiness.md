@@ -4,6 +4,8 @@ This checklist is for manual dogfooding and release prep. It does not publish to
 
 v0.5 release readiness is about a stable Assistant Preflight adoption path. Assistants should call preflight before broad file reads, then use the returned first-read files, likely tests, warnings, freshness, budget metadata, and candidate commands as orientation only.
 
+v0.6 release readiness is about parser/resolver evidence that improves first-read relevance while preserving uncertainty and source-safety. JS/TS call-chain facts, re-export metadata, workspace package imports, and Next.js App Router route hints must remain compact metadata and must not become source mirrors or runtime framework/package-manager/compiler execution.
+
 v0.4 release readiness is about trust in package/workspace repositories. The package/workspace evidence must show that RepoLens preserves uncertainty through Relationship Candidates, Graph Quality Warnings, unresolved statuses, and known limitations instead of inventing package facts.
 
 ## Human Checkpoint
@@ -19,6 +21,7 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 - Known limitations in `docs/known-limitations.md` reflect dogfooding outcomes and are acceptable for release.
 - v0.4 maintainer release judgment for issue #128 remains recorded as the v0.5 prerequisite.
 - Final v0.5 maintainer release judgment is recorded before v0.5 is cut.
+- Final v0.6 maintainer release judgment is recorded before v0.6 is cut.
 
 ## Local Verification Gate
 
@@ -178,7 +181,15 @@ uv run repolens evaluate-context
 uv run repolens evaluate-context --json
 ```
 
-The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, and no-source-disclosure negatives.
+The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, JS/TS call chains, alias ambiguity, re-export behavior, workspace package imports, route hints, and no-source-disclosure negatives.
+
+Latest local evidence for issue #169 on 2026-07-06:
+
+- Dogfood evidence: `docs/dogfood/2026-07-06-v0.6-dogfood-evaluation-pack.md` covers JS/TS workspace aliases and package boundaries, source-free call chains, re-export behavior, Next.js App Router route hints, alias ambiguity, stale graph behavior, and no-source-disclosure negatives.
+- Local savings metrics: `uv run repolens evaluate-context --json` reports fixture-derived estimates only; they are not telemetry, exact model-token claims, or universal productivity scores.
+- Parser timing evidence: `uv run repolens evaluate-context --json` records bounded local fixture index timing and eligible file counts only to document v0.6 limitations, not to add parse cache, worker pools, indexing parallelism, or runtime package-manager/compiler/framework execution.
+- Artifact audit evidence: `uv run repolens audit-artifacts . --json` remains the safety gate for source snippet leakage, absolute host paths, raw secrets, raw Agent Guidance mirroring, bounded artifact size, candidate commands not run, and MCP/preflight contract preservation.
+- Maintainer release judgment: pending HITL approval for issue #169.
 
 Latest local evidence for issue #149 on 2026-07-02:
 
