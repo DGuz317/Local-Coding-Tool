@@ -13,9 +13,9 @@ RepoLens is local-first. Normal indexing and MCP usage do not require AI models,
 
 ## Current Release
 
-Current version: **v0.5.0**.
+Current version: **v0.6.0**.
 
-v0.5.0 focuses on one cheap, safe, bounded Assistant Preflight workflow before broad repository reads. Release notes live in `docs/releases/v0.5.0.md`.
+v0.6.0 improves JavaScript and TypeScript orientation with parser-backed structure, resolver outcome metadata, source-free call-chain facts, and bounded framework route hints. Release notes live in `docs/releases/v0.6.0.md`.
 
 ## What Problem Does This Solve?
 
@@ -142,6 +142,14 @@ Command meanings:
 - `preflight`: return the Assistant Preflight contract for a task, including graph freshness, first-read files, likely tests, candidate commands, focus hints, warnings, and budget metadata.
 - `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants.
 - `mcp`: start the read-only stdio MCP server for an assistant.
+
+For JavaScript and TypeScript repositories, v0.6 uses the Tree-sitter JS/TS parser backend by default when the parser and grammar packages are available. If they are unavailable, RepoLens falls back to the legacy bounded scanner and emits parser-backend warnings instead of pretending parser-backed facts exist.
+
+v0.6 metadata remains orientation-only:
+
+- Call Chain Facts are source-free structural facts with names, receiver shape, and bounded line ranges. They are not runtime reachability proof, deep semantic call graphs, or data-flow analysis.
+- Framework Route Hints are deterministic hints from local file/config/parser evidence. The first fixture covers Next.js App Router shapes, but hints are not framework emulation or runtime route proof.
+- Resolver outcomes preserve uncertainty with unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings when local evidence is incomplete.
 
 There is also a developer-oriented `benchmark-update` command for update-speed evidence.
 
@@ -484,7 +492,7 @@ Before release, run the full verification gate, review generated artifact behavi
 
 ## Roadmap And Non-Goals
 
-RepoLens v0.5 focuses on giving assistants one deterministic preflight workflow before broad repository reads.
+RepoLens v0.6 focuses on improving JS/TS parser and resolver evidence for that deterministic preflight workflow while preserving source-safety and uncertainty.
 
 Current focus:
 

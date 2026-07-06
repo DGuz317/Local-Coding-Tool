@@ -1,4 +1,4 @@
-# RepoLens MCP v0.5 Tool Examples
+# RepoLens MCP v0.6 Tool Examples
 
 All RepoLens MCP tools are read-only and return the standard MCP response envelope with `ok`, `data`, `warnings`, `limits`, `confidence`, `evidence`, `freshness`, and `truncation`. Some tools also return `pagination`.
 

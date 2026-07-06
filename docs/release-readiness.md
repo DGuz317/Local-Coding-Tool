@@ -1,4 +1,4 @@
-# RepoLens MCP v0.5 Release Readiness
+# RepoLens MCP v0.6 Release Readiness
 
 This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
 
@@ -14,8 +14,8 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 
 - Project and distribution name: `repolens` / RepoLens MCP.
 - License wording and whether a license file should be added before release.
-- PyPI publishing remains deferred for v0.5 unless a maintainer opens an explicit release issue.
-- Docker registry publishing remains deferred for v0.5 unless a maintainer opens an explicit release issue.
+- PyPI publishing remains deferred for v0.6 unless a maintainer opens an explicit release issue.
+- Docker registry publishing remains deferred for v0.6 unless a maintainer opens an explicit release issue.
 - Assistant client config examples for OpenCode, Claude Desktop, and Cursor-style MCP are accurate for the current CLI command shape.
 - Final README positioning and whether the README should target users, contributors, or both.
 - Known limitations in `docs/known-limitations.md` reflect dogfooding outcomes and are acceptable for release.
@@ -53,6 +53,17 @@ The v0.4 assistant-facing contract uses these domain terms:
 - Candidate Verification Command: a found command with `run: false`, purpose metadata, and a separate command risk bucket.
 
 Context Packs may surface package/workspace ownership facts, relationship candidates, graph-quality warning codes, docs/config orientation, related package references, and command risk buckets as structured metadata only. They must not include source snippets, code bodies, function signatures, raw config values, raw comments, raw Agent Guidance text, paragraph excerpts, or absolute host paths.
+
+## v0.6 Assistant-Facing Documentation
+
+The v0.6 assistant-facing contract keeps Assistant Preflight as the first step before broad file reads and adds richer JS/TS orientation metadata:
+
+- Tree-sitter JS/TS is the default parser backend when the parser and grammar packages are available. If not available, RepoLens falls back to the legacy bounded scanner and emits parser-backend warnings.
+- Parser-backed facts include stable, source-free module, import, export, top-level symbol, provenance, and line-range metadata only.
+- Call Chain Facts are structural metadata, not runtime proof, framework lifecycle analysis, or deep semantic call graphs.
+- Framework Route Hints are deterministic hints from local file/config/parser evidence, not framework emulation, compiler output, bundler output, or runtime route proof.
+- Resolver outcomes preserve uncertainty for unsupported aliases, ambiguous exports, incomplete workspace evidence, and complex package entrypoints through unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings.
+- Assistant-facing output must continue to omit source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, and absolute host paths.
 
 ## Isolated Native Install Smoke
 
@@ -182,6 +193,17 @@ uv run repolens evaluate-context --json
 ```
 
 The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, JS/TS call chains, alias ambiguity, re-export behavior, workspace package imports, route hints, and no-source-disclosure negatives.
+
+Latest local evidence for issue #170 on 2026-07-06:
+
+- Blocker status: #163, #164, #165, #166, #167, #168, and #169 are closed before final readiness judgment.
+- Assistant-facing docs: README, `docs/assistant-usage-guide.md`, `docs/known-limitations.md`, `docs/security-and-artifact-privacy.md`, and `docs/releases/v0.6.0.md` explain Tree-sitter JS/TS default-when-available behavior, legacy bounded scanner fallback warnings, source-free Call Chain Facts, Framework Route Hints as hints, resolver uncertainty, and v0.6 artifact safety boundaries.
+- Dogfood evidence: `docs/dogfood/2026-07-06-v0.6-dogfood-evaluation-pack.md` covers JS/TS workspace aliases and package boundaries, source-free call chains, re-export behavior, Next.js App Router route hints, alias ambiguity, stale graph behavior, and no-source-disclosure negatives.
+- Local savings metrics: `uv run repolens evaluate-context --json` reports fixture-derived estimates only; they are not telemetry, exact model-token claims, or universal productivity scores.
+- Parser timing evidence: `uv run repolens evaluate-context --json` records bounded local fixture index timing and eligible file counts only to document v0.6 limitations, not to add parse cache, worker pools, indexing parallelism, or runtime package-manager/compiler/framework execution.
+- Artifact audit evidence: `uv run repolens audit-artifacts . --json` remains the safety gate for source snippet leakage, absolute host paths, raw secrets, raw Agent Guidance mirroring, bounded artifact size, candidate commands not run, JS/TS Call Chain Facts source-free columns, and MCP/preflight contract preservation.
+- Full verification gate: passed in this branch. `uv run pytest` passed 207/207 tests. `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy src/repolens` passed. `uv run repolens evaluate-context --json` returned `ok: true`, release gate passed, 27/27 total cases passed, 26/26 release-blocking cases passed, and 5/5 Assistant Preflight dogfood cases passed. Local savings summary reported 28 files avoided vs lexical search, 16 likely irrelevant files avoided, 37 candidate commands marked not run, and 1 stale graph risk case. Bounded parser/index evidence reported 167 eligible fixture files and max fixture index time of 45 ms. `uv run repolens index . --json` prepared root artifacts for audit with 215 eligible files and 19 skipped paths. `uv run repolens audit-artifacts . --json` returned `ok: true`, audited 8 artifacts, passed `call_chain_facts_source_free`, and reported 0 violations. `uv build --out-dir /tmp/repolens-dist --clear` built `repolens-0.6.0.tar.gz` and `repolens-0.6.0-py3-none-any.whl`.
+- Maintainer release judgment: approved for v0.6 release after the full verification gate passes. Publishing to PyPI or a Docker registry remains deferred unless a separate maintainer-approved release issue is opened.
 
 Latest local evidence for issue #169 on 2026-07-06:
 
