@@ -10,6 +10,8 @@ ResolverEvidenceLabel = Literal[
     "package_manifest_identity",
     "package_entrypoint_metadata",
     "workspace_declaration",
+    "typescript_path_alias",
+    "typescript_base_url",
 ]
 ResolverOutcomeClass = Literal[
     "resolved_edge",
@@ -24,6 +26,8 @@ RESOLVER_EVIDENCE_LABELS: tuple[ResolverEvidenceLabel, ...] = (
     "package_manifest_identity",
     "package_entrypoint_metadata",
     "workspace_declaration",
+    "typescript_path_alias",
+    "typescript_base_url",
 )
 RESOLVER_OUTCOME_CLASSES: tuple[ResolverOutcomeClass, ...] = (
     "resolved_edge",

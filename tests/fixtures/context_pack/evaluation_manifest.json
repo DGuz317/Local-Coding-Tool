@@ -391,6 +391,88 @@
       }
     },
     {
+      "id": "v0_6_js_ts_resolved_workspace_import_rank_improvement",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix workspace package import from app to @dog/lib using TypeScript alias",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["packages/lib/src/index.ts"],
+        "package_boundaries_include": [
+          {"name": "@dog/lib", "path": "packages/lib"}
+        ],
+        "candidate_command_risk_buckets_include": [
+          "verification_likely",
+          "quality_check_likely"
+        ],
+        "candidate_commands_marked_not_run": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_6_js_ts_call_chain_facts_source_free",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix render normalization call chain in the app package",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": ["packages/app/src/index.ts"],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["packages/app/src/index.ts"],
+        "structural_call_chains_include": [
+          {"path": "packages/app/src/index.ts", "method_names": ["trim", "toUpperCase"]}
+        ],
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_6_js_ts_reexport_behavior",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix re-exported describeValue from @dog/lib",
+      "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
+      "focus_hints": ["packages/lib/src/index.ts"],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["packages/lib/src/index.ts"],
+        "javascript_exports_include": [
+          {
+            "path": "packages/lib/src/index.ts",
+            "kind": "named_export",
+            "exported_name": "describeValue",
+            "local_name": "describeValue"
+          }
+        ],
+        "package_boundaries_include": [
+          {"name": "@dog/lib", "path": "packages/lib"}
+        ],
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
+      "id": "v0_6_js_ts_route_hint_first_read",
+      "corpus": "release_blocking",
+      "category": "v0_6_js_ts_metadata",
+      "task": "Fix the account route loading state",
+      "fixture_repo": "tests/fixtures/context_pack/route-navigation",
+      "focus_hints": [],
+      "evaluate_preflight": true,
+      "expected_outcomes": {
+        "assistant_preflight_ok": true,
+        "assistant_preflight_version": "0.5.preflight.v1",
+        "first_read_files_include_any": ["app/account/page.tsx"],
+        "route_hints_include": [
+          {"framework": "nextjs_app_router", "kind": "page", "route_path": "/account"}
+        ],
+        "confidence_at_least": "medium",
+        "requires_evidence": true,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
       "id": "expanded_cli_invoice_export",
       "corpus": "expanded",
       "category": "cli_export",

@@ -31,6 +31,7 @@ GRAPH_INDEX_SECTION_BUDGETS = {
     "javascript_packages": 100,
     "javascript_exports": 100,
     "javascript_commonjs_assignments": 100,
+    "javascript_call_chains": 50,
     "config_files": 50,
     "config_package_managers": 50,
     "config_packages": 100,

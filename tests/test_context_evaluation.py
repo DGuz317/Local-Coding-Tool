@@ -19,8 +19,8 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert envelope["ok"] is True
     data = envelope["data"]
     assert data["manifest_version"] == "0.4.eval.v1"
-    assert data["summary"]["total_cases"] == 23
-    assert data["summary"]["passed_cases"] == 23
+    assert data["summary"]["total_cases"] == 27
+    assert data["summary"]["passed_cases"] == 27
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
     assert data["release_gate"]["required_cases"] == [
@@ -28,7 +28,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     ]
     assert data["corpora"] == {
         "expanded": {"failed_cases": 0, "passed_cases": 1, "total_cases": 1},
-        "release_blocking": {"failed_cases": 0, "passed_cases": 22, "total_cases": 22},
+        "release_blocking": {"failed_cases": 0, "passed_cases": 26, "total_cases": 26},
     }
     assert data["preflight_summary"] == {
         "evaluated_cases": [
@@ -36,12 +36,17 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
             "v0_5_dogfood_python_package_preflight",
             "v0_5_dogfood_docs_heavy_preflight",
             "v0_5_dogfood_config_heavy_artifact_audit",
+            "v0_6_js_ts_route_hint_first_read",
         ],
         "failed_cases": 0,
-        "passed_cases": 4,
+        "passed_cases": 5,
         "purpose": "assistant_preflight_before_broad_repository_reads",
-        "total_cases": 4,
+        "total_cases": 5,
     }
+    assert data["index_evidence_summary"]["case_count"] == 27
+    assert data["index_evidence_summary"]["eligible_file_count"] >= 1
+    assert data["index_evidence_summary"]["max_index_elapsed_ms"] >= 0
+    assert data["index_evidence_summary"]["measurement"] == ("bounded_local_fixture_index_timing")
     assert data["artifact_audit_summary"] == {
         "evaluated_cases": [
             "v0_5_dogfood_js_ts_workspace_preflight_audit",
@@ -63,7 +68,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     }
     assert data["local_savings_summary"]["baseline"] == "lexical_path_search"
     assert data["local_savings_summary"]["estimate_kind"] == ("local_fixture_metadata_estimate")
-    assert data["local_savings_summary"]["case_count"] == 23
+    assert data["local_savings_summary"]["case_count"] == 27
     assert data["local_savings_summary"]["not_run_command_count"] >= 1
     assert data["local_savings_summary"]["stale_graph_risk_case_count"] == 1
     assert "not telemetry" in data["local_savings_summary"]["explanation"]
@@ -121,7 +126,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     js_dogfood_case = case_by_id["v0_5_dogfood_js_ts_workspace_preflight_audit"]
     assert js_dogfood_case["preflight_evidence"] == {
         "candidate_commands_not_run": True,
-        "first_read_count": 1,
+        "first_read_count": 3,
         "freshness_status": "available",
         "ok": True,
         "version": "0.5.preflight.v1",
@@ -135,6 +140,31 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     config_dogfood_case = case_by_id["v0_5_dogfood_config_heavy_artifact_audit"]
     assert config_dogfood_case["passed"] is True
     assert config_dogfood_case["metrics"]["artifact_audit"]["violation_count"] == 0
+
+    v0_6_import_case = case_by_id["v0_6_js_ts_resolved_workspace_import_rank_improvement"]
+    assert v0_6_import_case["passed"] is True
+    assert v0_6_import_case["local_savings"]["context_pack"]["first_relevant_rank"] == 1
+    assert v0_6_import_case["local_savings"]["lexical_baseline"]["first_relevant_rank"] > 1
+    assert v0_6_import_case["local_savings"]["first_relevant_rank_delta_vs_lexical"] > 0
+
+    v0_6_route_case = case_by_id["v0_6_js_ts_route_hint_first_read"]
+    assert v0_6_route_case["passed"] is True
+    assert v0_6_route_case["metrics"]["context_pack"]["first_relevant_rank"] == 1
+    assert v0_6_route_case["metrics"]["assistant_preflight"]["ok"] is True
+
+    v0_6_call_chain_case = case_by_id["v0_6_js_ts_call_chain_facts_source_free"]
+    assert v0_6_call_chain_case["passed"] is True
+    assert any(
+        check["name"] == "structural_call_chains_include:packages/app/src/index.ts"
+        for check in v0_6_call_chain_case["checks"]
+    )
+
+    v0_6_reexport_case = case_by_id["v0_6_js_ts_reexport_behavior"]
+    assert v0_6_reexport_case["passed"] is True
+    assert any(
+        check["name"] == "javascript_exports_include:packages/lib/src/index.ts"
+        for check in v0_6_reexport_case["checks"]
+    )
 
 
 def test_evaluate_context_cli_emits_json_for_ci() -> None:

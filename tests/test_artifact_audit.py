@@ -26,6 +26,7 @@ def test_audit_artifacts_json_passes_for_indexed_fixture(tmp_path):
     assert data["summary"]["passed"] is True
     assert data["summary"]["violation_count"] == 0
     assert ".repolens/graph.json" in data["audited_artifacts"]
+    assert data["checks"]["call_chain_facts_source_free"] is True
     assert data["checks"]["candidate_commands_not_run"] is True
 
 
@@ -115,7 +116,7 @@ def _write_audit_fixture_repo(root) -> None:
         dedent(
             """
             export function validateLogin(input: { user: string }) {
-              return input.user.length > 0;
+              return input.user.trim().toLowerCase().length > 0;
             }
             """
         ).lstrip(),

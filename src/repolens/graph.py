@@ -43,6 +43,7 @@ from repolens.javascript_index import (
 from repolens.parser_backends import (
     ParserBackendOption,
     ParserIndexes,
+    default_parser_backend_provenance,
     extract_with_parser_backend,
 )
 from repolens.python_index import (
@@ -68,7 +69,7 @@ from repolens.scanner import (
 )
 
 GRAPH_SCHEMA_NAME = "repolens_graph"
-GRAPH_SCHEMA_VERSION = 14
+GRAPH_SCHEMA_VERSION = 17
 GRAPH_ARTIFACT_VERSION = 1
 GRAPH_EXPORTER_VERSION = (
     f"{PYTHON_EXTRACTOR_VERSION}+{JAVASCRIPT_EXTRACTOR_VERSION}+"
@@ -328,7 +329,7 @@ def rebuild_graph_artifacts(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> tuple[str, ...]:
     """Rebuild the graph store and exports from one safe discovery result."""
     build_graph_store(root, scan, file_changes=file_changes, parser_backend=parser_backend)
@@ -417,7 +418,7 @@ def replace_graph_artifacts_selectively(
     plan: SelectiveUpdatePlan,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> tuple[str, ...]:
     """Replace graph artifacts through the validated selective update path."""
     if not plan.safe:
@@ -435,7 +436,7 @@ def build_graph_store(
     scan: ScanResult,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> Path:
     """Build ``graph.sqlite`` in a temporary file and replace it after success."""
     artifact_dir = root / ARTIFACT_DIR_NAME
@@ -588,6 +589,22 @@ def inspect_graph_artifacts(root: Path) -> GraphArtifactsStatus:
                 root,
                 stored_metadata=stored_metadata,
                 reason="extractor_version_changed",
+            ),
+        )
+
+    current_parser_provenance = _json_value(default_parser_backend_provenance())
+    if stored_metadata.get("parser_backend_provenance_json") != current_parser_provenance:
+        return GraphArtifactsStatus(
+            status="rebuild_required",
+            reason="parser_backend_provenance_changed",
+            fresh=False,
+            missing_artifacts=(),
+            warnings=("Parser backend provenance changed. Rebuild required.",),
+            detected_schema_version=schema_version,
+            freshness=_rebuild_required_freshness(
+                root,
+                stored_metadata=stored_metadata,
+                reason="parser_backend_provenance_changed",
             ),
         )
 
@@ -819,6 +836,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             classification TEXT NOT NULL,
             resolved_path TEXT,
             resolution_status TEXT NOT NULL,
+            outcome_class TEXT NOT NULL,
+            evidence_labels_json TEXT NOT NULL,
+            candidate_paths_json TEXT NOT NULL,
             line INTEGER NOT NULL
         ) WITHOUT ROWID;
 
@@ -846,6 +866,31 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             exported_name TEXT NOT NULL,
             assigned_name TEXT,
             line INTEGER NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_call_chains (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            enclosing_symbol_id TEXT REFERENCES javascript_symbols(id) ON DELETE SET NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            receiver_shape TEXT NOT NULL,
+            method_names_json TEXT NOT NULL,
+            parser_evidence_labels_json TEXT NOT NULL
+        ) WITHOUT ROWID;
+
+        CREATE TABLE javascript_route_hints (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+            module_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            framework TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            route_path TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            line_range_json TEXT NOT NULL,
+            evidence_labels_json TEXT NOT NULL,
+            warnings_json TEXT NOT NULL
         ) WITHOUT ROWID;
 
         CREATE TABLE config_files (
@@ -1029,7 +1074,7 @@ def _populate_store(
     *,
     indexed_at_utc: str,
     file_changes: tuple[FileChange, ...],
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> None:
     directories = _directory_facts(scan)
     files = tuple(sorted(scan.files, key=lambda scanned_file: scanned_file.path))
@@ -1052,6 +1097,11 @@ def _populate_store(
             ("artifact_version", str(GRAPH_ARTIFACT_VERSION)),
             ("exporter_version", GRAPH_EXPORTER_VERSION),
             ("effective_config_hash", effective_config_hash),
+            ("parser_backend_warnings", _json_value(extracted.parser_backend_warnings)),
+            (
+                "parser_backend_provenance_json",
+                _json_value(extracted.extractor_provenance or {}),
+            ),
             ("git_branch", git_metadata.branch or ""),
             ("git_commit", git_metadata.commit or ""),
             ("git_detected", "1" if git_metadata.detected else "0"),
@@ -1185,7 +1235,7 @@ def _extract_indexes(
     root: Path,
     files: tuple[ScannedFile, ...],
     *,
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> _ExtractedIndexes:
     return extract_with_parser_backend(root, files, parser_backend=parser_backend)
 
@@ -1410,6 +1460,22 @@ def _file_signatures_by_path(
             js_assignment.path,
             "javascript_commonjs_assignment",
             {"line": js_assignment.line},
+        )
+    for js_chain in extracted.javascript.call_chains:
+        add_graph(
+            js_chain.path,
+            "javascript_call_chain",
+            {
+                "enclosing_symbol_id": js_chain.enclosing_symbol_id,
+                "method_names": js_chain.method_names,
+                "parser_evidence_labels": js_chain.parser_evidence_labels,
+                "receiver_shape": js_chain.receiver_shape,
+            },
+        )
+        add_line_range(
+            js_chain.path,
+            "javascript_call_chain",
+            {"start_line": js_chain.start_line, "end_line": js_chain.end_line},
         )
 
     for config in extracted.config.config_files:
@@ -2339,9 +2405,12 @@ def _insert_javascript_tables(
             classification,
             resolved_path,
             resolution_status,
+            outcome_class,
+            evidence_labels_json,
+            candidate_paths_json,
             line
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             (
@@ -2354,6 +2423,9 @@ def _insert_javascript_tables(
                 import_fact.classification,
                 import_fact.resolved_path,
                 import_fact.resolution_status,
+                import_fact.outcome_class,
+                _json_value(import_fact.evidence_labels),
+                _json_value(import_fact.candidate_paths),
                 import_fact.line,
             )
             for import_fact in javascript_index.imports
@@ -2419,6 +2491,68 @@ def _insert_javascript_tables(
                 assignment.line,
             )
             for assignment in javascript_index.commonjs_assignments
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_call_chains(
+            id,
+            path,
+            module_node_id,
+            enclosing_symbol_id,
+            start_line,
+            end_line,
+            receiver_shape,
+            method_names_json,
+            parser_evidence_labels_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                chain.id,
+                chain.path,
+                chain.module_node_id,
+                chain.enclosing_symbol_id,
+                chain.start_line,
+                chain.end_line,
+                chain.receiver_shape,
+                _json_value(chain.method_names),
+                _json_value(chain.parser_evidence_labels),
+            )
+            for chain in javascript_index.call_chains
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO javascript_route_hints(
+            id,
+            path,
+            module_node_id,
+            framework,
+            kind,
+            route_path,
+            confidence,
+            line_range_json,
+            evidence_labels_json,
+            warnings_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                hint.id,
+                hint.path,
+                hint.module_node_id,
+                hint.framework,
+                hint.kind,
+                hint.route_path,
+                hint.confidence,
+                _json_value(hint.line_range),
+                _json_value(hint.evidence_labels),
+                _json_value(hint.warnings),
+            )
+            for hint in javascript_index.route_hints
         ),
     )
 
@@ -3166,11 +3300,25 @@ def _insert_edges(
         UPDATE javascript_imports
         SET classification = 'local_resolved',
             resolved_path = ?,
-            resolution_status = 'resolved_workspace_package'
+            resolution_status = 'resolved_workspace_package',
+            outcome_class = 'resolved_edge',
+            evidence_labels_json = ?
         WHERE id = ?
         """,
         (
-            (resolution.resolved_path, import_id)
+            (
+                resolution.resolved_path,
+                _json_value(
+                    (
+                        "javascript_import_specifier",
+                        "package_manifest_dependency",
+                        "package_manifest_identity",
+                        "package_entrypoint_metadata",
+                        "workspace_declaration",
+                    )
+                ),
+                import_id,
+            )
             for import_id, resolution in sorted(workspace_package_resolutions.items())
         ),
     )
@@ -3209,6 +3357,14 @@ def _insert_edges(
                     "package_root": workspace_resolution.package_root,
                     "resolved_path": workspace_resolution.resolved_path,
                     "resolution_status": "resolved_workspace_package",
+                    "outcome_class": "resolved_edge",
+                    "evidence_labels": (
+                        "javascript_import_specifier",
+                        "package_manifest_dependency",
+                        "package_manifest_identity",
+                        "package_entrypoint_metadata",
+                        "workspace_declaration",
+                    ),
                     "specifier": javascript_import.specifier,
                     "workspace_path": workspace_resolution.workspace_path,
                     "workspace_source_path": workspace_resolution.workspace_source_path,
@@ -3242,6 +3398,9 @@ def _insert_edges(
                     "line": javascript_import.line,
                     "resolved_path": javascript_import.resolved_path,
                     "resolution_status": javascript_import.resolution_status,
+                    "outcome_class": javascript_import.outcome_class,
+                    "evidence_labels": javascript_import.evidence_labels,
+                    "candidate_paths": javascript_import.candidate_paths,
                     "specifier": javascript_import.specifier,
                 }
             )
@@ -3274,6 +3433,9 @@ def _insert_edges(
                 "id": javascript_import.id,
                 "kind": javascript_import.kind,
                 "line": javascript_import.line,
+                "outcome_class": javascript_import.outcome_class,
+                "evidence_labels": javascript_import.evidence_labels,
+                "candidate_paths": javascript_import.candidate_paths,
                 "resolution_status": javascript_import.resolution_status,
                 "specifier": javascript_import.specifier,
             }
@@ -3740,11 +3902,16 @@ def _javascript_import_evidence(facts: list[dict[str, Any]]) -> list[dict[str, A
             "import_id": fact["id"],
             "kind": "javascript_import",
             "line": fact["line"],
+            "outcome_class": fact.get("outcome_class", "resolved_edge"),
             "resolved_path": fact.get("resolved_path"),
             "resolution_status": fact["resolution_status"],
             "specifier": fact["specifier"],
             "statement_kind": fact["kind"],
         }
+        if fact.get("evidence_labels"):
+            item["evidence_labels"] = sorted(fact["evidence_labels"])
+        if fact.get("candidate_paths"):
+            item["candidate_paths"] = sorted(fact["candidate_paths"])
         for key in (
             "dependency_source_path",
             "entrypoint_kind",
@@ -4226,23 +4393,28 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 """
             )
         )
-        javascript_imports = _rows(
-            connection.execute(
-                """
-                SELECT
-                    id,
-                    path,
-                    module_node_id,
-                    kind,
-                    specifier,
-                    root_name,
-                    classification,
-                    resolved_path,
-                    resolution_status,
-                    line
-                FROM javascript_imports
-                ORDER BY path, line, id
-                """
+        javascript_imports = _decode_javascript_import_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        kind,
+                        specifier,
+                        root_name,
+                        classification,
+                        resolved_path,
+                        resolution_status,
+                        outcome_class,
+                        evidence_labels_json,
+                        candidate_paths_json,
+                        line
+                    FROM javascript_imports
+                    ORDER BY path, line, id
+                    """
+                )
             )
         )
         javascript_packages = _rows(
@@ -4270,6 +4442,47 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
                 FROM javascript_commonjs_assignments
                 ORDER BY path, line, id
                 """
+            )
+        )
+        javascript_call_chains = _decode_javascript_call_chain_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        enclosing_symbol_id,
+                        start_line,
+                        end_line,
+                        receiver_shape,
+                        method_names_json,
+                        parser_evidence_labels_json
+                    FROM javascript_call_chains
+                    ORDER BY path, start_line, id
+                    """
+                )
+            )
+        )
+        javascript_route_hints = _decode_javascript_route_hint_rows(
+            _rows(
+                connection.execute(
+                    """
+                    SELECT
+                        id,
+                        path,
+                        module_node_id,
+                        framework,
+                        kind,
+                        route_path,
+                        confidence,
+                        line_range_json,
+                        evidence_labels_json,
+                        warnings_json
+                    FROM javascript_route_hints
+                    ORDER BY path, framework, kind, route_path, id
+                    """
+                )
             )
         )
         config_files = _decode_config_file_rows(
@@ -4493,11 +4706,13 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "directories": len(directories),
         "edges": len(edges),
         "files": len(files),
+        "javascript_call_chains": len(javascript_call_chains),
         "javascript_commonjs_assignments": len(javascript_commonjs_assignments),
         "javascript_exports": len(javascript_exports),
         "javascript_imports": len(javascript_imports),
         "javascript_modules": len(javascript_modules),
         "javascript_packages": len(javascript_packages),
+        "javascript_route_hints": len(javascript_route_hints),
         "javascript_symbols": len(javascript_symbols),
         "nodes": len(nodes),
         "python_calls": len(python_calls),
@@ -4545,11 +4760,13 @@ def _load_snapshot(root: Path) -> dict[str, Any]:
         "relationship_candidates": _decode_relationship_candidate_rows(relationship_candidates),
         "files": files,
         "javascript": {
+            "call_chains": javascript_call_chains,
             "commonjs_assignments": javascript_commonjs_assignments,
             "exports": javascript_exports,
             "imports": javascript_imports,
             "modules": javascript_modules,
             "packages": javascript_packages,
+            "route_hints": javascript_route_hints,
             "symbols": javascript_symbols,
         },
         "limits": {"max_file_size_bytes": run["max_file_size_bytes"]},
@@ -4587,6 +4804,7 @@ def _graph_json_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "files": snapshot["files"],
         "javascript": snapshot["javascript"],
         "limits": snapshot["limits"],
+        "parser_backend": _parser_backend_payload(snapshot["metadata"]),
         "python": snapshot["python"],
         "repository": snapshot["repository"],
         "relationship_candidates": snapshot["relationship_candidates"],
@@ -4619,6 +4837,7 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "documentation": _documentation_lite_payload(snapshot),
         "freshness": _stored_freshness_payload(),
         "javascript": _javascript_lite_payload(snapshot),
+        "parser_backend": _parser_backend_payload(snapshot["metadata"]),
         "python": _python_lite_payload(snapshot),
         "repository": snapshot["repository"],
         "relationship_candidates": snapshot["relationship_candidates"],
@@ -4626,6 +4845,13 @@ def _graph_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema": snapshot["schema"],
         "skip_reasons": snapshot["skip_reasons"],
         "validation": _validation_payload(snapshot),
+    }
+
+
+def _parser_backend_payload(metadata: dict[str, str]) -> dict[str, Any]:
+    return {
+        "provenance": _metadata_json_value(metadata, "parser_backend_provenance_json", {}),
+        "warnings": _metadata_json_value(metadata, "parser_backend_warnings", []),
     }
 
 
@@ -4934,6 +5160,9 @@ def _javascript_lite_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "path": import_fact["path"],
                 "resolved_path": import_fact["resolved_path"],
                 "resolution_status": import_fact["resolution_status"],
+                "outcome_class": import_fact["outcome_class"],
+                "evidence_labels": import_fact["evidence_labels"],
+                "candidate_paths": import_fact["candidate_paths"],
                 "root_name": import_fact["root_name"],
                 "specifier": import_fact["specifier"],
             }
@@ -5006,6 +5235,7 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         f"- JavaScript packages: {counts['javascript_packages']}",
         f"- JavaScript exports: {counts['javascript_exports']}",
         f"- JavaScript CommonJS assignments: {counts['javascript_commonjs_assignments']}",
+        f"- JavaScript call chains: {counts['javascript_call_chains']}",
         f"- Config files: {counts['config_files']}",
         f"- Config packages: {counts['config_packages']}",
         f"- Config commands: {counts['config_commands']}",
@@ -5222,6 +5452,28 @@ def _graph_report_text(snapshot: dict[str, Any]) -> str:
         )
     else:
         lines.append("| Not detected |  |  |  | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## JavaScript Call Chains",
+            "",
+            "| Path | Receiver shape | Methods | Lines | Evidence |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if javascript["call_chains"]:
+        lines.extend(
+            "| "
+            f"`{chain['path']}` | "
+            f"{chain['receiver_shape']} | "
+            f"`{_md_cell(_join_list(chain['method_names']))}` | "
+            f"{chain['start_line']}-{chain['end_line']} | "
+            f"{_md_cell(_join_list(chain['parser_evidence_labels']))} |"
+            for chain in javascript["call_chains"]
+        )
+    else:
+        lines.append("| Not detected |  |  |  |  |")
 
     lines.extend(
         [
@@ -5836,6 +6088,8 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             "Classification",
             "Resolved path",
             "Resolution",
+            "Outcome",
+            "Candidates",
             "Line",
         ),
         row=lambda import_fact: (
@@ -5847,6 +6101,8 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             str(import_fact["classification"]),
             f"`{_md_cell(import_fact['resolved_path'] or '')}`",
             str(import_fact["resolution_status"]),
+            str(import_fact["outcome_class"]),
+            ", ".join(f"`{_md_cell(path)}`" for path in import_fact["candidate_paths"]),
             str(import_fact["line"]),
         ),
     )
@@ -5893,6 +6149,22 @@ def _graph_index_text(snapshot: dict[str, Any], *, full: bool = False) -> str:
             f"`{_md_cell(assignment['exported_name'])}`",
             f"`{_md_cell(assignment['assigned_name'] or '')}`",
             str(assignment["line"]),
+        ),
+    )
+    _append_graph_index_section(
+        lines,
+        section_key="javascript_call_chains",
+        title="JavaScript Call Chains",
+        item_label="JavaScript call chains",
+        rows=javascript["call_chains"],
+        headers=("Fact ID", "Path", "Receiver shape", "Methods", "Lines", "Evidence"),
+        row=lambda chain: (
+            f"`{_md_cell(chain['id'])}`",
+            f"`{_md_cell(chain['path'])}`",
+            str(chain["receiver_shape"]),
+            f"`{_md_cell(_join_list(chain['method_names']))}`",
+            f"{chain['start_line']}-{chain['end_line']}",
+            _graph_index_cell(_join_list(chain["parser_evidence_labels"])),
         ),
     )
     _append_graph_index_section(
@@ -6766,15 +7038,25 @@ def _ambiguous_workspace_membership_count(connection: sqlite3.Connection) -> int
 
 
 def _metadata_quality_warnings(metadata: dict[str, str]) -> list[str]:
+    warnings: list[str] = []
     raw_warnings = metadata.get("graph_quality_warnings")
-    if raw_warnings is None:
-        return []
-    try:
-        warnings = json.loads(raw_warnings)
-    except json.JSONDecodeError:
-        return ["Graph quality warnings metadata is unreadable."]
-    if not isinstance(warnings, list):
-        return []
+    if raw_warnings is not None:
+        try:
+            decoded_warnings = json.loads(raw_warnings)
+        except json.JSONDecodeError:
+            warnings.append("Graph quality warnings metadata is unreadable.")
+        else:
+            if isinstance(decoded_warnings, list):
+                warnings.extend(str(warning) for warning in decoded_warnings)
+    parser_backend_warnings = metadata.get("parser_backend_warnings")
+    if parser_backend_warnings is not None:
+        try:
+            decoded = json.loads(parser_backend_warnings)
+        except json.JSONDecodeError:
+            warnings.append("Parser backend warnings metadata is unreadable.")
+        else:
+            if isinstance(decoded, list):
+                warnings.extend(str(warning) for warning in decoded)
     return [str(warning) for warning in warnings]
 
 
@@ -7304,6 +7586,37 @@ def _decode_python_package_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     return decoded_rows
 
 
+def _decode_javascript_call_chain_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["method_names"] = json.loads(decoded.pop("method_names_json"))
+        decoded["parser_evidence_labels"] = json.loads(decoded.pop("parser_evidence_labels_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_javascript_import_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["evidence_labels"] = json.loads(decoded.pop("evidence_labels_json"))
+        decoded["candidate_paths"] = json.loads(decoded.pop("candidate_paths_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
+def _decode_javascript_route_hint_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decoded_rows = []
+    for row in rows:
+        decoded = dict(row)
+        decoded["line_range"] = json.loads(decoded.pop("line_range_json"))
+        decoded["evidence_labels"] = json.loads(decoded.pop("evidence_labels_json"))
+        decoded["warnings"] = json.loads(decoded.pop("warnings_json"))
+        decoded_rows.append(decoded)
+    return decoded_rows
+
+
 def _decode_config_file_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     decoded_rows = []
     for row in rows:
@@ -7421,6 +7734,16 @@ def _metadata_json(value: dict[str, Any]) -> str:
 
 def _json_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _metadata_json_value(metadata: dict[str, str], key: str, default: Any) -> Any:
+    raw_value = metadata.get(key)
+    if raw_value is None:
+        return default
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return default
 
 
 def _json_text(payload: dict[str, Any]) -> str:

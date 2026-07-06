@@ -1,9 +1,97 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from textwrap import dedent
+from types import SimpleNamespace
 
-from repolens.javascript_index import extract_javascript_index
+from repolens.javascript_index import (
+    EXPERIMENTAL_JAVASCRIPT_FACT_POLICY,
+    JAVASCRIPT_EXTRACTOR_VERSION,
+    PROMOTED_JAVASCRIPT_FACT_FIELDS,
+    PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+    JavaScriptCallChainFact,
+    JavaScriptCommonJSAssignmentFact,
+    JavaScriptExportFact,
+    JavaScriptImportFact,
+    JavaScriptModuleFact,
+    JavaScriptPackageFact,
+    JavaScriptParserProvenance,
+    JavaScriptRouteHintFact,
+    JavaScriptSymbolFact,
+    TreeSitterJavaScriptSupport,
+    extract_javascript_index,
+    extract_javascript_index_with_tree_sitter,
+)
 from repolens.scanner import scan_repository
+
+
+def test_promoted_javascript_fact_contract_allows_only_source_free_fields():
+    assert PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION in JAVASCRIPT_EXTRACTOR_VERSION
+    assert "Canonical Graph Hash" in EXPERIMENTAL_JAVASCRIPT_FACT_POLICY
+    assert "source snippets" in EXPERIMENTAL_JAVASCRIPT_FACT_POLICY
+
+    assert PROMOTED_JAVASCRIPT_FACT_FIELDS == {
+        "modules": tuple(field.name for field in fields(JavaScriptModuleFact)),
+        "imports": tuple(field.name for field in fields(JavaScriptImportFact)),
+        "packages": tuple(field.name for field in fields(JavaScriptPackageFact)),
+        "symbols": tuple(field.name for field in fields(JavaScriptSymbolFact)),
+        "exports": tuple(field.name for field in fields(JavaScriptExportFact)),
+        "commonjs_assignments": tuple(
+            field.name for field in fields(JavaScriptCommonJSAssignmentFact)
+        ),
+        "call_chains": tuple(field.name for field in fields(JavaScriptCallChainFact)),
+        "route_hints": tuple(field.name for field in fields(JavaScriptRouteHintFact)),
+    }
+
+    forbidden_terms = {
+        "absolute",
+        "body",
+        "comment",
+        "expression",
+        "signature",
+        "snippet",
+        "source",
+    }
+    for allowed_fields in PROMOTED_JAVASCRIPT_FACT_FIELDS.values():
+        for field_name in allowed_fields:
+            assert not any(term in field_name for term in forbidden_terms)
+
+
+def test_javascript_index_extracts_source_free_call_chain_facts(tmp_path):
+    _write_text(
+        tmp_path / "src" / "query.ts",
+        dedent(
+            """
+            export function loadUsers() {
+              return db.select().from().where();
+            }
+
+            const ignored = "client.get().post()";
+            const single = client.get();
+            const built = new Builder().step().finish();
+            """
+        ).lstrip(),
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    chains = {
+        (chain.start_line, chain.receiver_shape): chain for chain in javascript_index.call_chains
+    }
+    assert set(chains) == {(2, "identifier"), (7, "new_expression")}
+    assert chains[(2, "identifier")].method_names == ("select", "from", "where")
+    assert chains[(2, "identifier")].end_line == 2
+    assert chains[(2, "identifier")].enclosing_symbol_id is not None
+    assert chains[(2, "identifier")].parser_evidence_labels == (
+        "line_local_member_call_sequence",
+        "source_free_shape",
+    )
+    assert chains[(7, "new_expression")].method_names == ("step", "finish")
+
+    serialized = repr(javascript_index.call_chains)
+    assert "db.select" not in serialized
+    assert "client.get" not in serialized
+    assert "new Builder" not in serialized
 
 
 def test_javascript_index_supports_scanner_approved_source_extensions(tmp_path):
@@ -25,6 +113,51 @@ def test_javascript_index_supports_scanner_approved_source_extensions(tmp_path):
     }
     assert {module.parser_status for module in javascript_index.modules} == {"parsed"}
     assert len(javascript_index.imports) == 8
+
+
+def test_javascript_index_extracts_next_app_router_route_hints(tmp_path):
+    _write_text(tmp_path / "app" / "page.tsx", "export default function Home() { return null; }\n")
+    _write_text(
+        tmp_path / "app" / "dashboard" / "layout.tsx",
+        "export default function Layout() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "api" / "users" / "route.ts",
+        "export function GET() { return Response.json({}); }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "blog" / "[slug]" / "page.tsx",
+        "export default function Blog() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "pages" / "index.tsx", "export default function Legacy() { return null; }\n"
+    )
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    hints = {hint.path: hint for hint in javascript_index.route_hints}
+    assert set(hints) == {
+        "app/api/users/route.ts",
+        "app/blog/[slug]/page.tsx",
+        "app/dashboard/layout.tsx",
+        "app/page.tsx",
+    }
+    assert hints["app/page.tsx"].kind == "page"
+    assert hints["app/page.tsx"].route_path == "/"
+    assert hints["app/dashboard/layout.tsx"].kind == "layout"
+    assert hints["app/dashboard/layout.tsx"].route_path == "/dashboard"
+    assert hints["app/api/users/route.ts"].kind == "api_route_handler"
+    assert hints["app/api/users/route.ts"].route_path == "/api/users"
+    assert hints["app/blog/[slug]/page.tsx"].confidence == "low"
+    assert hints["app/blog/[slug]/page.tsx"].warnings == (
+        "framework_route_hint:next_app_router_dynamic_segment_candidate",
+    )
+    assert hints["app/page.tsx"].evidence_labels == (
+        "repo_relative_path",
+        "next_app_router_file_convention",
+        "framework_runtime_not_executed",
+    )
+    assert hints["app/page.tsx"].line_range == (1, 1)
 
 
 def test_javascript_index_extracts_imports_and_classifies_packages(tmp_path):
@@ -99,6 +232,11 @@ def test_javascript_index_resolves_relative_imports_with_extension_and_index_pro
     assert imports[("named_import", "../lib/format")].root_name is None
     assert imports[("named_import", "../lib/format")].resolved_path == "src/lib/format.ts"
     assert imports[("named_import", "../lib/format")].resolution_status == "resolved_relative"
+    assert imports[("named_import", "../lib/format")].outcome_class == "resolved_edge"
+    assert imports[("named_import", "../lib/format")].evidence_labels == (
+        "javascript_import_specifier",
+    )
+    assert imports[("named_import", "../lib/format")].candidate_paths == ()
     assert imports[("named_import", "../ui")].resolved_path == "src/ui/index.tsx"
     assert imports[("require", "../exact.js")].resolved_path == "src/exact.js"
     assert imports[("dynamic_import", "../lib/format")].resolved_path == "src/lib/format.ts"
@@ -126,10 +264,16 @@ def test_javascript_index_leaves_ambiguous_and_unresolved_relative_imports_unres
     assert imports["../lib/ambiguous"].classification == "local_unresolved"
     assert imports["../lib/ambiguous"].resolved_path is None
     assert imports["../lib/ambiguous"].resolution_status == "unresolved_ambiguous_relative"
+    assert imports["../lib/ambiguous"].outcome_class == "relationship_candidate"
+    assert imports["../lib/ambiguous"].candidate_paths == (
+        "src/lib/ambiguous.ts",
+        "src/lib/ambiguous.tsx",
+    )
     assert imports["../lib/missing"].classification == "local_unresolved"
     assert imports["../lib/missing"].resolution_status == "unresolved_missing_relative"
     assert imports["/src/lib/ambiguous"].classification == "local_unresolved"
     assert imports["/src/lib/ambiguous"].resolution_status == "unresolved_unsupported_absolute"
+    assert imports["/src/lib/ambiguous"].outcome_class == "unsupported"
     assert imports["next/image"].classification == "third_party"
 
 
@@ -161,6 +305,7 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
 
             export default Widget;
             export { helper, Internal as PublicInternal };
+            export { value as ReExportedValue } from "./value";
 
             module.exports = Widget;
             exports.helper = helper;
@@ -195,8 +340,8 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
     assert symbols[("function", "exportedFunction")].end_line == 3
     assert symbols[("function", "helper")].start_line == 5
     assert symbols[("function", "helper")].end_line == 7
-    assert symbols[("function", "outer")].start_line == 28
-    assert symbols[("function", "outer")].end_line == 32
+    assert symbols[("function", "outer")].start_line == 29
+    assert symbols[("function", "outer")].end_line == 33
     assert symbols[("arrow_function", "makeThing")].start_line == 9
     assert symbols[("arrow_function", "makeThing")].end_line == 9
     assert ("function", "nested") not in symbols
@@ -213,6 +358,7 @@ def test_javascript_index_extracts_symbols_exports_and_commonjs_assignments(tmp_
         ("default_export", "default", "Widget"),
         ("function_export", "exportedFunction", "exportedFunction"),
         ("named_export", "PublicInternal", "Internal"),
+        ("named_export", "ReExportedValue", "value"),
         ("named_export", "helper", "helper"),
     }
 
@@ -265,6 +411,10 @@ def test_javascript_index_resolves_simple_typescript_path_aliases(tmp_path):
     assert imports["@/shared/format"].root_name is None
     assert imports["@/shared/format"].resolved_path == "src/shared/format.ts"
     assert imports["@/shared/format"].resolution_status == "resolved_alias"
+    assert imports["@/shared/format"].evidence_labels == (
+        "javascript_import_specifier",
+        "typescript_path_alias",
+    )
     assert imports["@app/entry"].resolved_path == "src/app/entry.tsx"
     assert imports["react"].classification == "third_party"
 
@@ -299,6 +449,7 @@ def test_javascript_index_leaves_complex_aliases_unresolved_without_packages(tmp
     assert imports["@ambiguous/thing"].root_name is None
     assert imports["@ambiguous/thing"].resolved_path is None
     assert imports["@ambiguous/thing"].resolution_status == "unresolved_complex_alias"
+    assert imports["@ambiguous/thing"].outcome_class == "unsupported"
     assert imports["@missing/thing"].classification == "local_unresolved"
     assert imports["@missing/thing"].resolved_path is None
     assert imports["@missing/thing"].resolution_status == "unresolved_missing_alias"
@@ -371,6 +522,10 @@ def test_javascript_index_resolves_exact_path_aliases_and_base_url_imports(tmp_p
     assert imports["@settings"].resolution_status == "resolved_alias"
     assert imports["shared/format"].resolved_path == "app/src/shared/format.ts"
     assert imports["shared/format"].resolution_status == "resolved_base_url"
+    assert imports["shared/format"].evidence_labels == (
+        "javascript_import_specifier",
+        "typescript_base_url",
+    )
     assert imports["react"].classification == "third_party"
     assert imports["react"].resolution_status == "external"
 
@@ -400,6 +555,23 @@ def test_javascript_index_marks_ambiguous_scoped_alias_matches_unresolved(tmp_pa
     assert import_fact.classification == "local_unresolved"
     assert import_fact.resolved_path is None
     assert import_fact.resolution_status == "unresolved_ambiguous_alias"
+    assert import_fact.outcome_class == "relationship_candidate"
+    assert import_fact.candidate_paths == (
+        "packages/app/src/shared/format.ts",
+        "src/shared/format.ts",
+    )
+
+
+def test_javascript_index_represents_deterministic_re_export_imports(tmp_path):
+    _write_text(tmp_path / "src" / "value.ts", "export const value = 1;\n")
+    _write_text(tmp_path / "src" / "index.ts", 'export { value } from "./value";\n')
+
+    javascript_index = extract_javascript_index(tmp_path, scan_repository(tmp_path).files)
+
+    imports = {(item.kind, item.specifier): item for item in javascript_index.imports}
+    assert imports[("re_export", "./value")].resolved_path == "src/value.ts"
+    assert imports[("re_export", "./value")].resolution_status == "resolved_relative"
+    assert imports[("re_export", "./value")].outcome_class == "resolved_edge"
 
 
 def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_path):
@@ -424,6 +596,67 @@ def test_javascript_fact_ids_do_not_use_line_numbers_as_primary_identity(tmp_pat
     assert second_index.symbols[0].line == 3
 
 
+def test_tree_sitter_javascript_index_reports_parse_failure_without_facts(tmp_path):
+    _write_text(tmp_path / "src" / "broken.ts", 'import dep from "pkg";\n')
+
+    javascript_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        scan_repository(tmp_path).files,
+        _fake_tree_sitter_support(has_error=True),
+    )
+
+    assert [(module.path, module.parser_status) for module in javascript_index.modules] == [
+        ("src/broken.ts", "parse_error")
+    ]
+    assert javascript_index.imports == ()
+    assert javascript_index.symbols == ()
+
+
+def test_tree_sitter_javascript_index_is_deterministic_and_scanner_bounded(tmp_path):
+    _write_text(tmp_path / "src" / "b.ts", 'import b from "b";\n')
+    _write_text(tmp_path / "src" / "a.ts", 'import a from "a";\n')
+    _write_text(tmp_path / "notes.txt", 'import ignored from "not-js";\n')
+
+    first_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        tuple(reversed(scan_repository(tmp_path).files)),
+        _fake_tree_sitter_support(),
+    )
+    second_index = extract_javascript_index_with_tree_sitter(
+        tmp_path,
+        scan_repository(tmp_path).files,
+        _fake_tree_sitter_support(),
+    )
+
+    assert [module.path for module in first_index.modules] == ["src/a.ts", "src/b.ts"]
+    assert [item.specifier for item in first_index.imports] == ["a", "b"]
+    assert first_index == second_index
+
+
 def _write_text(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _fake_tree_sitter_support(*, has_error: bool = False) -> TreeSitterJavaScriptSupport:
+    class FakeParser:
+        def __init__(self, language):
+            self.language = language
+
+        def parse(self, source: bytes):
+            return SimpleNamespace(root_node=SimpleNamespace(has_error=has_error))
+
+    return TreeSitterJavaScriptSupport(
+        parser_class=FakeParser,
+        language_class=object,
+        javascript_language="javascript",
+        typescript_language="typescript",
+        tsx_language="tsx",
+        provenance=JavaScriptParserProvenance(
+            backend_name="tree_sitter_js_ts",
+            parser_package_version="parser-test",
+            javascript_grammar_version="grammar-js-test",
+            typescript_grammar_version="grammar-ts-test",
+            promoted_fact_schema_version="javascript-promoted-facts-v1",
+        ),
+    )

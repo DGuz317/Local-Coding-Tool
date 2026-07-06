@@ -251,9 +251,7 @@ def test_v0_4_release_readiness_docs_cover_required_topics() -> None:
     ):
         assert required in limitations
 
-    assert (
-        "RepoLens v0.5 focuses on giving assistants one deterministic preflight workflow" in readme
-    )
+    assert "RepoLens v0.6 focuses on improving JS/TS parser and resolver evidence" in readme
 
 
 def test_v0_5_install_and_adoption_docs_cover_preflight_setup() -> None:
@@ -318,3 +316,68 @@ def test_v0_5_release_readiness_records_final_evidence() -> None:
         "Package/workspace task",
     ):
         assert required in dogfood
+
+
+def test_v0_6_dogfood_evaluation_pack_records_release_gate_coverage() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    dogfood = (ROOT / "docs" / "dogfood" / "2026-07-06-v0.6-dogfood-evaluation-pack.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "Latest local evidence for issue #169",
+        "JS/TS call chains",
+        "re-export behavior",
+        "workspace package imports",
+        "route hints",
+        "no-source-disclosure negatives",
+        "fixture-derived estimates only",
+        "bounded local fixture index timing",
+    ):
+        assert required in readiness
+
+    for required in (
+        "v0.6 dogfood evaluation pack",
+        "Parser timing and file-count evidence are bounded local fixture evidence only",
+        "not to justify parse caches, worker pools, indexing parallelism",
+    ):
+        assert required in limitations
+
+    for required in (
+        "JS/TS workspace aliases and package boundaries",
+        "JS/TS source-free call chains",
+        "JS/TS re-export behavior",
+        "Next.js App Router route hint",
+        "Alias ambiguity",
+        "Stale graph behavior",
+        "No-source-disclosure negative",
+    ):
+        assert required in dogfood
+
+
+def test_v0_6_release_docs_record_final_readiness_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "assistant-usage-guide.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    safety = (ROOT / "docs" / "security-and-artifact-privacy.md").read_text(encoding="utf-8")
+    release_notes = (ROOT / "docs" / "releases" / "v0.6.0.md").read_text(encoding="utf-8")
+
+    combined = "\n".join((readme, guide, limitations, readiness, safety, release_notes))
+
+    for required in (
+        "Tree-sitter JS/TS is the default parser backend",
+        "legacy bounded scanner",
+        "parser-backend warnings",
+        "Call Chain Facts are structural metadata",
+        "Framework Route Hints are deterministic hints",
+        "not framework emulation",
+        "unsupported aliases",
+        "complex package entrypoints",
+        "No PyPI, Docker registry, or hosted publishing automation in v0.6",
+        "Artifact audit evidence",
+        "Maintainer release judgment: approved for v0.6 release",
+        "docs/releases/v0.6.0.md",
+    ):
+        assert required in combined

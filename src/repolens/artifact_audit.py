@@ -97,6 +97,7 @@ def audit_artifacts(
     checks = {
         "absolute_host_paths": True,
         "artifact_boundary": True,
+        "call_chain_facts_source_free": True,
         "candidate_commands_not_run": True,
         "mcp_contract": True,
         "oversized_artifacts": True,
@@ -237,6 +238,8 @@ def _audit_sqlite_artifact(root: Path, artifact_path: Path) -> list[ArtifactAudi
                 column_rows = connection.execute(
                     f"PRAGMA table_info({_quote_identifier(table_name)})"
                 ).fetchall()
+                if table_name == "javascript_call_chains":
+                    violations.extend(_audit_call_chain_columns(column_rows, rel_path))
                 text_columns = [
                     str(row[1])
                     for row in column_rows
@@ -262,6 +265,24 @@ def _audit_sqlite_artifact(root: Path, artifact_path: Path) -> list[ArtifactAudi
                 message=f"sqlite artifact could not be read: {exc.__class__.__name__}",
             )
         )
+    return violations
+
+
+def _audit_call_chain_columns(
+    column_rows: Sequence[Sequence[Any]], rel_path: str
+) -> list[ArtifactAuditViolation]:
+    violations: list[ArtifactAuditViolation] = []
+    forbidden_fragments = ("source", "snippet", "expression", "body", "signature", "comment")
+    for row in column_rows:
+        column_name = str(row[1])
+        if any(fragment in column_name.lower() for fragment in forbidden_fragments):
+            violations.append(
+                ArtifactAuditViolation(
+                    check="call_chain_facts_source_free",
+                    location=f"{rel_path}:javascript_call_chains.{column_name}",
+                    message="call-chain fact column appears source-bearing",
+                )
+            )
     return violations
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from repolens.graph import (
+    GRAPH_SCHEMA_VERSION,
     GraphExportError,
     GraphStoreError,
     build_graph_store,
@@ -53,7 +54,7 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "14"
+    assert metadata["schema_version"] == str(GRAPH_SCHEMA_VERSION)
     assert len(metadata["canonical_graph_hash"]) == 64
     assert {"confidence", "resolution_strategy", "evidence_json"} <= edge_columns
     assert len(import_edges) == 1
@@ -69,6 +70,8 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     assert {item["specifier"] for item in evidence} == {"react"}
     assert all(item["kind"] == "javascript_import" for item in evidence)
     assert all(item["resolution_status"] == "external" for item in evidence)
+    assert all(item["outcome_class"] == "resolved_edge" for item in evidence)
+    assert all(item["evidence_labels"] == ["javascript_import_specifier"] for item in evidence)
     assert json.loads(edge[7])["lines"] == [1, 2]
 
     graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
@@ -82,6 +85,69 @@ def test_edges_store_contract_and_merge_duplicate_import_evidence(tmp_path):
     assert exported_edge["resolution_strategy"] == "external_import"
     assert sorted(item["line"] for item in exported_edge["evidence"]) == [1, 2]
     assert {item["specifier"] for item in exported_edge["evidence"]} == {"react"}
+
+
+def test_javascript_call_chains_are_metadata_facts_not_call_edges(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "query.ts").write_text(
+        "export function loadUsers() {\n  return db.select().from().where();\n}\n",
+        encoding="utf-8",
+    )
+    scan = scan_repository(tmp_path)
+
+    build_graph_store(tmp_path, scan)
+    export_graph_artifacts(tmp_path)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        chain_rows = list(
+            connection.execute(
+                """
+                SELECT path, receiver_shape, method_names_json, parser_evidence_labels_json
+                FROM javascript_call_chains
+                ORDER BY path, start_line, id
+                """
+            )
+        )
+        call_edges = list(connection.execute("SELECT id FROM edges WHERE kind = 'CALLS'"))
+
+    assert len(chain_rows) == 1
+    assert chain_rows[0][0] == "src/query.ts"
+    assert chain_rows[0][1] == "identifier"
+    assert json.loads(chain_rows[0][2]) == ["select", "from", "where"]
+    assert json.loads(chain_rows[0][3]) == [
+        "line_local_member_call_sequence",
+        "source_free_shape",
+    ]
+    assert call_edges == []
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    assert graph_json["counts"]["javascript_call_chains"] == 1
+    assert graph_json["javascript"]["call_chains"][0]["method_names"] == [
+        "select",
+        "from",
+        "where",
+    ]
+    assert "db.select" not in json.dumps(graph_json, sort_keys=True)
+
+    metadata = GraphQueryService(tmp_path).context_pack_file_metadata(["src/query.ts"])
+    chains = metadata["data"]["structural_summaries"]["src/query.ts"]["call_chains"]
+    assert chains == [
+        {
+            "evidence": [
+                {
+                    "line_range": {"end": 2, "start": 2},
+                    "source": "javascript_call_chains",
+                }
+            ],
+            "line_range": {"end": 2, "start": 2},
+            "method_names": ["select", "from", "where"],
+            "parser_evidence_labels": [
+                "line_local_member_call_sequence",
+                "source_free_shape",
+            ],
+            "receiver_shape": "identifier",
+        }
+    ]
 
 
 def test_python_local_imports_resolve_to_unique_scanner_approved_modules(tmp_path):
@@ -296,6 +362,7 @@ def test_javascript_relative_import_edges_store_strategy_and_bounded_evidence(tm
     assert {item["specifier"] for item in evidence} == {"../lib/format"}
     assert all(item["kind"] == "javascript_import" for item in evidence)
     assert all(item["resolution_status"] == "resolved_relative" for item in evidence)
+    assert all(item["outcome_class"] == "resolved_edge" for item in evidence)
     assert json.loads(edge[4])["resolved_path"] == "src/lib/format.ts"
 
 
@@ -332,7 +399,57 @@ def test_javascript_alias_import_edges_use_canonical_strategy(tmp_path):
     assert edge[2] == "path_alias_import"
     evidence = json.loads(edge[3])
     assert evidence[0]["resolution_status"] == "resolved_alias"
+    assert evidence[0]["evidence_labels"] == [
+        "javascript_import_specifier",
+        "typescript_path_alias",
+    ]
     assert json.loads(edge[4])["resolved_path"] == "src/shared/format.ts"
+
+
+def test_javascript_imports_persist_outcomes_candidates_and_warnings(tmp_path):
+    (tmp_path / "src" / "lib").mkdir(parents=True)
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "lib" / "ambiguous.ts").write_text("export const value = 1;\n")
+    (tmp_path / "src" / "lib" / "ambiguous.tsx").write_text("export const value = 2;\n")
+    (tmp_path / "src" / "app" / "main.ts").write_text(
+        "import ambiguous from '../lib/ambiguous';\n",
+        encoding="utf-8",
+    )
+
+    build_graph_store(tmp_path, scan_repository(tmp_path))
+    export_graph_artifacts(tmp_path)
+
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT outcome_class, evidence_labels_json, candidate_paths_json, resolution_status
+            FROM javascript_imports
+            WHERE specifier = '../lib/ambiguous'
+            """
+        ).fetchone()
+        warnings = json.loads(
+            connection.execute(
+                "SELECT value FROM metadata WHERE key = 'graph_quality_warnings'"
+            ).fetchone()[0]
+        )
+
+    assert row["outcome_class"] == "relationship_candidate"
+    assert json.loads(row["evidence_labels_json"]) == ["javascript_import_specifier"]
+    assert json.loads(row["candidate_paths_json"]) == [
+        "src/lib/ambiguous.ts",
+        "src/lib/ambiguous.tsx",
+    ]
+    assert row["resolution_status"] == "unresolved_ambiguous_relative"
+    assert "graph_quality:javascript_unresolved_import_relationships:count=1" in warnings
+
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text(encoding="utf-8"))
+    [import_fact] = graph_json["javascript"]["imports"]
+    assert import_fact["outcome_class"] == "relationship_candidate"
+    assert import_fact["candidate_paths"] == [
+        "src/lib/ambiguous.ts",
+        "src/lib/ambiguous.tsx",
+    ]
 
 
 def test_graph_store_exports_redacted_config_metadata_and_commands(tmp_path):

@@ -290,6 +290,51 @@ def test_assistant_preflight_golden_outcomes_cover_stale_broad_ambiguity_and_no_
     ]
 
 
+def test_v0_6_js_ts_metadata_improves_first_read_ranking(tmp_path):
+    _write_v0_6_js_ts_context_fixture(tmp_path)
+    index_repository(tmp_path)
+
+    import_pack = get_task_context(
+        tmp_path,
+        "Fix workspace package import from app to @dog/lib using TypeScript alias",
+    )["data"]
+    route_pack = get_task_context(tmp_path, "Fix account route loading state")["data"]
+    call_chain_pack = get_task_context(tmp_path, "Fix query where order call chain")["data"]
+
+    assert [item["path"] for item in import_pack["first_read_files"][:2]] == [
+        "packages/lib/src/index.ts",
+        "packages/app/src/index.ts",
+    ]
+    assert import_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched resolved JS/TS import metadata."
+    )
+    assert import_pack["first_read_files"][0]["package_boundary"] == {
+        "confidence": "high",
+        "ecosystem": "javascript",
+        "evidence": [
+            {
+                "package_root": "packages/lib",
+                "source": "config_package_roots",
+                "source_path": "packages/lib/package.json",
+            }
+        ],
+        "name": "@dog/lib",
+        "path": "packages/lib",
+    }
+
+    assert route_pack["first_read_files"][0]["path"] == "app/account/page.tsx"
+    assert route_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched indexed framework route metadata."
+    )
+    assert route_pack["first_read_files"][0]["route_hints"][0]["route_path"] == "/account"
+
+    assert call_chain_pack["first_read_files"][0]["path"] == "src/query.ts"
+    assert call_chain_pack["first_read_files"][0]["reason"] == (
+        "Task tokens matched source-free JS/TS call-chain metadata."
+    )
+    assert "call_chains" in call_chain_pack["first_read_files"][0]["structural_summary"]
+
+
 def test_context_pack_preserves_missing_graph_unavailable_error(tmp_path):
     _write_context_fixture_repo(tmp_path)
 
@@ -551,6 +596,7 @@ def test_context_pack_surfaces_package_workspace_contract_tracer(tmp_path):
     assert sorted(query_data) == [
         "package_boundaries",
         "relationship_candidates",
+        "route_hints",
         "structural_summaries",
         "workspace_memberships",
     ]
@@ -685,6 +731,90 @@ def test_context_pack_surfaces_ambiguous_workspace_package_import_candidates(tmp
     )
 
 
+def test_context_pack_and_preflight_surface_next_app_router_route_hints(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            """
+            {
+              "name": "next-route-demo",
+              "dependencies": {"next": "workspace:*"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "app" / "page.tsx",
+        "export default function HomePage() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "dashboard" / "layout.tsx",
+        "export default function DashboardLayout() { return null; }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "api" / "users" / "route.ts",
+        "export function GET() { return Response.json({}); }\n",
+    )
+    _write_text(
+        tmp_path / "app" / "blog" / "[slug]" / "page.tsx",
+        "export default function BlogPage() { return null; }\n",
+    )
+    index_repository(tmp_path)
+
+    query_metadata = GraphQueryService(tmp_path).context_pack_file_metadata(
+        [
+            "app/api/users/route.ts",
+            "app/blog/[slug]/page.tsx",
+            "app/dashboard/layout.tsx",
+            "app/page.tsx",
+        ]
+    )
+    context_envelope = get_task_context(
+        tmp_path,
+        "Update the home page route",
+        focus_hints=["app/page.tsx"],
+    )
+    preflight_envelope = get_assistant_preflight(
+        tmp_path,
+        "Update the home page route",
+        focus_hints=["app/page.tsx"],
+    )
+    graph_json = json.loads((tmp_path / ".repolens" / "graph.json").read_text())
+
+    hints = query_metadata["data"]["route_hints"]
+    assert hints["app/page.tsx"][0] == {
+        "confidence": "medium",
+        "evidence": [
+            {
+                "labels": [
+                    "repo_relative_path",
+                    "next_app_router_file_convention",
+                    "framework_runtime_not_executed",
+                ],
+                "line_range": [1, 1],
+                "source": "framework_route_hint",
+            }
+        ],
+        "framework": "nextjs_app_router",
+        "kind": "page",
+        "path": "app/page.tsx",
+        "relationship": "framework_route_hint",
+        "route_path": "/",
+        "warnings": [],
+    }
+    assert hints["app/dashboard/layout.tsx"][0]["route_path"] == "/dashboard"
+    assert hints["app/api/users/route.ts"][0]["kind"] == "api_route_handler"
+    assert hints["app/api/users/route.ts"][0]["route_path"] == "/api/users"
+    assert hints["app/blog/[slug]/page.tsx"][0]["confidence"] == "low"
+    assert hints["app/blog/[slug]/page.tsx"][0]["warnings"] == [
+        "framework_route_hint:next_app_router_dynamic_segment_candidate"
+    ]
+    assert context_envelope["data"]["first_read_files"][0]["route_hints"] == hints["app/page.tsx"]
+    assert preflight_envelope["data"]["first_read_files"][0]["route_hints"] == hints["app/page.tsx"]
+    assert not any(edge["kind"] == "ROUTES_TO" for edge in graph_json["edges"])
+    assert "return Response" not in json.dumps(preflight_envelope)
+
+
 def test_expand_context_is_pack_scoped_bounded_and_source_free(tmp_path):
     _write_context_fixture_repo(tmp_path)
     index_repository(tmp_path)
@@ -812,6 +942,102 @@ def test_context_pack_mcp_expansion_and_relevance_use_same_service(tmp_path):
     assert tools.explain_relevance(
         task, pack["context_pack_id"], item["handle"]
     ) == explain_relevance(tmp_path, task, pack["context_pack_id"], item["handle"])
+
+
+def _write_v0_6_js_ts_context_fixture(root) -> None:
+    _write_text(
+        root / "package.json",
+        dedent(
+            """
+            {
+              "name": "v06-js-ts-demo",
+              "private": true,
+              "workspaces": ["packages/*"],
+              "scripts": {
+                "test": "vitest run",
+                "typecheck": "tsc -b"
+              }
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "tsconfig.json",
+        dedent(
+            """
+            {
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                  "@dog/lib": ["packages/lib/src/index.ts"]
+                }
+              },
+              "references": [
+                {"path": "./packages/app"},
+                {"path": "./packages/lib"}
+              ]
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "app" / "package.json",
+        dedent(
+            """
+            {"name": "@dog/app", "dependencies": {"@dog/lib": "workspace:*"}}
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "app" / "src" / "index.ts",
+        dedent(
+            """
+            import { describeValue } from "@dog/lib";
+
+            export function render(): string {
+              return describeValue("demo");
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "lib" / "package.json",
+        dedent(
+            """
+            {"name": "@dog/lib"}
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "packages" / "lib" / "src" / "index.ts",
+        dedent(
+            """
+            export function describeValue(value: string): string {
+              return `value:${value}`;
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "app" / "account" / "page.tsx",
+        dedent(
+            """
+            export default function AccountPage() {
+              return null;
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        root / "src" / "query.ts",
+        dedent(
+            """
+            export function loadUsers(client: any) {
+              return client.query().where().order();
+            }
+            """
+        ).lstrip(),
+    )
 
 
 def _write_context_fixture_repo(root) -> None:

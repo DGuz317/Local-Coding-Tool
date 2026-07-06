@@ -86,7 +86,7 @@ def index_repository(
     repo_path: Path | str,
     *,
     file_changes: tuple[FileChange, ...] = (),
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
     full_graph_index: bool = False,
 ) -> IndexResult:
     """Run the safe discovery index path for ``repo_path`` and write bootstrap artifacts."""
@@ -125,7 +125,7 @@ def index_repository(
 def update_repository(
     repo_path: Path | str,
     *,
-    parser_backend: ParserBackendOption = "stable",
+    parser_backend: ParserBackendOption = "default",
 ) -> UpdateResult:
     """Update an existing graph, or initialize one when artifacts are missing."""
     try:

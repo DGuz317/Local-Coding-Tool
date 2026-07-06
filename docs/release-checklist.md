@@ -1,4 +1,4 @@
-# RepoLens MCP v0.5 Release Checklist
+# RepoLens MCP v0.6 Release Checklist
 
 This checklist gates release readiness. It does not publish to PyPI, Docker registries, or hosted services.
 
@@ -11,7 +11,7 @@ A human maintainer must confirm before final release publication:
 - `docs/security-and-artifact-privacy.md` accurately describes scanner, redaction, artifact, and MCP safety behavior.
 - `docs/troubleshooting.md` covers the known operational failure modes.
 - `docs/known-limitations.md` reflects dogfooding outcomes and does not hide release-blocking failures.
-- `docs/releases/v0.5.0.md` describes the release without unsupported publishing claims.
+- `docs/releases/v0.6.0.md` describes the release without unsupported publishing claims.
 - Release notes use the changelog template and avoid unsupported publishing claims.
 - PyPI publishing automation remains out of scope.
 - Docker registry publishing automation remains out of scope.
@@ -93,7 +93,7 @@ Confirm dogfooding reports cover:
 
 ## Scope Guard
 
-Do not add or require these for v0.5 release readiness:
+Do not add or require these for v0.6 release readiness:
 
 - PyPI publishing automation.
 - Docker registry publishing automation.

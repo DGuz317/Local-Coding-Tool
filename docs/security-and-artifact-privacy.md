@@ -1,6 +1,6 @@
 # Security And Artifact Privacy
 
-RepoLens v0.2 is local-first and safe by default for normal indexing and MCP serving. It creates deterministic local artifacts under `.repolens/` and exposes read-only MCP tools.
+RepoLens is local-first and safe by default for normal indexing and MCP serving. It creates deterministic local artifacts under `.repolens/` and exposes read-only MCP tools.
 
 ## Safety Guarantees
 
@@ -15,6 +15,7 @@ RepoLens v0.2 is local-first and safe by default for normal indexing and MCP ser
 - Candidate commands may be detected and stored, but RepoLens does not execute them.
 - Deploy or publish-like commands must not be recommended for automatic execution.
 - Runtime package registry lookups are out of scope for normal indexing and MCP serving.
+- v0.6 JS/TS parser, resolver, Call Chain Fact, and Framework Route Hint artifacts remain compact metadata. They must not contain source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, or absolute host paths.
 
 ## No Whole-Source Disclosure
 
@@ -37,4 +38,4 @@ RepoLens skips secret-looking paths and redacts obvious secret-like values, but 
 
 ## Human Review Before Release
 
-A human maintainer must review release-facing docs and known limitations before publication. Publishing automation for PyPI, Docker registries, or hosted services remains out of scope for v0.2.
+A human maintainer must review release-facing docs and known limitations before publication. Publishing automation for PyPI, Docker registries, or hosted services remains out of scope for v0.6.

@@ -64,9 +64,9 @@ def index(
         str,
         typer.Option(
             "--parser-backend",
-            help="Parser backend to use: stable or experimental.",
+            help="Parser backend to use: default, stable, tree_sitter_js_ts, or experimental.",
         ),
-    ] = "stable",
+    ] = "default",
     full_index: Annotated[
         bool,
         typer.Option(
@@ -273,9 +273,9 @@ def update(
         str,
         typer.Option(
             "--parser-backend",
-            help="Parser backend to use: stable or experimental.",
+            help="Parser backend to use: default, stable, tree_sitter_js_ts, or experimental.",
         ),
-    ] = "stable",
+    ] = "default",
 ) -> None:
     """Update RepoLens artifacts using live file change classification."""
     try:

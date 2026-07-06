@@ -3,15 +3,106 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.metadata
 import json
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
+from repolens.resolver_contract import ResolverOutcomeClass
 from repolens.scanner import ScannedFile
 
-JAVASCRIPT_EXTRACTOR_VERSION = "issue-39-js-ts-relative-import-resolution-v1"
+PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION = "javascript-promoted-facts-v1"
+JAVASCRIPT_EXTRACTOR_VERSION = (
+    f"issue-163-js-ts-parser-backend-v1+{PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION}"
+)
+
+PROMOTED_JAVASCRIPT_FACT_FIELDS = {
+    "modules": (
+        "path",
+        "node_id",
+        "module_name",
+        "extension",
+        "parser_status",
+    ),
+    "imports": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "specifier",
+        "root_name",
+        "classification",
+        "resolved_path",
+        "resolution_status",
+        "outcome_class",
+        "evidence_labels",
+        "candidate_paths",
+        "line",
+    ),
+    "packages": ("id", "name", "classification"),
+    "symbols": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "name",
+        "qualified_name",
+        "line",
+        "start_line",
+        "end_line",
+    ),
+    "exports": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "exported_name",
+        "local_name",
+        "line",
+    ),
+    "commonjs_assignments": (
+        "id",
+        "path",
+        "module_node_id",
+        "kind",
+        "exported_name",
+        "assigned_name",
+        "line",
+    ),
+    "call_chains": (
+        "id",
+        "path",
+        "module_node_id",
+        "enclosing_symbol_id",
+        "start_line",
+        "end_line",
+        "receiver_shape",
+        "method_names",
+        "parser_evidence_labels",
+    ),
+    "route_hints": (
+        "id",
+        "path",
+        "module_node_id",
+        "framework",
+        "kind",
+        "route_path",
+        "confidence",
+        "line_range",
+        "evidence_labels",
+        "warnings",
+    ),
+}
+
+EXPERIMENTAL_JAVASCRIPT_FACT_POLICY = (
+    "Tree-sitter AST nodes, source snippets, raw expressions, comments, signatures, bodies, "
+    "absolute paths, and parser-only research facts are not promoted. They must stay out of "
+    "Canonical Graph Hash and default Context Pack identity until this schema version changes."
+)
 
 JAVASCRIPT_SOURCE_SUFFIXES = frozenset(
     {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
@@ -120,6 +211,10 @@ EXPORT_CLASS_PATTERN = re.compile(
 EXPORT_CONST_PATTERN = re.compile(rf"^\s*export\s+const\s+(?P<name>{IDENTIFIER_PATTERN})\b")
 EXPORT_DEFAULT_PATTERN = re.compile(r"^\s*export\s+default\b(?P<body>.*)$")
 EXPORT_LIST_PATTERN = re.compile(r"^\s*export\s*\{(?P<items>[^}]+)\}")
+RE_EXPORT_FROM_PATTERN = re.compile(
+    r"^\s*export\s*(?:type\s*)?\{[^}]+\}\s*from\s*"
+    r"(?P<quote>['\"])(?P<specifier>[^'\"]+)(?P=quote)"
+)
 EXPORT_LIST_ITEM_PATTERN = re.compile(
     rf"^(?:type\s+)?(?P<local>{IDENTIFIER_PATTERN}|default)"
     rf"(?:\s+as\s+(?P<exported>{IDENTIFIER_PATTERN}|default))?$"
@@ -156,6 +251,9 @@ class JavaScriptImportFact:
     classification: str
     resolved_path: str | None
     resolution_status: str
+    outcome_class: ResolverOutcomeClass
+    evidence_labels: tuple[str, ...]
+    candidate_paths: tuple[str, ...]
     line: int
 
 
@@ -210,6 +308,37 @@ class JavaScriptCommonJSAssignmentFact:
 
 
 @dataclass(frozen=True)
+class JavaScriptCallChainFact:
+    """A source-free JS/TS fluent call chain shape."""
+
+    id: str
+    path: str
+    module_node_id: str
+    enclosing_symbol_id: str | None
+    start_line: int
+    end_line: int
+    receiver_shape: str
+    method_names: tuple[str, ...]
+    parser_evidence_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class JavaScriptRouteHintFact:
+    """A deterministic framework route hint derived from repo-relative file structure."""
+
+    id: str
+    path: str
+    module_node_id: str
+    framework: str
+    kind: str
+    route_path: str
+    confidence: str
+    line_range: tuple[int, int] | None
+    evidence_labels: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class JavaScriptIndex:
     """All JS/TS facts extracted for one scan result."""
 
@@ -219,10 +348,104 @@ class JavaScriptIndex:
     symbols: tuple[JavaScriptSymbolFact, ...]
     exports: tuple[JavaScriptExportFact, ...]
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
+    call_chains: tuple[JavaScriptCallChainFact, ...]
+    route_hints: tuple[JavaScriptRouteHintFact, ...]
 
     @property
     def parser_status_by_path(self) -> dict[str, str]:
         return {module.path: module.parser_status for module in self.modules}
+
+
+@dataclass(frozen=True)
+class JavaScriptParserProvenance:
+    """Source-free JS/TS parser backend identity for artifact freshness."""
+
+    backend_name: str
+    parser_package_version: str | None
+    javascript_grammar_version: str | None
+    typescript_grammar_version: str | None
+    promoted_fact_schema_version: str
+
+    def to_metadata(self) -> dict[str, str | None]:
+        return {
+            "backend_name": self.backend_name,
+            "parser_package_version": self.parser_package_version,
+            "javascript_grammar_version": self.javascript_grammar_version,
+            "typescript_grammar_version": self.typescript_grammar_version,
+            "promoted_fact_schema_version": self.promoted_fact_schema_version,
+        }
+
+
+@dataclass(frozen=True)
+class TreeSitterJavaScriptSupport:
+    """Initialized optional Tree-sitter support for JS/TS files."""
+
+    parser_class: Any
+    language_class: Any
+    javascript_language: Any
+    typescript_language: Any
+    tsx_language: Any
+    provenance: JavaScriptParserProvenance
+
+
+@dataclass(frozen=True)
+class TreeSitterJavaScriptAvailability:
+    """Optional Tree-sitter availability result without raising to callers."""
+
+    support: TreeSitterJavaScriptSupport | None
+    warning: str | None = None
+
+
+def tree_sitter_javascript_availability() -> TreeSitterJavaScriptAvailability:
+    """Return optional Tree-sitter JS/TS support, or a bounded fallback warning."""
+    try:
+        tree_sitter = importlib.import_module("tree_sitter")
+        Parser = getattr(tree_sitter, "Parser")
+        Language = getattr(tree_sitter, "Language")
+    except (ImportError, AttributeError):
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:missing_tree_sitter",
+        )
+
+    try:
+        tree_sitter_javascript = importlib.import_module("tree_sitter_javascript")
+        tree_sitter_typescript = importlib.import_module("tree_sitter_typescript")
+    except ImportError:
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:missing_grammar",
+        )
+
+    try:
+        javascript_language = Language(tree_sitter_javascript.language())
+        typescript_language = Language(tree_sitter_typescript.language_typescript())
+        tsx_language = Language(tree_sitter_typescript.language_tsx())
+        _parser_for(Parser, javascript_language)
+        _parser_for(Parser, typescript_language)
+        _parser_for(Parser, tsx_language)
+    except Exception:
+        return TreeSitterJavaScriptAvailability(
+            None,
+            "parser_backend:tree_sitter_js_ts_unavailable:grammar_init_failed",
+        )
+
+    return TreeSitterJavaScriptAvailability(
+        TreeSitterJavaScriptSupport(
+            parser_class=Parser,
+            language_class=Language,
+            javascript_language=javascript_language,
+            typescript_language=typescript_language,
+            tsx_language=tsx_language,
+            provenance=JavaScriptParserProvenance(
+                backend_name="tree_sitter_js_ts",
+                parser_package_version=_package_version("tree-sitter"),
+                javascript_grammar_version=_package_version("tree-sitter-javascript"),
+                typescript_grammar_version=_package_version("tree-sitter-typescript"),
+                promoted_fact_schema_version=PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
+            ),
+        )
+    )
 
 
 def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> JavaScriptIndex:
@@ -237,6 +460,8 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
+    route_hints: list[JavaScriptRouteHintFact] = []
     observed_packages: set[tuple[str, str]] = set()
 
     for scanned_file in javascript_files:
@@ -263,6 +488,10 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
             )
             continue
 
+        route_hint = _next_app_router_route_hint(path, module_node_id, source)
+        if route_hint is not None:
+            route_hints.append(route_hint)
+
         file_facts = _extract_file_facts(
             path,
             module_node_id,
@@ -274,6 +503,7 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         symbols.extend(file_facts.symbols)
         exports.extend(file_facts.exports)
         commonjs_assignments.extend(file_facts.commonjs_assignments)
+        call_chains.extend(file_facts.call_chains)
         for import_fact in file_facts.imports:
             if import_fact.root_name is not None:
                 observed_packages.add((import_fact.classification, import_fact.root_name))
@@ -295,6 +525,109 @@ def extract_javascript_index(root: Path, files: tuple[ScannedFile, ...]) -> Java
         commonjs_assignments=tuple(
             sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
         ),
+        call_chains=tuple(
+            sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
+        ),
+        route_hints=tuple(sorted(route_hints, key=lambda fact: (fact.path, fact.id))),
+    )
+
+
+def extract_javascript_index_with_tree_sitter(
+    root: Path,
+    files: tuple[ScannedFile, ...],
+    support: TreeSitterJavaScriptSupport,
+) -> JavaScriptIndex:
+    """Extract JS/TS facts after a real Tree-sitter parse of scanner-approved files."""
+    javascript_files = tuple(
+        file for file in sorted(files, key=lambda item: item.path) if _is_javascript(file)
+    )
+    javascript_paths = frozenset(file.path for file in javascript_files)
+    alias_rules = _load_typescript_alias_rules(root, files)
+    modules: list[JavaScriptModuleFact] = []
+    imports: list[JavaScriptImportFact] = []
+    symbols: list[JavaScriptSymbolFact] = []
+    exports: list[JavaScriptExportFact] = []
+    commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
+    route_hints: list[JavaScriptRouteHintFact] = []
+    observed_packages: set[tuple[str, str]] = set()
+
+    for scanned_file in javascript_files:
+        path = scanned_file.path
+        module_node_id = javascript_module_node_id(path)
+        module = JavaScriptModuleFact(
+            path=path,
+            node_id=module_node_id,
+            module_name=_module_name(path),
+            extension=PurePosixPath(path).suffix.lower(),
+            parser_status="parsed",
+        )
+        try:
+            source = _read_scanner_approved_text(root, path)
+            tree = _parse_tree_sitter_source(support, path, source)
+        except OSError:
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+        except Exception:
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+
+        if bool(getattr(tree.root_node, "has_error", False)):
+            modules.append(_module_with_status(module, "parse_error"))
+            continue
+
+        modules.append(module)
+        route_hint = _next_app_router_route_hint(path, module_node_id, source)
+        if route_hint is not None:
+            route_hints.append(route_hint)
+        file_facts = _extract_file_facts(
+            path,
+            module_node_id,
+            source,
+            alias_rules,
+            javascript_paths,
+        )
+        imports.extend(file_facts.imports)
+        symbols.extend(file_facts.symbols)
+        exports.extend(file_facts.exports)
+        commonjs_assignments.extend(file_facts.commonjs_assignments)
+        call_chains.extend(file_facts.call_chains)
+        for import_fact in file_facts.imports:
+            if import_fact.root_name is not None:
+                observed_packages.add((import_fact.classification, import_fact.root_name))
+
+    packages = tuple(
+        JavaScriptPackageFact(
+            id=javascript_package_node_id(name, classification),
+            name=name,
+            classification=classification,
+        )
+        for classification, name in sorted(observed_packages)
+    )
+    return JavaScriptIndex(
+        modules=tuple(sorted(modules, key=lambda fact: fact.path)),
+        imports=tuple(sorted(imports, key=lambda fact: (fact.path, fact.line, fact.id))),
+        packages=packages,
+        symbols=tuple(sorted(symbols, key=lambda fact: (fact.path, fact.qualified_name, fact.id))),
+        exports=tuple(sorted(exports, key=lambda fact: (fact.path, fact.line, fact.id))),
+        commonjs_assignments=tuple(
+            sorted(commonjs_assignments, key=lambda fact: (fact.path, fact.line, fact.id))
+        ),
+        call_chains=tuple(
+            sorted(call_chains, key=lambda fact: (fact.path, fact.start_line, fact.id))
+        ),
+        route_hints=tuple(sorted(route_hints, key=lambda fact: (fact.path, fact.id))),
+    )
+
+
+def bounded_javascript_parser_provenance() -> JavaScriptParserProvenance:
+    """Return provenance for the legacy bounded JS/TS scanner fallback."""
+    return JavaScriptParserProvenance(
+        backend_name="bounded_js_ts_scanner",
+        parser_package_version=None,
+        javascript_grammar_version=None,
+        typescript_grammar_version=None,
+        promoted_fact_schema_version=PROMOTED_JAVASCRIPT_FACT_SCHEMA_VERSION,
     )
 
 
@@ -310,6 +643,10 @@ def javascript_symbol_node_id(path: str, kind: str, name: str) -> str:
     return f"javascript_symbol:{path}:{kind}:{name}"
 
 
+def javascript_route_hint_id(path: str) -> str:
+    return f"javascript_route_hint:{path}"
+
+
 def _is_javascript(file: ScannedFile) -> bool:
     return PurePosixPath(file.path).suffix.lower() in JAVASCRIPT_SOURCE_SUFFIXES
 
@@ -321,8 +658,122 @@ def _read_scanner_approved_text(root: Path, path: str) -> str:
     return source_path.read_text(encoding="utf-8", errors="replace")
 
 
+def _parser_for(parser_class: Any, language: Any) -> Any:
+    try:
+        return parser_class(language)
+    except TypeError:
+        parser = parser_class()
+        parser.language = language
+        return parser
+
+
+def _parse_tree_sitter_source(support: TreeSitterJavaScriptSupport, path: str, source: str) -> Any:
+    parser = _parser_for(support.parser_class, _tree_sitter_language_for_path(support, path))
+    return parser.parse(source.encode("utf-8"))
+
+
+def _tree_sitter_language_for_path(support: TreeSitterJavaScriptSupport, path: str) -> Any:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".tsx":
+        return support.tsx_language
+    if suffix in {".ts", ".mts", ".cts"}:
+        return support.typescript_language
+    return support.javascript_language
+
+
+def _module_with_status(module: JavaScriptModuleFact, parser_status: str) -> JavaScriptModuleFact:
+    return JavaScriptModuleFact(
+        path=module.path,
+        node_id=module.node_id,
+        module_name=module.module_name,
+        extension=module.extension,
+        parser_status=parser_status,
+    )
+
+
+def _package_version(package_name: str) -> str | None:
+    try:
+        return importlib.metadata.version(package_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def _module_name(path: str) -> str:
     return PurePosixPath(path).with_suffix("").as_posix()
+
+
+def _next_app_router_route_hint(
+    path: str,
+    module_node_id: str,
+    source: str,
+) -> JavaScriptRouteHintFact | None:
+    posix_path = PurePosixPath(path)
+    parts = posix_path.parts
+    app_index = _app_directory_index(parts)
+    if app_index is None:
+        return None
+
+    filename = posix_path.name
+    route_kind_by_filename = {
+        "layout.tsx": "layout",
+        "page.tsx": "page",
+        "route.ts": "api_route_handler",
+    }
+    kind = route_kind_by_filename.get(filename)
+    if kind is None:
+        return None
+    if kind == "api_route_handler" and (
+        len(parts) <= app_index + 1 or parts[app_index + 1] != "api"
+    ):
+        return None
+
+    route_segments = parts[app_index + 1 : -1]
+    route_path = _normalized_next_route_path(route_segments)
+    warnings = _next_route_warnings(route_segments)
+    line_count = max(1, source.count("\n") + (0 if source.endswith("\n") else 1))
+    return JavaScriptRouteHintFact(
+        id=javascript_route_hint_id(path),
+        path=path,
+        module_node_id=module_node_id,
+        framework="nextjs_app_router",
+        kind=kind,
+        route_path=route_path,
+        confidence="low" if warnings else "medium",
+        line_range=(1, line_count),
+        evidence_labels=(
+            "repo_relative_path",
+            "next_app_router_file_convention",
+            "framework_runtime_not_executed",
+        ),
+        warnings=warnings,
+    )
+
+
+def _app_directory_index(parts: tuple[str, ...]) -> int | None:
+    for index, part in enumerate(parts[:-1]):
+        if part == "app":
+            return index
+    return None
+
+
+def _normalized_next_route_path(route_segments: tuple[str, ...]) -> str:
+    visible_segments = [segment for segment in route_segments if not _next_route_group(segment)]
+    if not visible_segments:
+        return "/"
+    return "/" + "/".join(visible_segments)
+
+
+def _next_route_warnings(route_segments: tuple[str, ...]) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if any(_next_route_group(segment) for segment in route_segments):
+        warnings.append("framework_route_hint:next_app_router_route_group_candidate")
+    if any("[" in segment or "]" in segment for segment in route_segments):
+        warnings.append("framework_route_hint:next_app_router_dynamic_segment_candidate")
+    return tuple(warnings)
+
+
+def _next_route_group(segment: str) -> bool:
+    return segment.startswith("(") and segment.endswith(")")
 
 
 @dataclass(frozen=True)
@@ -342,6 +793,9 @@ class _ImportResolution:
     classification: str
     resolved_path: str | None
     resolution_status: str
+    outcome_class: ResolverOutcomeClass
+    evidence_labels: tuple[str, ...]
+    candidate_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -350,6 +804,7 @@ class _JavaScriptFileFacts:
     symbols: tuple[JavaScriptSymbolFact, ...]
     exports: tuple[JavaScriptExportFact, ...]
     commonjs_assignments: tuple[JavaScriptCommonJSAssignmentFact, ...]
+    call_chains: tuple[JavaScriptCallChainFact, ...]
 
 
 def _extract_file_facts(
@@ -363,10 +818,12 @@ def _extract_file_facts(
     symbols: list[JavaScriptSymbolFact] = []
     exports: list[JavaScriptExportFact] = []
     commonjs_assignments: list[JavaScriptCommonJSAssignmentFact] = []
+    call_chains: list[JavaScriptCallChainFact] = []
     import_id_counts: Counter[str] = Counter()
     symbol_id_counts: Counter[str] = Counter()
     export_id_counts: Counter[str] = Counter()
     commonjs_id_counts: Counter[str] = Counter()
+    call_chain_id_counts: Counter[str] = Counter()
     brace_depth = 0
 
     stripped_lines = tuple(_strip_comments_preserving_strings(source))
@@ -382,6 +839,17 @@ def _extract_file_facts(
         )
         if static_import is not None:
             imports.append(static_import)
+        re_export_import = _re_export_import_fact(
+            path,
+            module_node_id,
+            line,
+            line_number,
+            import_id_counts,
+            alias_rules,
+            javascript_paths,
+        )
+        if re_export_import is not None:
+            imports.append(re_export_import)
 
         for specifier in _literal_call_specifiers(line, "require"):
             imports.append(
@@ -440,6 +908,17 @@ def _extract_file_facts(
             if commonjs_assignment is not None:
                 commonjs_assignments.append(commonjs_assignment)
 
+        call_chains.extend(
+            _call_chain_facts(
+                path,
+                module_node_id,
+                line,
+                line_number,
+                symbols,
+                call_chain_id_counts,
+            )
+        )
+
         brace_depth = max(0, brace_depth + _brace_delta_outside_strings(line))
 
     return _JavaScriptFileFacts(
@@ -447,6 +926,7 @@ def _extract_file_facts(
         symbols=tuple(symbols),
         exports=tuple(exports),
         commonjs_assignments=tuple(commonjs_assignments),
+        call_chains=tuple(call_chains),
     )
 
 
@@ -494,6 +974,30 @@ def _static_import_kind(clause: str) -> str:
     if normalized.startswith("{") or "{" in normalized:
         return "named_import"
     return "default_import"
+
+
+def _re_export_import_fact(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    id_counts: Counter[str],
+    alias_rules: tuple[_TypeScriptAliasRule, ...],
+    javascript_paths: frozenset[str],
+) -> JavaScriptImportFact | None:
+    match = RE_EXPORT_FROM_PATTERN.match(line)
+    if match is None:
+        return None
+    return _import_fact(
+        path,
+        module_node_id,
+        "re_export",
+        match.group("specifier"),
+        line_number,
+        id_counts,
+        alias_rules,
+        javascript_paths,
+    )
 
 
 def _top_level_symbol_fact(
@@ -757,6 +1261,86 @@ def _assigned_name(rhs: str) -> str | None:
     return name if not remainder else None
 
 
+def _call_chain_facts(
+    path: str,
+    module_node_id: str,
+    line: str,
+    line_number: int,
+    symbols: list[JavaScriptSymbolFact],
+    id_counts: Counter[str],
+) -> tuple[JavaScriptCallChainFact, ...]:
+    masked_line = _mask_string_contents(line)
+    method_names = tuple(match.group("name") for match in _method_call_matches(masked_line))
+    if len(method_names) < 2:
+        return ()
+
+    receiver_shape = _receiver_shape(masked_line)
+    enclosing_symbol_id = _enclosing_symbol_id(symbols, line_number)
+    key = "|".join((path, str(line_number), receiver_shape, ".".join(method_names)))
+    occurrence = id_counts[key]
+    id_counts[key] += 1
+    suffix = f":{occurrence}" if occurrence else ""
+    return (
+        JavaScriptCallChainFact(
+            id=f"javascript_call_chain:{path}:{_short_hash(key)}{suffix}",
+            path=path,
+            module_node_id=module_node_id,
+            enclosing_symbol_id=enclosing_symbol_id,
+            start_line=line_number,
+            end_line=line_number,
+            receiver_shape=receiver_shape,
+            method_names=method_names,
+            parser_evidence_labels=("line_local_member_call_sequence", "source_free_shape"),
+        ),
+    )
+
+
+def _method_call_matches(line: str) -> tuple[re.Match[str], ...]:
+    matches = []
+    pattern = re.compile(rf"\.\s*(?P<name>{IDENTIFIER_PATTERN})\s*\(")
+    for match in pattern.finditer(line):
+        name = match.group("name")
+        if name not in JS_KEYWORDS:
+            matches.append(match)
+    return tuple(matches)
+
+
+def _receiver_shape(line: str) -> str:
+    first_match = re.search(rf"\.\s*{IDENTIFIER_PATTERN}\s*\(", line)
+    if first_match is None:
+        return "unknown"
+    prefix = line[: first_match.start()].strip()
+    if not prefix:
+        return "unknown"
+    if re.search(r"\bnew\s+.+\)$", prefix) or re.search(r"\bnew\s+[^()]+$", prefix):
+        return "new_expression"
+    if prefix.endswith(")"):
+        return "call_result"
+    if prefix.endswith("]"):
+        return "element_access"
+    tail = prefix.rsplit("=", 1)[-1].strip()
+    tail = tail.rsplit("return", 1)[-1].strip()
+    if tail == "this":
+        return "this"
+    if re.fullmatch(IDENTIFIER_PATTERN, tail):
+        return "identifier"
+    if re.fullmatch(rf"(?:this|{IDENTIFIER_PATTERN})(?:\s*\.\s*{IDENTIFIER_PATTERN})+", tail):
+        return "member"
+    return "unknown"
+
+
+def _enclosing_symbol_id(symbols: list[JavaScriptSymbolFact], line_number: int) -> str | None:
+    matches = [
+        symbol
+        for symbol in symbols
+        if symbol.start_line <= line_number <= symbol.end_line
+        and symbol.kind in {"arrow_function", "class", "function"}
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0].id
+
+
 def _import_fact(
     path: str,
     module_node_id: str,
@@ -781,6 +1365,9 @@ def _import_fact(
         classification=resolution.classification,
         resolved_path=resolution.resolved_path,
         resolution_status=resolution.resolution_status,
+        outcome_class=resolution.outcome_class,
+        evidence_labels=resolution.evidence_labels,
+        candidate_paths=resolution.candidate_paths,
         line=line,
     )
 
@@ -792,7 +1379,13 @@ def _resolve_import_specifier(
     javascript_paths: frozenset[str],
 ) -> _ImportResolution:
     if specifier.startswith("/"):
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_unsupported_absolute")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_unsupported_absolute",
+            outcome_class="unsupported",
+        )
 
     if specifier.startswith("."):
         return _resolve_relative_specifier(source_path, specifier, javascript_paths)
@@ -811,9 +1404,37 @@ def _resolve_import_specifier(
 
     node_builtin = _node_builtin_name(specifier)
     if node_builtin is not None:
-        return _ImportResolution(node_builtin, "node_builtin", None, "external")
+        return _import_resolution(node_builtin, "node_builtin", None, "external")
 
-    return _ImportResolution(_package_root(specifier), "third_party", None, "external")
+    return _import_resolution(_package_root(specifier), "third_party", None, "external")
+
+
+def _import_resolution(
+    root_name: str | None,
+    classification: str,
+    resolved_path: str | None,
+    resolution_status: str,
+    *,
+    outcome_class: ResolverOutcomeClass | None = None,
+    evidence_labels: tuple[str, ...] = ("javascript_import_specifier",),
+    candidate_paths: tuple[str, ...] = (),
+) -> _ImportResolution:
+    if outcome_class is None:
+        if resolved_path is not None or resolution_status == "external":
+            outcome_class = "resolved_edge"
+        elif candidate_paths:
+            outcome_class = "relationship_candidate"
+        else:
+            outcome_class = "unresolved"
+    return _ImportResolution(
+        root_name=root_name,
+        classification=classification,
+        resolved_path=resolved_path,
+        resolution_status=resolution_status,
+        outcome_class=outcome_class,
+        evidence_labels=evidence_labels,
+        candidate_paths=tuple(sorted(candidate_paths)),
+    )
 
 
 def _resolve_relative_specifier(
@@ -826,19 +1447,25 @@ def _resolve_relative_specifier(
         source_dir = ""
     base_path = _normalize_repo_path(source_dir, specifier)
     if base_path is None:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_outside_root")
+        return _import_resolution(None, "local_unresolved", None, "unresolved_outside_root")
 
     candidate_paths = _module_path_candidates(base_path, javascript_paths)
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_relative",
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_relative")
-    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_relative")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_relative",
+            candidate_paths=tuple(candidate_paths),
+        )
+    return _import_resolution(None, "local_unresolved", None, "unresolved_missing_relative")
 
 
 def _resolve_alias_specifier(
@@ -857,10 +1484,17 @@ def _resolve_alias_specifier(
         if _typescript_config_scope_applies(source_path, rule.scope_dir)
     )
     if not matches:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_out_of_scope_alias")
+        return _import_resolution(None, "local_unresolved", None, "unresolved_out_of_scope_alias")
 
     if any(rule.status in {"complex", "unsupported"} for rule in matches):
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_complex_alias")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_complex_alias",
+            outcome_class="unsupported",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+        )
 
     candidate_paths: set[str] = set()
     for rule in matches:
@@ -871,15 +1505,29 @@ def _resolve_alias_specifier(
             )
 
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_alias",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_alias")
-    return _ImportResolution(None, "local_unresolved", None, "unresolved_missing_alias")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_alias",
+            evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+            candidate_paths=tuple(candidate_paths),
+        )
+    return _import_resolution(
+        None,
+        "local_unresolved",
+        None,
+        "unresolved_missing_alias",
+        evidence_labels=("javascript_import_specifier", "typescript_path_alias"),
+    )
 
 
 def _resolve_base_url_specifier(
@@ -905,14 +1553,22 @@ def _resolve_base_url_specifier(
             )
 
     if len(candidate_paths) == 1:
-        return _ImportResolution(
+        return _import_resolution(
             None,
             "local_resolved",
             next(iter(candidate_paths)),
             "resolved_base_url",
+            evidence_labels=("javascript_import_specifier", "typescript_base_url"),
         )
     if len(candidate_paths) > 1:
-        return _ImportResolution(None, "local_unresolved", None, "unresolved_ambiguous_base_url")
+        return _import_resolution(
+            None,
+            "local_unresolved",
+            None,
+            "unresolved_ambiguous_base_url",
+            evidence_labels=("javascript_import_specifier", "typescript_base_url"),
+            candidate_paths=tuple(candidate_paths),
+        )
     return None
 
 
@@ -1271,6 +1927,28 @@ def _strip_comments_preserving_strings(source: str) -> tuple[str, ...]:
             index += 1
         lines.append("".join(line))
     return tuple(lines)
+
+
+def _mask_string_contents(line: str) -> str:
+    masked: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            masked.append(" ")
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            masked.append(" ")
+            continue
+        masked.append(character)
+    return "".join(masked)
 
 
 def _brace_delta_outside_strings(line: str) -> int:

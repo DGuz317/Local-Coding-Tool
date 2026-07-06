@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import tempfile
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 from repolens.artifact_audit import audit_artifacts
 from repolens.context_pack import expand_context, get_assistant_preflight, get_task_context
 from repolens.context_pack_contract import DEFAULT_CONTEXT_PACK_BUDGET, guard_context_pack_output
+from repolens.graph_store import GRAPH_STORE_PATH
 from repolens.indexer import index_repository
 from repolens.mcp_envelope import mcp_success, truncation_metadata
 from repolens.query import GraphQueryService
@@ -55,6 +58,7 @@ def run_context_evaluation(
     failed_cases = len(cases) - passed_cases
     corpora = _corpora_summary(cases)
     artifact_audit_summary = _artifact_audit_summary(cases)
+    index_evidence_summary = _index_evidence_summary(cases)
     local_savings_summary = _local_savings_summary(cases)
     preflight_summary = _preflight_summary(cases)
     release_cases = [case for case in cases if case.get("corpus") == "release_blocking"]
@@ -63,6 +67,7 @@ def run_context_evaluation(
         "cases": cases,
         "artifact_audit_summary": artifact_audit_summary,
         "corpora": corpora,
+        "index_evidence_summary": index_evidence_summary,
         "local_savings_summary": local_savings_summary,
         "manifest_version": str(manifest.get("manifest_version", "")),
         "preflight_summary": preflight_summary,
@@ -189,6 +194,19 @@ def _artifact_audit_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any
     }
 
 
+def _index_evidence_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    evidence = [_mapping(case.get("index_evidence")) for case in cases]
+    return {
+        "case_count": len(evidence),
+        "eligible_file_count": sum(int(item.get("eligible_file_count", 0)) for item in evidence),
+        "max_index_elapsed_ms": max(
+            (int(item.get("index_elapsed_ms", 0)) for item in evidence), default=0
+        ),
+        "measurement": "bounded_local_fixture_index_timing",
+        "purpose": "document_v0_6_parser_resolver_limitations_not_parallelization_or_cache_work",
+    }
+
+
 def human_context_evaluation(envelope: Mapping[str, Any]) -> str:
     """Render a compact human evaluation summary."""
     if not envelope.get("ok", False):
@@ -226,7 +244,9 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
     with tempfile.TemporaryDirectory(prefix="repolens-context-eval-") as temp_dir:
         work_repo = Path(temp_dir) / "repo"
         shutil.copytree(fixture_repo, work_repo)
-        index_repository(work_repo)
+        index_started = time.perf_counter()
+        index_result = index_repository(work_repo)
+        index_elapsed_ms = int((time.perf_counter() - index_started) * 1000)
 
         task = str(case.get("task", ""))
         focus_hints = [str(hint) for hint in _sequence(case.get("focus_hints"))]
@@ -276,6 +296,12 @@ def _evaluate_case(manifest_root: Path, case: Mapping[str, Any]) -> dict[str, An
             preflight_envelope=preflight_envelope,
             expansion_envelope=expansion_envelope,
             artifact_audit_envelope=artifact_audit_envelope,
+            index_evidence={
+                "eligible_file_count": len(index_result.scan.files),
+                "index_elapsed_ms": index_elapsed_ms,
+                "measurement": "bounded_local_fixture_index_timing",
+                "skipped_path_count": len(index_result.scan.skipped),
+            },
             work_repo=work_repo,
         )
         return case_result
@@ -291,6 +317,7 @@ def _case_result(
     preflight_envelope: Mapping[str, Any] | None,
     expansion_envelope: Mapping[str, Any] | None,
     artifact_audit_envelope: Mapping[str, Any] | None,
+    index_evidence: Mapping[str, Any],
     work_repo: Path,
 ) -> dict[str, Any]:
     pack = _mapping(pack_envelope.get("data"))
@@ -312,6 +339,7 @@ def _case_result(
         preflight_envelope=preflight_envelope,
         artifact_audit_envelope=artifact_audit_envelope,
         safety_outcomes=safety_outcomes,
+        graph_fact_outcomes=_graph_fact_outcomes(work_repo, expected=expected),
     )
     context_metrics = _metrics_for_paths(
         first_read_paths,
@@ -345,6 +373,7 @@ def _case_result(
         "corpus": str(case.get("corpus") or "release_blocking"),
         "artifact_audit_evidence": _artifact_audit_evidence(artifact_audit_envelope),
         "id": str(case.get("id", "")),
+        "index_evidence": dict(index_evidence),
         "local_savings": _local_savings_metrics(
             context_metrics=context_metrics,
             lexical_metrics=lexical_metrics,
@@ -374,6 +403,7 @@ def _expectation_checks(
     preflight_envelope: Mapping[str, Any] | None,
     artifact_audit_envelope: Mapping[str, Any] | None,
     safety_outcomes: Mapping[str, bool],
+    graph_fact_outcomes: Mapping[str, bool],
 ) -> list[dict[str, Any]]:
     pack = _mapping(pack_envelope.get("data"))
     checks: list[dict[str, Any]] = []
@@ -469,6 +499,24 @@ def _expectation_checks(
                 f"graph_quality_warning_codes_include:{expected_code}",
                 str(expected_code) in _graph_quality_warning_codes(pack),
             )
+    if "route_hints_include" in expected:
+        for expected_hint in _sequence(expected["route_hints_include"]):
+            mapped_hint = _mapping(expected_hint)
+            label = str(mapped_hint.get("route_path") or mapped_hint.get("framework") or "route")
+            _add_check(
+                checks,
+                f"route_hints_include:{label}",
+                _route_hint_present(pack, expected_hint=mapped_hint),
+            )
+    if "structural_call_chains_include" in expected:
+        for expected_chain in _sequence(expected["structural_call_chains_include"]):
+            mapped_chain = _mapping(expected_chain)
+            label = str(mapped_chain.get("path") or mapped_chain.get("method_names") or "chain")
+            _add_check(
+                checks,
+                f"structural_call_chains_include:{label}",
+                _structural_call_chain_present(pack, expected_chain=mapped_chain),
+            )
     if "ambiguity_candidates_include_any" in expected:
         _add_check(
             checks,
@@ -560,9 +608,26 @@ def _expectation_checks(
             and _mapping(_mapping(artifact_audit_envelope.get("data")).get("summary")).get("passed")
             is expected["artifact_audit_passed"],
         )
+    for name, passed in graph_fact_outcomes.items():
+        _add_check(checks, name, passed)
     for name, passed in safety_outcomes.items():
         _add_check(checks, name, passed)
     return checks
+
+
+def _graph_fact_outcomes(work_repo: Path, *, expected: Mapping[str, Any]) -> dict[str, bool]:
+    outcomes: dict[str, bool] = {}
+    if "javascript_exports_include" not in expected:
+        return outcomes
+    with sqlite3.connect(work_repo / GRAPH_STORE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        for expected_export in _sequence(expected["javascript_exports_include"]):
+            mapped_export = _mapping(expected_export)
+            label = str(mapped_export.get("path") or mapped_export.get("exported_name") or "export")
+            outcomes[f"javascript_exports_include:{label}"] = _javascript_export_present(
+                connection, expected_export=mapped_export
+            )
+    return outcomes
 
 
 def _preflight_evidence(envelope: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -677,6 +742,7 @@ def _metrics_for_paths(
         if approximate_token_estimate is not None
         else _approx_tokens_for_paths(paths),
         "expansion_count": expansion_count,
+        "first_relevant_rank": _first_relevant_rank(paths, relevant_paths),
         "first_read_hit_rate": first_read_hit_rate,
         "irrelevant_file_count": irrelevant_file_count,
         "pack_size": len(paths),
@@ -694,22 +760,26 @@ def _local_savings_metrics(
     not_run_command_count: int,
     stale_graph_risk: bool,
 ) -> dict[str, Any]:
-    context_pack = {
+    context_pack: dict[str, Any] = {
         "approximate_token_estimate": int(context_metrics.get("approximate_token_estimate", 0)),
+        "first_relevant_rank": context_metrics.get("first_relevant_rank"),
         "first_read_hit_rate": float(context_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(context_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": not_run_command_count,
         "pack_size": int(context_metrics.get("pack_size", 0)),
         "stale_graph_risk": stale_graph_risk,
     }
-    lexical = {
+    lexical: dict[str, Any] = {
         "approximate_token_estimate": int(lexical_metrics.get("approximate_token_estimate", 0)),
+        "first_relevant_rank": lexical_metrics.get("first_relevant_rank"),
         "first_read_hit_rate": float(lexical_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(lexical_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": 0,
         "pack_size": int(lexical_metrics.get("pack_size", 0)),
         "stale_graph_risk": False,
     }
+    context_rank = _optional_int(context_metrics.get("first_relevant_rank"))
+    lexical_rank = _optional_int(lexical_metrics.get("first_relevant_rank"))
     return {
         "approx_tokens_avoided_vs_lexical": lexical["approximate_token_estimate"]
         - context_pack["approximate_token_estimate"],
@@ -718,6 +788,9 @@ def _local_savings_metrics(
         "estimate_kind": "local_fixture_metadata_estimate",
         "explanation": _LOCAL_SAVINGS_EXPLANATION,
         "files_avoided_vs_lexical": lexical["pack_size"] - context_pack["pack_size"],
+        "first_relevant_rank_delta_vs_lexical": _rank_delta(
+            context_rank=context_rank, lexical_rank=lexical_rank
+        ),
         "first_read_hit_rate_delta_vs_lexical": round(
             context_pack["first_read_hit_rate"] - lexical["first_read_hit_rate"], 3
         ),
@@ -725,6 +798,28 @@ def _local_savings_metrics(
         "likely_irrelevant_files_avoided_vs_lexical": lexical["likely_irrelevant_file_count"]
         - context_pack["likely_irrelevant_file_count"],
     }
+
+
+def _first_relevant_rank(paths: Sequence[str], relevant_paths: set[str]) -> int | None:
+    if not relevant_paths:
+        return None
+    for index, path in enumerate(paths, start=1):
+        if path in relevant_paths:
+            return index
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _rank_delta(*, context_rank: int | None, lexical_rank: int | None) -> int | None:
+    if context_rank is None or lexical_rank is None:
+        return None
+    return lexical_rank - context_rank
 
 
 def _context_pack_approx_tokens(pack: Mapping[str, Any]) -> int:
@@ -857,6 +952,47 @@ def _relationship_candidate_present(
         ):
             if all(candidate.get(key) == value for key, value in expected_candidate.items()):
                 return True
+    return False
+
+
+def _route_hint_present(pack: Mapping[str, Any], *, expected_hint: Mapping[str, Any]) -> bool:
+    for item in _all_pack_items(pack):
+        for hint in (_mapping(value) for value in _sequence(item.get("route_hints"))):
+            if all(hint.get(key) == value for key, value in expected_hint.items()):
+                return True
+    return False
+
+
+def _structural_call_chain_present(
+    pack: Mapping[str, Any], *, expected_chain: Mapping[str, Any]
+) -> bool:
+    expected_path = str(expected_chain.get("path", ""))
+    expected_methods = [str(value) for value in _sequence(expected_chain.get("method_names"))]
+    for item in _all_pack_items(pack):
+        if expected_path and item.get("path") != expected_path:
+            continue
+        summary = _mapping(item.get("structural_summary"))
+        for chain in (_mapping(value) for value in _sequence(summary.get("call_chains"))):
+            method_names = [str(value) for value in _sequence(chain.get("method_names"))]
+            if expected_methods and method_names != expected_methods:
+                continue
+            return True
+    return False
+
+
+def _javascript_export_present(
+    connection: sqlite3.Connection, *, expected_export: Mapping[str, Any]
+) -> bool:
+    rows = connection.execute(
+        """
+        SELECT path, kind, exported_name, local_name
+        FROM javascript_exports
+        ORDER BY path, kind, exported_name, local_name
+        """
+    )
+    for row in rows:
+        if all(row[key] == value for key, value in expected_export.items()):
+            return True
     return False
 
 
