@@ -163,6 +163,11 @@ def test_graph_export_javascript_fields_match_promoted_contract(tmp_path):
         "export const value = 1;\n",
         encoding="utf-8",
     )
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "page.tsx").write_text(
+        "export default function Page() { return <main />; }\n",
+        encoding="utf-8",
+    )
 
     result = index_repository(tmp_path)
     graph = json.loads((tmp_path / result.graph_exports[0]).read_text(encoding="utf-8"))

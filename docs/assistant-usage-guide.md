@@ -1,8 +1,15 @@
-# RepoLens MCP v0.5 Assistant Usage Guide
+# RepoLens MCP v0.6 Assistant Usage Guide
 
-RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.5, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata.
+RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.6, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata. For JavaScript and TypeScript tasks, preflight may also use parser-backed imports, exports, top-level symbols, resolver outcomes, source-free Call Chain Facts, and Framework Route Hints.
 
 Assistant Preflight and Context Packs are orientation-only. They do not include source snippets, function or method signatures, code bodies, raw comments, paragraph excerpts, raw Agent Guidance instructions, or persisted assistant session state. Use them to choose what to read next, not as a substitute for reading files before editing.
+
+## v0.6 JS/TS Orientation Rules
+
+- Treat Tree-sitter JS/TS facts as default parser-backed metadata only when parser provenance says the backend is available. If RepoLens reports a legacy bounded scanner fallback warning, expect shallower JS/TS structure.
+- Treat Call Chain Facts as structural metadata, not runtime proof. They can help decide what file to read first, but they do not prove a call executes.
+- Treat Framework Route Hints as route-orientation hints, not framework emulation. Next.js App Router hints come from local path and parser evidence, not from running Next.js.
+- Treat resolver outcomes as evidence labels. Unresolved aliases, unsupported package entrypoints, ambiguous exports, or incomplete workspace evidence remain candidates or warnings.
 
 ## Setup Flow
 

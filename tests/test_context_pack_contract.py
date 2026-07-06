@@ -190,6 +190,7 @@ def test_context_pack_fixture_manifest_names_required_case_families():
         "package_workspace",
         "ambiguity",
         "command_classification",
+        "v0_6_js_ts_metadata",
     }
     assert expanded_categories == {"cli_export"}
     assert manifest["default_budget"] == DEFAULT_CONTEXT_PACK_BUDGET

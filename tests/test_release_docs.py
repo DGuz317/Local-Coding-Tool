@@ -251,9 +251,7 @@ def test_v0_4_release_readiness_docs_cover_required_topics() -> None:
     ):
         assert required in limitations
 
-    assert (
-        "RepoLens v0.5 focuses on giving assistants one deterministic preflight workflow" in readme
-    )
+    assert "RepoLens v0.6 focuses on improving JS/TS parser and resolver evidence" in readme
 
 
 def test_v0_5_install_and_adoption_docs_cover_preflight_setup() -> None:
@@ -356,3 +354,30 @@ def test_v0_6_dogfood_evaluation_pack_records_release_gate_coverage() -> None:
         "No-source-disclosure negative",
     ):
         assert required in dogfood
+
+
+def test_v0_6_release_docs_record_final_readiness_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "assistant-usage-guide.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    safety = (ROOT / "docs" / "security-and-artifact-privacy.md").read_text(encoding="utf-8")
+    release_notes = (ROOT / "docs" / "releases" / "v0.6.0.md").read_text(encoding="utf-8")
+
+    combined = "\n".join((readme, guide, limitations, readiness, safety, release_notes))
+
+    for required in (
+        "Tree-sitter JS/TS is the default parser backend",
+        "legacy bounded scanner",
+        "parser-backend warnings",
+        "Call Chain Facts are structural metadata",
+        "Framework Route Hints are deterministic hints",
+        "not framework emulation",
+        "unsupported aliases",
+        "complex package entrypoints",
+        "No PyPI, Docker registry, or hosted publishing automation in v0.6",
+        "Artifact audit evidence",
+        "Maintainer release judgment: approved for v0.6 release",
+        "docs/releases/v0.6.0.md",
+    ):
+        assert required in combined
