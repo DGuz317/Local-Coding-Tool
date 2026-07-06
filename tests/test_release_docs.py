@@ -318,3 +318,41 @@ def test_v0_5_release_readiness_records_final_evidence() -> None:
         "Package/workspace task",
     ):
         assert required in dogfood
+
+
+def test_v0_6_dogfood_evaluation_pack_records_release_gate_coverage() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    dogfood = (ROOT / "docs" / "dogfood" / "2026-07-06-v0.6-dogfood-evaluation-pack.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "Latest local evidence for issue #169",
+        "JS/TS call chains",
+        "re-export behavior",
+        "workspace package imports",
+        "route hints",
+        "no-source-disclosure negatives",
+        "fixture-derived estimates only",
+        "bounded local fixture index timing",
+    ):
+        assert required in readiness
+
+    for required in (
+        "v0.6 dogfood evaluation pack",
+        "Parser timing and file-count evidence are bounded local fixture evidence only",
+        "not to justify parse caches, worker pools, indexing parallelism",
+    ):
+        assert required in limitations
+
+    for required in (
+        "JS/TS workspace aliases and package boundaries",
+        "JS/TS source-free call chains",
+        "JS/TS re-export behavior",
+        "Next.js App Router route hint",
+        "Alias ambiguity",
+        "Stale graph behavior",
+        "No-source-disclosure negative",
+    ):
+        assert required in dogfood
