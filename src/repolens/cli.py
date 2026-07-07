@@ -28,7 +28,7 @@ from repolens.indexer import RepoLensIndexError, index_repository, update_reposi
 from repolens.mcp_server import run_mcp_server
 from repolens.query import QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT, GraphQueryService
 from repolens.report import RepoLensReportError, read_graph_report
-from repolens.semantic_artifact import inspect_semantic_artifact
+from repolens.semantic_artifact import inspect_semantic_artifact, inspect_semantic_source
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
     SEARCH_MAX_RESULTS_LIMIT,
@@ -709,6 +709,54 @@ def audit_artifacts_command(
     typer.echo(human_artifact_audit(envelope), nl=False)
     if not envelope.get("ok", False):
         raise typer.Exit(1)
+
+
+@app.command("semantic-inspect")
+def semantic_inspect(
+    source_path: Annotated[
+        Path,
+        typer.Argument(
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=False,
+            help="Repository-relative Python source path to inspect from semantic artifacts.",
+        ),
+    ],
+    repo_path: Annotated[
+        Path,
+        typer.Option(
+            "--repo-path",
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path containing .repolens artifacts.",
+        ),
+    ] = Path("."),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Inspect indexed semantic artifact metadata for one source file."""
+    result = inspect_semantic_source(repo_path, source_path)
+    data = result.to_cli_data()
+    envelope = {
+        "data": data,
+        "limits": data["limits"],
+        "ok": True,
+        "warnings": list(result.warnings),
+    }
+
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        return
+
+    typer.echo(f"Semantic artifact status: {result.artifact_status.status}")
+    typer.echo(f"Source path: {result.source_path}")
+    typer.echo(f"Source language: {result.source_language or 'unknown'}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
 
 
 @app.command()

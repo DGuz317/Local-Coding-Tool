@@ -123,6 +123,123 @@ def test_cli_can_enable_semantic_artifact_and_status_reports_it(tmp_path):
     assert status_envelope["data"]["semantic_artifact"]["status"] == "present"
 
 
+def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
+    secret_source = "do-not-disclose-semantic-inspect-source"
+    (tmp_path / "app.py").write_text(
+        f"def run():\n    return {secret_source!r}\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert envelope["ok"] is True
+    assert data["schema_version"] == 1
+    assert data["semantic_backend"] == "semantic_skeleton"
+    assert data["parser_backend"] == "tree_sitter_js_ts"
+    assert data["source_language"] == "python"
+    assert data["source_path"] == "app.py"
+    assert data["experimental_status"] == "experimental"
+    assert data["artifact_freshness"] == {
+        "checked_without_live_parse": True,
+        "fingerprint_strategy": "eligible_path_and_size",
+        "fresh": True,
+        "reason": "semantic_artifact_current",
+        "recommended_action": None,
+    }
+    assert data["facts"] == {
+        "calls": [],
+        "definitions": [],
+        "imports": [],
+        "relationships": [],
+    }
+    assert data["limits"] == {
+        "fact_set": "semantic_skeleton_empty",
+        "source_snippets": 0,
+    }
+    assert secret_source not in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_reports_missing_artifact_without_parsing_live_source(tmp_path):
+    secret_source = "missing-artifact-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        f"def run():\n    return {secret_source!r}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert data["artifact_status"]["status"] == "missing"
+    assert data["artifact_freshness"] == {
+        "checked_without_live_parse": True,
+        "fresh": False,
+        "reason": "semantic_artifact_missing",
+        "recommended_action": "repolens index . --experimental-semantic-artifact",
+    }
+    assert data["source_path"] == "app.py"
+    assert data["facts"] == {
+        "calls": [],
+        "definitions": [],
+        "imports": [],
+        "relationships": [],
+    }
+    assert envelope["warnings"] == [
+        "Semantic artifacts are missing; run repolens index with --experimental-semantic-artifact."
+    ]
+    assert secret_source not in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_reports_stale_artifact_with_freshness_metadata(tmp_path):
+    (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+    stale_secret_source = "stale-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        f"def run():\n    return {stale_secret_source!r}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert data["artifact_status"]["status"] == "stale"
+    assert data["artifact_status"]["reason"] == "semantic_source_fingerprint_changed"
+    assert data["semantic_backend"] == "semantic_skeleton"
+    assert data["parser_backend"] == "tree_sitter_js_ts"
+    assert data["source_language"] == "python"
+    assert data["experimental_status"] == "experimental"
+    assert data["artifact_freshness"] == {
+        "checked_without_live_parse": True,
+        "fingerprint_strategy": "eligible_path_and_size",
+        "fresh": False,
+        "reason": "semantic_source_fingerprint_changed",
+        "recommended_action": "repolens index . --experimental-semantic-artifact",
+    }
+    assert envelope["warnings"] == [
+        "Semantic artifacts are stale; re-index before relying on semantic facts."
+    ]
+    assert stale_secret_source not in result.output
+    assert str(tmp_path) not in result.output
+
+
 def _canonical_graph_hash(root) -> str:
     with sqlite3.connect(root / ".repolens" / "graph.sqlite") as connection:
         row = connection.execute(
