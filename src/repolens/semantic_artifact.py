@@ -58,6 +58,43 @@ class SemanticArtifactStatus:
         }
 
 
+@dataclass(frozen=True)
+class SemanticInspectResult:
+    """Source-free semantic artifact inspection for one repository file."""
+
+    source_path: str
+    artifact_status: SemanticArtifactStatus
+    artifact_freshness: dict[str, object]
+    source_language: str | None = None
+    semantic_backend: str | None = None
+    parser_backend: str | None = None
+    experimental_status: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    def to_cli_data(self) -> dict[str, object]:
+        return {
+            "artifact_freshness": self.artifact_freshness,
+            "artifact_status": self.artifact_status.to_cli_data(),
+            "experimental_status": self.experimental_status or SEMANTIC_EXPERIMENTAL_STATUS,
+            "facts": {
+                "calls": [],
+                "definitions": [],
+                "imports": [],
+                "relationships": [],
+            },
+            "limits": {
+                "fact_set": "semantic_skeleton_empty",
+                "source_snippets": 0,
+            },
+            "parser_backend": self.parser_backend,
+            "schema_version": SEMANTIC_SCHEMA_VERSION,
+            "semantic_backend": self.semantic_backend or SEMANTIC_BACKEND,
+            "source_language": self.source_language,
+            "source_path": self.source_path,
+            "warnings": list(self.warnings),
+        }
+
+
 def write_semantic_artifact(
     root: Path,
     scan: ScanResult,
@@ -189,6 +226,62 @@ def inspect_semantic_artifact(root: Path) -> SemanticArtifactStatus:
     )
 
 
+def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInspectResult:
+    """Read source-free semantic metadata for one file from indexed artifacts."""
+    artifact_status = inspect_semantic_artifact(root)
+    normalized_source_path = _normalize_source_path(root, source_path)
+    warnings: list[str] = []
+    artifact_freshness = _artifact_freshness(root)
+    row = None
+    if artifact_status.status in {"present", "stale"}:
+        try:
+            row = _read_semantic_source(root / SEMANTIC_STORE_PATH, normalized_source_path)
+        except sqlite3.Error:
+            row = None
+
+    if artifact_status.status != "present":
+        if artifact_status.status == "missing":
+            warnings.append(
+                "Semantic artifacts are missing; run repolens index with --experimental-semantic-artifact."
+            )
+        elif artifact_status.status == "stale":
+            warnings.append(
+                "Semantic artifacts are stale; re-index before relying on semantic facts."
+            )
+        else:
+            warnings.append("Semantic artifacts cannot be inspected safely.")
+        return SemanticInspectResult(
+            source_path=normalized_source_path,
+            artifact_status=artifact_status,
+            artifact_freshness=artifact_freshness,
+            source_language=str(row["source_language"]) if row is not None else None,
+            semantic_backend=str(row["semantic_backend"]) if row is not None else None,
+            parser_backend=str(row["parser_backend"]) if row is not None else None,
+            experimental_status=str(row["experimental_status"]) if row is not None else None,
+            warnings=tuple(warnings),
+        )
+
+    if row is None:
+        warnings.append("Requested source path is not present in indexed semantic artifacts.")
+        return SemanticInspectResult(
+            source_path=normalized_source_path,
+            artifact_status=artifact_status,
+            artifact_freshness=artifact_freshness,
+            warnings=tuple(warnings),
+        )
+
+    return SemanticInspectResult(
+        source_path=normalized_source_path,
+        artifact_status=artifact_status,
+        artifact_freshness=artifact_freshness,
+        source_language=str(row["source_language"]),
+        semantic_backend=str(row["semantic_backend"]),
+        parser_backend=str(row["parser_backend"]),
+        experimental_status=str(row["experimental_status"]),
+        warnings=tuple(warnings),
+    )
+
+
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -219,6 +312,75 @@ def _read_metadata(path: Path) -> dict[str, str]:
         }
 
 
+def _read_semantic_source(artifact: Path, source_path: str) -> sqlite3.Row | None:
+    with sqlite3.connect(artifact) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            """
+            SELECT
+                source_language,
+                semantic_backend,
+                parser_backend,
+                experimental_status
+            FROM semantic_sources
+            WHERE source_path = ?
+            """,
+            (source_path,),
+        ).fetchone()
+
+
+def _artifact_freshness(root: Path) -> dict[str, object]:
+    artifact = root / SEMANTIC_STORE_PATH
+    if not artifact.exists() or artifact.is_symlink():
+        return {
+            "fresh": False,
+            "reason": "semantic_artifact_missing",
+            "checked_without_live_parse": True,
+            "recommended_action": "repolens index . --experimental-semantic-artifact",
+        }
+
+    try:
+        metadata = _read_metadata(artifact)
+    except sqlite3.Error:
+        return {
+            "fresh": False,
+            "reason": "semantic_artifact_unreadable",
+            "checked_without_live_parse": True,
+            "recommended_action": "repolens index . --experimental-semantic-artifact",
+        }
+
+    schema_version = metadata.get("schema_version")
+    if schema_version != str(SEMANTIC_SCHEMA_VERSION):
+        return {
+            "fresh": False,
+            "reason": "semantic_schema_version_unsupported",
+            "checked_without_live_parse": True,
+            "detected_schema_version": schema_version,
+            "recommended_action": "repolens index . --experimental-semantic-artifact",
+        }
+
+    try:
+        scan = scan_repository(root)
+    except ScanError:
+        return {
+            "fresh": False,
+            "reason": "semantic_live_scan_failed",
+            "checked_without_live_parse": True,
+            "recommended_action": "repolens index . --experimental-semantic-artifact",
+        }
+
+    fresh = metadata.get("source_fingerprint") == _source_fingerprint(scan.files)
+    return {
+        "fresh": fresh,
+        "reason": "semantic_artifact_current" if fresh else "semantic_source_fingerprint_changed",
+        "checked_without_live_parse": True,
+        "fingerprint_strategy": "eligible_path_and_size",
+        "recommended_action": None
+        if fresh
+        else "repolens index . --experimental-semantic-artifact",
+    }
+
+
 def _source_fingerprint(files: tuple[ScannedFile, ...]) -> str:
     payload = [(file.path, file.size_bytes) for file in sorted(files, key=lambda item: item.path)]
     return hashlib.sha256(_json_value(payload).encode("utf-8")).hexdigest()
@@ -233,6 +395,19 @@ def _language_for_path(path: str) -> str:
     if suffix in JAVASCRIPT_SOURCE_SUFFIXES:
         return "javascript"
     return "unsupported"
+
+
+def _normalize_source_path(root: Path, source_path: Path | str) -> str:
+    path = Path(source_path)
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(root.resolve())
+        except ValueError:
+            return path.name
+    normalized = PurePosixPath(path.as_posix()).as_posix()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "."
 
 
 def _json_value(value: Any) -> str:
