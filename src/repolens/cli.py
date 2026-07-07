@@ -28,6 +28,7 @@ from repolens.indexer import RepoLensIndexError, index_repository, update_reposi
 from repolens.mcp_server import run_mcp_server
 from repolens.query import QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT, GraphQueryService
 from repolens.report import RepoLensReportError, read_graph_report
+from repolens.semantic_artifact import inspect_semantic_artifact
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
     SEARCH_MAX_RESULTS_LIMIT,
@@ -74,11 +75,21 @@ def index(
             help="Also write .repolens/graph-index-full.md; this may be large.",
         ),
     ] = False,
+    experimental_semantic_artifact: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-artifact",
+            help="Also write experimental .repolens/semantic.sqlite metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
         result = index_repository(
-            repo_path, parser_backend=parser_backend, full_graph_index=full_index
+            repo_path,
+            parser_backend=parser_backend,
+            full_graph_index=full_index,
+            experimental_semantic_artifact=experimental_semantic_artifact,
         )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
@@ -276,10 +287,21 @@ def update(
             help="Parser backend to use: default, stable, tree_sitter_js_ts, or experimental.",
         ),
     ] = "default",
+    experimental_semantic_artifact: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-artifact",
+            help="Also write experimental .repolens/semantic.sqlite metadata.",
+        ),
+    ] = False,
 ) -> None:
     """Update RepoLens artifacts using live file change classification."""
     try:
-        result = update_repository(repo_path, parser_backend=parser_backend)
+        result = update_repository(
+            repo_path,
+            parser_backend=parser_backend,
+            experimental_semantic_artifact=experimental_semantic_artifact,
+        )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
@@ -709,6 +731,7 @@ def status(
 ) -> None:
     """Report whether RepoLens graph artifacts are available."""
     graph_status = inspect_graph_artifacts(repo_path)
+    semantic_status = inspect_semantic_artifact(repo_path)
     missing_artifacts = list(graph_status.missing_artifacts)
     recommended_action = f"repolens index {shlex.quote(str(repo_path))}"
 
@@ -723,6 +746,7 @@ def status(
         if graph_status.status in {"stale", "rebuild_required"}
         else None,
         "repo_path": str(repo_path),
+        "semantic_artifact": semantic_status.to_cli_data(),
         "status": graph_status.status,
         "supported_schema_version": graph_status.supported_schema_version,
     }
