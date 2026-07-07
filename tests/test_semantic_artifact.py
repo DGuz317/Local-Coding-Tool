@@ -43,7 +43,7 @@ def test_experimental_semantic_artifact_records_source_free_metadata(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "1"
+    assert metadata["schema_version"] == "2"
     assert metadata["semantic_backend"] == "semantic_skeleton"
     assert metadata["parser_backend"] == "tree_sitter_js_ts"
     assert metadata["experimental_status"] == "experimental"
@@ -140,7 +140,7 @@ def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
     envelope = json.loads(result.output)
     data = envelope["data"]
     assert envelope["ok"] is True
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["semantic_backend"] == "semantic_skeleton"
     assert data["parser_backend"] == "tree_sitter_js_ts"
     assert data["source_language"] == "python"
@@ -155,6 +155,7 @@ def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
     }
     assert data["facts"] == {
         "calls": [],
+        "control_flow": [],
         "definitions": [],
         "imports": [],
         "relationships": [],
@@ -192,6 +193,7 @@ def test_semantic_inspect_reports_missing_artifact_without_parsing_live_source(t
     assert data["source_path"] == "app.py"
     assert data["facts"] == {
         "calls": [],
+        "control_flow": [],
         "definitions": [],
         "imports": [],
         "relationships": [],
@@ -238,6 +240,111 @@ def test_semantic_inspect_reports_stale_artifact_with_freshness_metadata(tmp_pat
     ]
     assert stale_secret_source not in result.output
     assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_returns_source_free_python_branch_cfg(tmp_path):
+    secret_source = "secret-branch-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        "def choose(value):\n"
+        "    if value == 1:\n"
+        "        return 'one'\n"
+        "    elif value == 2:\n"
+        f"        return {secret_source!r}\n"
+        "    else:\n"
+        "        return 'other'\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    control_flow = data["facts"]["control_flow"]
+    assert data["limits"] == {"fact_set": "python_branch_cfg", "source_snippets": 0}
+    assert len(control_flow) == 1
+    fact = control_flow[0]
+    assert fact["source_path"] == "app.py"
+    assert fact["function"] == {
+        "identity": "app.py:choose:1-7",
+        "line_range": {"start": 1, "end": 7},
+        "name": "choose",
+    }
+    assert [node["kind"] for node in fact["nodes"]] == [
+        "entry",
+        "branch",
+        "return",
+        "branch",
+        "return",
+        "return",
+        "exit",
+    ]
+    assert {edge["kind"] for edge in fact["edges"]} == {
+        "next",
+        "true_branch",
+        "false_branch",
+    }
+    assert fact["confidence"] == "candidate"
+    assert fact["evidence_labels"] == [
+        "scanner:eligible_file",
+        "semantic:skeleton",
+        "python:ast",
+        "semantic:python_branch_cfg",
+    ]
+    assert fact["warnings"] == []
+    assert secret_source not in result.output
+    assert "value == 1" not in result.output
+    assert "value == 2" not in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_returns_nested_multiple_return_and_unsupported_cfg(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "def nested(value):\n"
+        "    if value:\n"
+        "        if value > 10:\n"
+        "            return 10\n"
+        "    return 0\n"
+        "\n"
+        "def unsupported(value):\n"
+        "    if check(value):\n"
+        "        return 1\n"
+        "    while value:\n"
+        "        value -= 1\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    facts = envelope["data"]["facts"]["control_flow"]
+    assert [fact["function"]["name"] for fact in facts] == ["nested", "unsupported"]
+
+    nested = facts[0]
+    assert [node["kind"] for node in nested["nodes"]].count("branch") == 2
+    assert [node["kind"] for node in nested["nodes"]].count("return") == 2
+    assert nested["warnings"] == []
+
+    unsupported = facts[1]
+    assert "unsupported" in [node["kind"] for node in unsupported["nodes"]]
+    assert unsupported["warnings"] == [
+        "unsupported_dynamic_branch_condition",
+        "unsupported_statement:While",
+    ]
+    assert any(
+        node["kind"] == "unsupported" and node["warnings"] == ["unsupported_cfg_node"]
+        for node in unsupported["nodes"]
+    )
 
 
 def _canonical_graph_hash(root) -> str:
