@@ -26,7 +26,7 @@ from repolens.scanner import (
     scan_repository,
 )
 
-SEMANTIC_SCHEMA_VERSION = 2
+SEMANTIC_SCHEMA_VERSION = 3
 SEMANTIC_STORE_FILENAME = "semantic.sqlite"
 SEMANTIC_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{SEMANTIC_STORE_FILENAME}"
 SEMANTIC_BACKEND = "semantic_skeleton"
@@ -38,6 +38,12 @@ PYTHON_CFG_EVIDENCE_LABELS = (
     "semantic:skeleton",
     "python:ast",
     "semantic:python_branch_cfg",
+)
+PYTHON_BINDING_EVIDENCE_LABELS = (
+    "scanner:eligible_file",
+    "semantic:skeleton",
+    "python:ast",
+    "semantic:python_lexical_bindings",
 )
 
 
@@ -77,6 +83,7 @@ class SemanticInspectResult:
     parser_backend: str | None = None
     experimental_status: str | None = None
     control_flow: tuple[dict[str, object], ...] = ()
+    bindings: tuple[dict[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
 
     def to_cli_data(self) -> dict[str, object]:
@@ -86,6 +93,7 @@ class SemanticInspectResult:
             "experimental_status": self.experimental_status or SEMANTIC_EXPERIMENTAL_STATUS,
             "facts": {
                 "calls": [],
+                "bindings": list(self.bindings),
                 "control_flow": list(self.control_flow),
                 "definitions": [],
                 "imports": [],
@@ -160,6 +168,7 @@ def write_semantic_artifact(
                     _json_value(SEMANTIC_EVIDENCE_LABELS),
                     SEMANTIC_EXPERIMENTAL_STATUS,
                     _json_value(_python_cfg_facts(root, file, backend.name)),
+                    _json_value(_python_binding_facts(root, file, backend.name)),
                 )
                 for file in sorted(scan.files, key=lambda item: item.path)
                 if _language_for_path(file.path) in {"python", "javascript", "typescript"}
@@ -175,8 +184,9 @@ def write_semantic_artifact(
                     confidence,
                     evidence_labels_json,
                     experimental_status,
-                    control_flow_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    control_flow_json,
+                    bindings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 source_rows,
             )
@@ -271,6 +281,7 @@ def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInsp
             parser_backend=str(row["parser_backend"]) if row is not None else None,
             experimental_status=str(row["experimental_status"]) if row is not None else None,
             control_flow=_row_control_flow(row),
+            bindings=_row_bindings(row),
             warnings=tuple(warnings),
         )
 
@@ -292,6 +303,7 @@ def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInsp
         parser_backend=str(row["parser_backend"]),
         experimental_status=str(row["experimental_status"]),
         control_flow=_row_control_flow(row),
+        bindings=_row_bindings(row),
         warnings=tuple(warnings),
     )
 
@@ -313,7 +325,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             confidence TEXT NOT NULL,
             evidence_labels_json TEXT NOT NULL,
             experimental_status TEXT NOT NULL,
-            control_flow_json TEXT NOT NULL
+            control_flow_json TEXT NOT NULL,
+            bindings_json TEXT NOT NULL
         ) WITHOUT ROWID;
         """
     )
@@ -337,7 +350,8 @@ def _read_semantic_source(artifact: Path, source_path: str) -> sqlite3.Row | Non
                 semantic_backend,
                 parser_backend,
                 experimental_status,
-                control_flow_json
+                control_flow_json,
+                bindings_json
             FROM semantic_sources
             WHERE source_path = ?
             """,
@@ -427,6 +441,296 @@ def _python_cfg_facts(
         ):
             facts.append(_build_function_cfg(file.path, node, parser_backend))
     return facts
+
+
+def _python_binding_facts(
+    root: Path, file: ScannedFile, parser_backend: str
+) -> list[dict[str, object]]:
+    if _language_for_path(file.path) != "python":
+        return []
+    try:
+        tree = ast.parse((root / file.path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return [
+            {
+                "source_path": file.path,
+                "scope": _scope_metadata(file.path, "module", "<module>", None, tree_node=None),
+                "warnings": ["python_bindings_parse_failed"],
+                "evidence_labels": list(PYTHON_BINDING_EVIDENCE_LABELS),
+                "confidence": SEMANTIC_CONFIDENCE,
+                "provenance": _binding_provenance(parser_backend),
+            }
+        ]
+
+    tracer = _BindingTracer(file.path, parser_backend)
+    return tracer.trace(tree)
+
+
+class _BindingTracer:
+    def __init__(self, source_path: str, parser_backend: str) -> None:
+        self.source_path = source_path
+        self.parser_backend = parser_backend
+
+    def trace(self, tree: ast.Module) -> list[dict[str, object]]:
+        facts = [self._scope_fact("module", "<module>", tree.body, None)]
+        for statement in tree.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                facts.append(self._function_scope_fact(statement))
+        return [fact for fact in facts if _binding_scope_has_content(fact)]
+
+    def _function_scope_fact(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> dict[str, object]:
+        fact = self._scope_fact("function", function.name, function.body, function)
+        parameters = [
+            _definition_entry(argument.arg, "parameter", argument)
+            for argument in _arguments(function)
+        ]
+        fact["parameters"] = parameters
+        fact["definitions"] = sorted(
+            [*parameters, *_binding_entries(fact, "definitions")], key=_binding_entry_sort_key
+        )
+        fact["resolved_names"] = _resolved_reference_entries(fact)
+        fact["unresolved_names"] = _unresolved_reference_entries(fact)
+        if isinstance(function, ast.AsyncFunctionDef):
+            fact["warnings"] = sorted(
+                [*_binding_warnings_from_fact(fact), "unsupported_async_function"]
+            )
+        return fact
+
+    def _scope_fact(
+        self,
+        scope_kind: str,
+        scope_name: str,
+        statements: list[ast.stmt],
+        scope_node: ast.AST | None,
+    ) -> dict[str, object]:
+        definitions: list[dict[str, object]] = []
+        references: list[dict[str, object]] = []
+        warnings: list[str] = []
+        for statement in statements:
+            definitions.extend(_definition_entries(statement))
+            references.extend(_reference_entries(statement))
+            warnings.extend(_binding_warnings(statement))
+        assigned_names = [item for item in definitions if item["kind"] == "assignment"]
+        imported_names = [item for item in definitions if item["kind"] == "import"]
+        fact: dict[str, object] = {
+            "source_path": self.source_path,
+            "scope": _scope_metadata(
+                self.source_path, scope_kind, scope_name, statements, tree_node=scope_node
+            ),
+            "definitions": sorted(definitions, key=_binding_entry_sort_key),
+            "parameters": [],
+            "assigned_names": sorted(assigned_names, key=_binding_entry_sort_key),
+            "imported_names": sorted(imported_names, key=_binding_entry_sort_key),
+            "references": sorted(references, key=_binding_entry_sort_key),
+            "resolved_names": [],
+            "unresolved_names": [],
+            "warnings": sorted(set(warnings)),
+            "confidence": SEMANTIC_CONFIDENCE,
+            "evidence_labels": list(PYTHON_BINDING_EVIDENCE_LABELS),
+            "provenance": _binding_provenance(self.parser_backend),
+        }
+        fact["resolved_names"] = _resolved_reference_entries(fact)
+        fact["unresolved_names"] = _unresolved_reference_entries(fact)
+        return fact
+
+
+def _definition_entries(statement: ast.stmt) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    if isinstance(statement, ast.Import):
+        for alias in statement.names:
+            entries.append(_definition_entry(_imported_name(alias), "import", statement))
+        return entries
+    if isinstance(statement, ast.ImportFrom):
+        for alias in statement.names:
+            if alias.name != "*":
+                entries.append(_definition_entry(_imported_name(alias), "import", statement))
+        return entries
+    if isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+        targets = _assignment_targets(statement)
+        return [_definition_entry(name, "assignment", node) for name, node in targets]
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        entries.append(_definition_entry(statement.name, "function", statement))
+    return entries
+
+
+def _reference_entries(statement: ast.stmt) -> list[dict[str, object]]:
+    references: list[dict[str, object]] = []
+    for node in _iter_binding_nodes(statement):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            references.append(_reference_entry(node.id, node))
+    return references
+
+
+def _binding_warnings(statement: ast.stmt) -> list[str]:
+    warnings: list[str] = []
+    for node in _iter_binding_nodes(statement):
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            warnings.append("unresolved_star_import")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            warnings.append("dynamic_binding_unresolved")
+    return warnings
+
+
+def _iter_binding_nodes(statement: ast.stmt) -> list[ast.AST]:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [statement]
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = [statement]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            children = [child for child in ast.iter_child_nodes(node) if child is not node.func]
+        else:
+            children = list(ast.iter_child_nodes(node))
+        for child in reversed(children):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            stack.append(child)
+    return nodes
+
+
+def _assignment_targets(statement: ast.stmt) -> list[tuple[str, ast.AST]]:
+    targets: list[ast.AST] = []
+    if isinstance(statement, ast.Assign):
+        targets.extend(statement.targets)
+    elif isinstance(statement, ast.AnnAssign):
+        targets.append(statement.target)
+    elif isinstance(statement, ast.AugAssign):
+        targets.append(statement.target)
+    elif isinstance(statement, (ast.For, ast.AsyncFor)):
+        targets.append(statement.target)
+    names: list[tuple[str, ast.AST]] = []
+    for target in targets:
+        names.extend(_target_names(target))
+    return names
+
+
+def _target_names(node: ast.AST) -> list[tuple[str, ast.AST]]:
+    if isinstance(node, ast.Name):
+        return [(node.id, node)]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[tuple[str, ast.AST]] = []
+        for element in node.elts:
+            names.extend(_target_names(element))
+        return names
+    return []
+
+
+def _arguments(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.arg]:
+    args = [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
+    if function.args.vararg is not None:
+        args.append(function.args.vararg)
+    if function.args.kwarg is not None:
+        args.append(function.args.kwarg)
+    return args
+
+
+def _definition_entry(name: str, kind: str, node: ast.AST) -> dict[str, object]:
+    return {"name": name, "kind": kind, "line_range": _line_range(node)}
+
+
+def _reference_entry(name: str, node: ast.AST) -> dict[str, object]:
+    return {"name": name, "kind": "reference", "line_range": _line_range(node)}
+
+
+def _imported_name(alias: ast.alias) -> str:
+    if alias.asname is not None:
+        return alias.asname
+    return alias.name.split(".", 1)[0]
+
+
+def _resolved_reference_entries(fact: dict[str, object]) -> list[dict[str, object]]:
+    defined = {str(item["name"]) for item in _binding_entries(fact, "definitions")}
+    return sorted(
+        [
+            {**reference, "resolution": "local_definition"}
+            for reference in _binding_entries(fact, "references")
+            if str(reference["name"]) in defined
+        ],
+        key=_binding_entry_sort_key,
+    )
+
+
+def _unresolved_reference_entries(fact: dict[str, object]) -> list[dict[str, object]]:
+    defined = {str(item["name"]) for item in _binding_entries(fact, "definitions")}
+    return sorted(
+        [
+            {**reference, "resolution": "unresolved"}
+            for reference in _binding_entries(fact, "references")
+            if str(reference["name"]) not in defined
+        ],
+        key=_binding_entry_sort_key,
+    )
+
+
+def _binding_scope_has_content(fact: dict[str, object]) -> bool:
+    return any(
+        fact[key]
+        for key in (
+            "definitions",
+            "parameters",
+            "assigned_names",
+            "imported_names",
+            "references",
+            "warnings",
+        )
+    )
+
+
+def _binding_entries(fact: dict[str, object], key: str) -> list[dict[str, object]]:
+    value = fact.get(key, [])
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _binding_warnings_from_fact(fact: dict[str, object]) -> list[str]:
+    value = fact.get("warnings", [])
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _binding_entry_sort_key(item: dict[str, object]) -> tuple[int, int, str, str]:
+    line_range = item.get("line_range", {})
+    start = _line_range_number(line_range, "start", 0)
+    end = _line_range_number(line_range, "end", start)
+    return (start, end, str(item.get("kind", "")), str(item.get("name", "")))
+
+
+def _line_range_number(value: object, key: str, default: int) -> int:
+    if not isinstance(value, dict):
+        return default
+    candidate = value.get(key, default)
+    return candidate if isinstance(candidate, int) else default
+
+
+def _scope_metadata(
+    source_path: str,
+    kind: str,
+    name: str,
+    statements: list[ast.stmt] | None,
+    *,
+    tree_node: ast.AST | None,
+) -> dict[str, object]:
+    if tree_node is not None:
+        line_range = _line_range(tree_node)
+    elif statements:
+        line_range = {
+            "start": min(_line_range(statement)["start"] for statement in statements),
+            "end": max(_line_range(statement)["end"] for statement in statements),
+        }
+    else:
+        line_range = {"start": 1, "end": 1}
+    return {
+        "identity": f"{source_path}:{name}:{line_range['start']}-{line_range['end']}",
+        "kind": kind,
+        "name": name,
+        "line_range": line_range,
+    }
 
 
 def _build_function_cfg(
@@ -644,11 +948,31 @@ def _cfg_provenance(parser_backend: str) -> dict[str, object]:
     }
 
 
+def _binding_provenance(parser_backend: str) -> dict[str, object]:
+    return {
+        "semantic_backend": SEMANTIC_BACKEND,
+        "parser_backend": parser_backend,
+        "source": "python_ast",
+    }
+
+
 def _row_control_flow(row: sqlite3.Row | None) -> tuple[dict[str, object], ...]:
     if row is None:
         return ()
     try:
         payload = json.loads(str(row["control_flow_json"]))
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _row_bindings(row: sqlite3.Row | None) -> tuple[dict[str, object], ...]:
+    if row is None:
+        return ()
+    try:
+        payload = json.loads(str(row["bindings_json"]))
     except (KeyError, TypeError, json.JSONDecodeError):
         return ()
     if not isinstance(payload, list):

@@ -43,7 +43,7 @@ def test_experimental_semantic_artifact_records_source_free_metadata(tmp_path):
             )
         )
 
-    assert metadata["schema_version"] == "2"
+    assert metadata["schema_version"] == "3"
     assert metadata["semantic_backend"] == "semantic_skeleton"
     assert metadata["parser_backend"] == "tree_sitter_js_ts"
     assert metadata["experimental_status"] == "experimental"
@@ -140,7 +140,7 @@ def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
     envelope = json.loads(result.output)
     data = envelope["data"]
     assert envelope["ok"] is True
-    assert data["schema_version"] == 2
+    assert data["schema_version"] == 3
     assert data["semantic_backend"] == "semantic_skeleton"
     assert data["parser_backend"] == "tree_sitter_js_ts"
     assert data["source_language"] == "python"
@@ -154,6 +154,10 @@ def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
         "recommended_action": None,
     }
     assert data["facts"]["calls"] == []
+    assert [fact["scope"]["kind"] for fact in data["facts"]["bindings"]] == ["module"]
+    assert data["facts"]["bindings"][0]["definitions"] == [
+        {"kind": "function", "line_range": {"start": 1, "end": 2}, "name": "run"}
+    ]
     assert data["facts"]["definitions"] == []
     assert data["facts"]["imports"] == []
     assert data["facts"]["relationships"] == []
@@ -190,6 +194,7 @@ def test_semantic_inspect_reports_missing_artifact_without_parsing_live_source(t
     assert data["source_path"] == "app.py"
     assert data["facts"] == {
         "calls": [],
+        "bindings": [],
         "control_flow": [],
         "definitions": [],
         "imports": [],
@@ -296,6 +301,72 @@ def test_semantic_inspect_returns_source_free_python_branch_cfg(tmp_path):
     assert secret_source not in result.output
     assert "value == 1" not in result.output
     assert "value == 2" not in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_returns_source_free_python_lexical_bindings(tmp_path):
+    secret_source = "binding-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        "import json\n"
+        "from os import path as ospath\n"
+        "from plugin import *\n"
+        "module_value = json.loads('1')\n"
+        "\n"
+        "def transform(item, fallback):\n"
+        "    local = item\n"
+        "    global dynamic_name\n"
+        "    return local + missing_name + fallback\n"
+        f"hidden = {secret_source!r}\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    bindings = envelope["data"]["facts"]["bindings"]
+    assert [fact["scope"]["kind"] for fact in bindings] == ["module", "function"]
+
+    module = bindings[0]
+    assert module["source_path"] == "app.py"
+    assert [item["name"] for item in module["imported_names"]] == ["json", "ospath"]
+    assert [item["name"] for item in module["assigned_names"]] == [
+        "module_value",
+        "hidden",
+    ]
+    assert [item["name"] for item in module["resolved_names"]] == ["json"]
+    assert module["warnings"] == ["unresolved_star_import"]
+
+    function = bindings[1]
+    assert function["scope"] == {
+        "identity": "app.py:transform:6-9",
+        "kind": "function",
+        "line_range": {"start": 6, "end": 9},
+        "name": "transform",
+    }
+    assert [item["name"] for item in function["parameters"]] == ["item", "fallback"]
+    assert [item["name"] for item in function["assigned_names"]] == ["local"]
+    assert [item["name"] for item in function["resolved_names"]] == [
+        "item",
+        "fallback",
+        "local",
+    ]
+    assert [item["name"] for item in function["unresolved_names"]] == ["missing_name"]
+    assert function["confidence"] == "candidate"
+    assert function["evidence_labels"] == [
+        "scanner:eligible_file",
+        "semantic:skeleton",
+        "python:ast",
+        "semantic:python_lexical_bindings",
+    ]
+    assert function["provenance"]["source"] == "python_ast"
+    assert function["warnings"] == ["dynamic_binding_unresolved"]
+    assert secret_source not in result.output
+    assert "local + missing_name" not in result.output
     assert str(tmp_path) not in result.output
 
 
