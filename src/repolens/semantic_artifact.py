@@ -453,9 +453,12 @@ class _CfgBuilder:
         self.edges: list[dict[str, object]] = []
         self.warnings: list[str] = []
         self.counter = 0
+        self.loop_stack: list[str] = []
         self.entry_id = self._add_node("entry", function)
         self.counter += 1
         self.exit_id = f"exit:{self.counter:04d}"
+        if isinstance(function, ast.AsyncFunctionDef):
+            self.warnings.append("unsupported_async_function")
 
     def build(self, statements: list[ast.stmt]) -> None:
         finals = self._sequence(statements, [(self.entry_id, "next")])
@@ -504,11 +507,47 @@ class _CfgBuilder:
                     else [(branch_id, "false_branch")]
                 )
                 current = true_finals + false_finals
+            elif isinstance(statement, (ast.For, ast.While)):
+                loop_id = self._add_node("loop", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, loop_id, edge_kind)
+                self.loop_stack.append(loop_id)
+                body_finals = self._sequence(statement.body, [(loop_id, "loop_body")])
+                self.loop_stack.pop()
+                for source_id, edge_kind in body_finals:
+                    self._add_edge(source_id, loop_id, edge_kind)
+                if statement.orelse:
+                    self.warnings.append("unsupported_loop_else")
+                current = [(loop_id, "loop_exit")]
+            elif isinstance(statement, ast.Break):
+                break_id = self._add_node("break", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, break_id, edge_kind)
+                if self.loop_stack:
+                    self._add_edge(break_id, self.loop_stack[-1], "loop_exit")
+                else:
+                    self.warnings.append("unsupported_break_outside_loop")
+                current = []
+            elif isinstance(statement, ast.Continue):
+                continue_id = self._add_node("continue", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, continue_id, edge_kind)
+                if self.loop_stack:
+                    self._add_edge(continue_id, self.loop_stack[-1], "continue_loop")
+                else:
+                    self.warnings.append("unsupported_continue_outside_loop")
+                current = []
             elif isinstance(statement, ast.Return):
                 return_id = self._add_node("return", statement)
                 for source_id, edge_kind in current:
                     self._add_edge(source_id, return_id, edge_kind)
                 self._add_edge(return_id, self.exit_id, "next")
+                current = []
+            elif isinstance(statement, ast.Raise):
+                raise_id = self._add_node("raise", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, raise_id, edge_kind)
+                self._add_edge(raise_id, self.exit_id, "next")
                 current = []
             elif _unsupported_statement(statement):
                 unsupported_id = self._add_node("unsupported", statement)
@@ -552,24 +591,41 @@ def _unsupported_branch_condition(node: ast.AST) -> bool:
 
 
 def _unsupported_statement(node: ast.stmt) -> bool:
+    if isinstance(node, ast.Expr) and _contains_uncertain_expression(node):
+        return True
     return isinstance(
         node,
         (
-            ast.For,
             ast.AsyncFor,
-            ast.While,
             ast.Try,
             ast.With,
             ast.AsyncWith,
             ast.Match,
-            ast.Raise,
         ),
     )
 
 
+def _contains_uncertain_expression(node: ast.AST) -> bool:
+    return any(isinstance(child, (ast.Await, ast.Yield, ast.YieldFrom)) for child in ast.walk(node))
+
+
 def _has_cfg_relevant_node(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return any(
-        isinstance(node, ast.If) or (isinstance(node, ast.stmt) and _unsupported_statement(node))
+        isinstance(
+            node,
+            (
+                ast.If,
+                ast.For,
+                ast.While,
+                ast.Break,
+                ast.Continue,
+                ast.Return,
+                ast.Raise,
+                ast.Yield,
+                ast.YieldFrom,
+            ),
+        )
+        or (isinstance(node, ast.stmt) and _unsupported_statement(node))
         for node in ast.walk(function)
     )
 
