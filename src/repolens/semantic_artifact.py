@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -25,13 +26,19 @@ from repolens.scanner import (
     scan_repository,
 )
 
-SEMANTIC_SCHEMA_VERSION = 1
+SEMANTIC_SCHEMA_VERSION = 2
 SEMANTIC_STORE_FILENAME = "semantic.sqlite"
 SEMANTIC_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{SEMANTIC_STORE_FILENAME}"
 SEMANTIC_BACKEND = "semantic_skeleton"
 SEMANTIC_EXPERIMENTAL_STATUS = "experimental"
 SEMANTIC_CONFIDENCE = "candidate"
 SEMANTIC_EVIDENCE_LABELS = ("scanner:eligible_file", "semantic:skeleton")
+PYTHON_CFG_EVIDENCE_LABELS = (
+    "scanner:eligible_file",
+    "semantic:skeleton",
+    "python:ast",
+    "semantic:python_branch_cfg",
+)
 
 
 class SemanticArtifactError(RuntimeError):
@@ -69,6 +76,7 @@ class SemanticInspectResult:
     semantic_backend: str | None = None
     parser_backend: str | None = None
     experimental_status: str | None = None
+    control_flow: tuple[dict[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
 
     def to_cli_data(self) -> dict[str, object]:
@@ -78,12 +86,13 @@ class SemanticInspectResult:
             "experimental_status": self.experimental_status or SEMANTIC_EXPERIMENTAL_STATUS,
             "facts": {
                 "calls": [],
+                "control_flow": list(self.control_flow),
                 "definitions": [],
                 "imports": [],
                 "relationships": [],
             },
             "limits": {
-                "fact_set": "semantic_skeleton_empty",
+                "fact_set": "python_branch_cfg" if self.control_flow else "semantic_skeleton_empty",
                 "source_snippets": 0,
             },
             "parser_backend": self.parser_backend,
@@ -134,6 +143,27 @@ def write_semantic_artifact(
                 "INSERT INTO metadata(key, value) VALUES (?, ?)",
                 sorted(metadata.items()),
             )
+            source_rows = [
+                (
+                    file.path,
+                    _language_for_path(file.path),
+                    SEMANTIC_BACKEND,
+                    backend.name,
+                    _json_value(
+                        {
+                            "parser_backend": backend.name,
+                            "parser_backend_provenance": parser_provenance,
+                            "semantic_backend": SEMANTIC_BACKEND,
+                        }
+                    ),
+                    SEMANTIC_CONFIDENCE,
+                    _json_value(SEMANTIC_EVIDENCE_LABELS),
+                    SEMANTIC_EXPERIMENTAL_STATUS,
+                    _json_value(_python_cfg_facts(root, file, backend.name)),
+                )
+                for file in sorted(scan.files, key=lambda item: item.path)
+                if _language_for_path(file.path) in {"python", "javascript", "typescript"}
+            ]
             connection.executemany(
                 """
                 INSERT INTO semantic_sources(
@@ -144,29 +174,11 @@ def write_semantic_artifact(
                     provenance_json,
                     confidence,
                     evidence_labels_json,
-                    experimental_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    experimental_status,
+                    control_flow_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [
-                    (
-                        file.path,
-                        _language_for_path(file.path),
-                        SEMANTIC_BACKEND,
-                        backend.name,
-                        _json_value(
-                            {
-                                "parser_backend": backend.name,
-                                "parser_backend_provenance": parser_provenance,
-                                "semantic_backend": SEMANTIC_BACKEND,
-                            }
-                        ),
-                        SEMANTIC_CONFIDENCE,
-                        _json_value(SEMANTIC_EVIDENCE_LABELS),
-                        SEMANTIC_EXPERIMENTAL_STATUS,
-                    )
-                    for file in sorted(scan.files, key=lambda item: item.path)
-                    if _language_for_path(file.path) in {"python", "javascript", "typescript"}
-                ],
+                source_rows,
             )
             connection.commit()
         os.replace(temp_path, target)
@@ -258,6 +270,7 @@ def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInsp
             semantic_backend=str(row["semantic_backend"]) if row is not None else None,
             parser_backend=str(row["parser_backend"]) if row is not None else None,
             experimental_status=str(row["experimental_status"]) if row is not None else None,
+            control_flow=_row_control_flow(row),
             warnings=tuple(warnings),
         )
 
@@ -278,6 +291,7 @@ def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInsp
         semantic_backend=str(row["semantic_backend"]),
         parser_backend=str(row["parser_backend"]),
         experimental_status=str(row["experimental_status"]),
+        control_flow=_row_control_flow(row),
         warnings=tuple(warnings),
     )
 
@@ -298,7 +312,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             provenance_json TEXT NOT NULL,
             confidence TEXT NOT NULL,
             evidence_labels_json TEXT NOT NULL,
-            experimental_status TEXT NOT NULL
+            experimental_status TEXT NOT NULL,
+            control_flow_json TEXT NOT NULL
         ) WITHOUT ROWID;
         """
     )
@@ -321,7 +336,8 @@ def _read_semantic_source(artifact: Path, source_path: str) -> sqlite3.Row | Non
                 source_language,
                 semantic_backend,
                 parser_backend,
-                experimental_status
+                experimental_status,
+                control_flow_json
             FROM semantic_sources
             WHERE source_path = ?
             """,
@@ -384,6 +400,204 @@ def _artifact_freshness(root: Path) -> dict[str, object]:
 def _source_fingerprint(files: tuple[ScannedFile, ...]) -> str:
     payload = [(file.path, file.size_bytes) for file in sorted(files, key=lambda item: item.path)]
     return hashlib.sha256(_json_value(payload).encode("utf-8")).hexdigest()
+
+
+def _python_cfg_facts(
+    root: Path, file: ScannedFile, parser_backend: str
+) -> list[dict[str, object]]:
+    if _language_for_path(file.path) != "python":
+        return []
+    try:
+        tree = ast.parse((root / file.path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
+        return [
+            {
+                "source_path": file.path,
+                "warnings": ["python_cfg_parse_failed"],
+                "evidence_labels": list(PYTHON_CFG_EVIDENCE_LABELS),
+                "confidence": SEMANTIC_CONFIDENCE,
+                "provenance": _cfg_provenance(parser_backend),
+            }
+        ]
+
+    facts = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _has_cfg_relevant_node(
+            node
+        ):
+            facts.append(_build_function_cfg(file.path, node, parser_backend))
+    return facts
+
+
+def _build_function_cfg(
+    source_path: str,
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    parser_backend: str,
+) -> dict[str, object]:
+    builder = _CfgBuilder(source_path, function, parser_backend)
+    builder.build(function.body)
+    return builder.fact()
+
+
+class _CfgBuilder:
+    def __init__(
+        self,
+        source_path: str,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        parser_backend: str,
+    ) -> None:
+        self.source_path = source_path
+        self.function = function
+        self.parser_backend = parser_backend
+        self.nodes: list[dict[str, object]] = []
+        self.edges: list[dict[str, object]] = []
+        self.warnings: list[str] = []
+        self.counter = 0
+        self.entry_id = self._add_node("entry", function)
+        self.counter += 1
+        self.exit_id = f"exit:{self.counter:04d}"
+
+    def build(self, statements: list[ast.stmt]) -> None:
+        finals = self._sequence(statements, [(self.entry_id, "next")])
+        self._append_node(self.exit_id, "exit", self.function, [])
+        for source_id, edge_kind in finals:
+            self._add_edge(source_id, self.exit_id, edge_kind)
+
+    def fact(self) -> dict[str, object]:
+        return {
+            "source_path": self.source_path,
+            "function": {
+                "identity": f"{self.source_path}:{self.function.name}:{self.function.lineno}-{self.function.end_lineno or self.function.lineno}",
+                "name": self.function.name,
+                "line_range": _line_range(self.function),
+            },
+            "nodes": self.nodes,
+            "edges": sorted(
+                self.edges,
+                key=lambda item: (str(item["from"]), str(item["to"]), str(item["kind"])),
+            ),
+            "warnings": sorted(set(self.warnings)),
+            "confidence": SEMANTIC_CONFIDENCE,
+            "evidence_labels": list(PYTHON_CFG_EVIDENCE_LABELS),
+            "provenance": _cfg_provenance(self.parser_backend),
+        }
+
+    def _sequence(
+        self,
+        statements: list[ast.stmt],
+        incoming: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        current = incoming
+        for statement in statements:
+            if isinstance(statement, ast.If):
+                branch_id = self._add_node("branch", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, branch_id, edge_kind)
+                if _unsupported_branch_condition(statement.test):
+                    unsupported_id = self._add_node("unsupported", statement)
+                    self._add_edge(branch_id, unsupported_id, "next")
+                    self.warnings.append("unsupported_dynamic_branch_condition")
+                true_finals = self._sequence(statement.body, [(branch_id, "true_branch")])
+                false_finals = (
+                    self._sequence(statement.orelse, [(branch_id, "false_branch")])
+                    if statement.orelse
+                    else [(branch_id, "false_branch")]
+                )
+                current = true_finals + false_finals
+            elif isinstance(statement, ast.Return):
+                return_id = self._add_node("return", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, return_id, edge_kind)
+                self._add_edge(return_id, self.exit_id, "next")
+                current = []
+            elif _unsupported_statement(statement):
+                unsupported_id = self._add_node("unsupported", statement)
+                for source_id, edge_kind in current:
+                    self._add_edge(source_id, unsupported_id, edge_kind)
+                self.warnings.append(f"unsupported_statement:{type(statement).__name__}")
+                current = [(unsupported_id, "next")]
+        return current
+
+    def _add_node(self, kind: str, node: ast.AST) -> str:
+        self.counter += 1
+        node_id = f"{kind}:{self.counter:04d}"
+        warnings = []
+        if kind == "unsupported":
+            warnings.append("unsupported_cfg_node")
+        self._append_node(node_id, kind, node, warnings)
+        return node_id
+
+    def _append_node(self, node_id: str, kind: str, node: ast.AST, warnings: list[str]) -> None:
+        self.nodes.append(
+            {
+                "id": node_id,
+                "kind": kind,
+                "line_range": _line_range(node),
+                "confidence": SEMANTIC_CONFIDENCE,
+                "evidence_labels": list(PYTHON_CFG_EVIDENCE_LABELS),
+                "provenance": _cfg_provenance(self.parser_backend),
+                "warnings": warnings,
+            }
+        )
+
+    def _add_edge(self, source_id: str, target_id: str, kind: str) -> None:
+        self.edges.append({"from": source_id, "to": target_id, "kind": kind})
+
+
+def _unsupported_branch_condition(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr))
+        for child in ast.walk(node)
+    )
+
+
+def _unsupported_statement(node: ast.stmt) -> bool:
+    return isinstance(
+        node,
+        (
+            ast.For,
+            ast.AsyncFor,
+            ast.While,
+            ast.Try,
+            ast.With,
+            ast.AsyncWith,
+            ast.Match,
+            ast.Raise,
+        ),
+    )
+
+
+def _has_cfg_relevant_node(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        isinstance(node, ast.If) or (isinstance(node, ast.stmt) and _unsupported_statement(node))
+        for node in ast.walk(function)
+    )
+
+
+def _line_range(node: ast.AST) -> dict[str, int]:
+    start = getattr(node, "lineno", 1) or 1
+    end = getattr(node, "end_lineno", start) or start
+    return {"start": int(start), "end": int(end)}
+
+
+def _cfg_provenance(parser_backend: str) -> dict[str, object]:
+    return {
+        "semantic_backend": SEMANTIC_BACKEND,
+        "parser_backend": parser_backend,
+        "source": "python_ast",
+    }
+
+
+def _row_control_flow(row: sqlite3.Row | None) -> tuple[dict[str, object], ...]:
+    if row is None:
+        return ()
+    try:
+        payload = json.loads(str(row["control_flow_json"]))
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(item for item in payload if isinstance(item, dict))
 
 
 def _language_for_path(path: str) -> str:
