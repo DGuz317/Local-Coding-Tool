@@ -153,17 +153,14 @@ def test_semantic_inspect_reads_present_artifact_without_source_text(tmp_path):
         "reason": "semantic_artifact_current",
         "recommended_action": None,
     }
-    assert data["facts"] == {
-        "calls": [],
-        "control_flow": [],
-        "definitions": [],
-        "imports": [],
-        "relationships": [],
-    }
-    assert data["limits"] == {
-        "fact_set": "semantic_skeleton_empty",
-        "source_snippets": 0,
-    }
+    assert data["facts"]["calls"] == []
+    assert data["facts"]["definitions"] == []
+    assert data["facts"]["imports"] == []
+    assert data["facts"]["relationships"] == []
+    control_flow = data["facts"]["control_flow"]
+    assert len(control_flow) == 1
+    assert [node["kind"] for node in control_flow[0]["nodes"]] == ["entry", "return", "exit"]
+    assert data["limits"] == {"fact_set": "python_branch_cfg", "source_snippets": 0}
     assert secret_source not in result.output
     assert str(tmp_path) not in result.output
 
@@ -336,15 +333,111 @@ def test_semantic_inspect_returns_nested_multiple_return_and_unsupported_cfg(tmp
     assert nested["warnings"] == []
 
     unsupported = facts[1]
-    assert "unsupported" in [node["kind"] for node in unsupported["nodes"]]
-    assert unsupported["warnings"] == [
-        "unsupported_dynamic_branch_condition",
-        "unsupported_statement:While",
-    ]
-    assert any(
-        node["kind"] == "unsupported" and node["warnings"] == ["unsupported_cfg_node"]
-        for node in unsupported["nodes"]
+    assert "loop" in [node["kind"] for node in unsupported["nodes"]]
+    assert unsupported["warnings"] == ["unsupported_dynamic_branch_condition"]
+    assert any(edge["kind"] == "loop_body" for edge in unsupported["edges"])
+    assert any(edge["kind"] == "loop_exit" for edge in unsupported["edges"])
+
+
+def test_semantic_inspect_returns_loop_break_continue_and_exit_cfg(tmp_path):
+    secret_source = "loop-exit-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        "def loops(items):\n"
+        "    for item in items:\n"
+        "        if item.skip:\n"
+        "            continue\n"
+        "        if item.stop:\n"
+        "            break\n"
+        "    while items:\n"
+        "        raise RuntimeError('hidden')\n"
+        f"    return {secret_source!r}\n",
+        encoding="utf-8",
     )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    fact = envelope["data"]["facts"]["control_flow"][0]
+    node_kinds = [node["kind"] for node in fact["nodes"]]
+    assert node_kinds == [
+        "entry",
+        "loop",
+        "branch",
+        "continue",
+        "branch",
+        "break",
+        "loop",
+        "raise",
+        "return",
+        "exit",
+    ]
+    assert {edge["kind"] for edge in fact["edges"]} == {
+        "continue_loop",
+        "false_branch",
+        "loop_body",
+        "loop_exit",
+        "next",
+        "true_branch",
+    }
+    assert fact["warnings"] == []
+    assert envelope["data"]["limits"] == {"fact_set": "python_branch_cfg", "source_snippets": 0}
+    assert all("line_range" in node for node in fact["nodes"])
+    assert all(node["confidence"] == "candidate" for node in fact["nodes"])
+    assert all(node["provenance"]["source"] == "python_ast" for node in fact["nodes"])
+    assert secret_source not in result.output
+    assert "item.skip" not in result.output
+    assert "RuntimeError" not in result.output
+    assert str(tmp_path) not in result.output
+
+
+def test_semantic_inspect_marks_limited_and_unsupported_cfg_constructs(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "async def async_run(items):\n"
+        "    async for item in items:\n"
+        "        await item.run()\n"
+        "    return 1\n"
+        "\n"
+        "def uncertain(value):\n"
+        "    try:\n"
+        "        with value:\n"
+        "            return 1\n"
+        "    except ValueError:\n"
+        "        return 2\n"
+        "    match value:\n"
+        "        case 3:\n"
+        "            return 3\n"
+        "\n"
+        "def generator(items):\n"
+        "    for item in items:\n"
+        "        yield item\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    facts = json.loads(result.output)["data"]["facts"]["control_flow"]
+    assert [fact["function"]["name"] for fact in facts] == [
+        "async_run",
+        "uncertain",
+        "generator",
+    ]
+    assert facts[0]["warnings"] == [
+        "unsupported_async_function",
+        "unsupported_statement:AsyncFor",
+    ]
+    assert facts[1]["warnings"] == ["unsupported_statement:Match", "unsupported_statement:Try"]
+    assert facts[2]["warnings"] == ["unsupported_statement:Expr"]
+    assert all(any(node["kind"] == "unsupported" for node in fact["nodes"]) for fact in facts)
 
 
 def _canonical_graph_hash(root) -> str:
