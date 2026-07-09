@@ -472,16 +472,52 @@ class _BindingTracer:
         self.parser_backend = parser_backend
 
     def trace(self, tree: ast.Module) -> list[dict[str, object]]:
-        facts = [self._scope_fact("module", "<module>", tree.body, None)]
-        for statement in tree.body:
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                facts.append(self._function_scope_fact(statement))
+        facts: list[dict[str, object]] = []
+        module_fact = self._scope_fact("module", "<module>", tree.body, None, ancestors=[])
+        facts.append(module_fact)
+        module_ancestors = [_scope_binding_context(module_fact)]
+        facts.extend(self._nested_scope_facts(tree.body, module_ancestors))
         return [fact for fact in facts if _binding_scope_has_content(fact)]
 
+    def _nested_scope_facts(
+        self,
+        statements: list[ast.stmt],
+        ancestors: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        facts: list[dict[str, object]] = []
+        for statement in statements:
+            facts.extend(self._expression_scope_facts(statement, ancestors))
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fact = self._function_scope_fact(statement, ancestors)
+                facts.append(fact)
+                facts.extend(
+                    self._nested_scope_facts(
+                        statement.body, [*ancestors, _scope_binding_context(fact)]
+                    )
+                )
+        return facts
+
+    def _expression_scope_facts(
+        self,
+        statement: ast.stmt,
+        ancestors: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        facts: list[dict[str, object]] = []
+        for node in _iter_expression_scope_nodes(statement):
+            if isinstance(node, ast.Lambda):
+                facts.append(self._lambda_scope_fact(node, ancestors))
+            elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                facts.append(self._comprehension_scope_fact(node, ancestors))
+        return facts
+
     def _function_scope_fact(
-        self, function: ast.FunctionDef | ast.AsyncFunctionDef
+        self,
+        function: ast.FunctionDef | ast.AsyncFunctionDef,
+        ancestors: list[dict[str, object]],
     ) -> dict[str, object]:
-        fact = self._scope_fact("function", function.name, function.body, function)
+        fact = self._scope_fact(
+            "function", function.name, function.body, function, ancestors=ancestors
+        )
         parameters = [
             _definition_entry(argument.arg, "parameter", argument)
             for argument in _arguments(function)
@@ -490,12 +526,70 @@ class _BindingTracer:
         fact["definitions"] = sorted(
             [*parameters, *_binding_entries(fact, "definitions")], key=_binding_entry_sort_key
         )
-        fact["resolved_names"] = _resolved_reference_entries(fact)
-        fact["unresolved_names"] = _unresolved_reference_entries(fact)
+        self._refresh_scope_resolution(fact, ancestors)
         if isinstance(function, ast.AsyncFunctionDef):
             fact["warnings"] = sorted(
                 [*_binding_warnings_from_fact(fact), "unsupported_async_function"]
             )
+        return fact
+
+    def _lambda_scope_fact(
+        self, node: ast.Lambda, ancestors: list[dict[str, object]]
+    ) -> dict[str, object]:
+        fact = self._empty_scope_fact("lambda", "<lambda>", node, ancestors)
+        parameters = [
+            _definition_entry(argument.arg, "parameter", argument) for argument in _arguments(node)
+        ]
+        fact["parameters"] = parameters
+        fact["definitions"] = sorted(parameters, key=_binding_entry_sort_key)
+        fact["references"] = sorted(
+            [
+                _reference_entry(child.id, child)
+                for child in ast.walk(node.body)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+            ],
+            key=_binding_entry_sort_key,
+        )
+        self._refresh_scope_resolution(fact, ancestors)
+        return fact
+
+    def _comprehension_scope_fact(
+        self,
+        node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+        ancestors: list[dict[str, object]],
+    ) -> dict[str, object]:
+        fact = self._empty_scope_fact("comprehension", _comprehension_name(node), node, ancestors)
+        definitions: list[dict[str, object]] = []
+        references: list[dict[str, object]] = []
+        for generator in node.generators:
+            definitions.extend(
+                _definition_entry(name, "assignment", target)
+                for name, target in _target_names(generator.target)
+            )
+            references.extend(
+                _reference_entry(child.id, child)
+                for child in ast.walk(generator.iter)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+            )
+            for condition in generator.ifs:
+                references.extend(
+                    _reference_entry(child.id, child)
+                    for child in ast.walk(condition)
+                    if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+                )
+        element_nodes: list[ast.AST] = (
+            [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        )
+        for element in element_nodes:
+            references.extend(
+                _reference_entry(child.id, child)
+                for child in ast.walk(element)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+            )
+        fact["definitions"] = sorted(definitions, key=_binding_entry_sort_key)
+        fact["assigned_names"] = sorted(definitions, key=_binding_entry_sort_key)
+        fact["references"] = sorted(references, key=_binding_entry_sort_key)
+        self._refresh_scope_resolution(fact, ancestors)
         return fact
 
     def _scope_fact(
@@ -504,6 +598,8 @@ class _BindingTracer:
         scope_name: str,
         statements: list[ast.stmt],
         scope_node: ast.AST | None,
+        *,
+        ancestors: list[dict[str, object]],
     ) -> dict[str, object]:
         definitions: list[dict[str, object]] = []
         references: list[dict[str, object]] = []
@@ -512,28 +608,77 @@ class _BindingTracer:
             definitions.extend(_definition_entries(statement))
             references.extend(_reference_entries(statement))
             warnings.extend(_binding_warnings(statement))
-        assigned_names = [item for item in definitions if item["kind"] == "assignment"]
-        imported_names = [item for item in definitions if item["kind"] == "import"]
-        fact: dict[str, object] = {
-            "source_path": self.source_path,
-            "scope": _scope_metadata(
+        fact = self._base_scope_fact(
+            scope_kind,
+            scope_name,
+            _scope_metadata(
                 self.source_path, scope_kind, scope_name, statements, tree_node=scope_node
             ),
-            "definitions": sorted(definitions, key=_binding_entry_sort_key),
+        )
+        fact["definitions"] = sorted(definitions, key=_binding_entry_sort_key)
+        fact["assigned_names"] = sorted(
+            [item for item in definitions if item["kind"] == "assignment"],
+            key=_binding_entry_sort_key,
+        )
+        fact["imported_names"] = sorted(
+            [item for item in definitions if item["kind"] == "import"], key=_binding_entry_sort_key
+        )
+        fact["references"] = sorted(references, key=_binding_entry_sort_key)
+        fact["global_declarations"] = sorted(
+            _declaration_entries(statements, ast.Global, "global"), key=_binding_entry_sort_key
+        )
+        fact["nonlocal_declarations"] = sorted(
+            _declaration_entries(statements, ast.Nonlocal, "nonlocal"), key=_binding_entry_sort_key
+        )
+        fact["warnings"] = sorted(set(warnings))
+        self._refresh_scope_resolution(fact, ancestors)
+        return fact
+
+    def _empty_scope_fact(
+        self,
+        scope_kind: str,
+        scope_name: str,
+        node: ast.AST,
+        ancestors: list[dict[str, object]],
+    ) -> dict[str, object]:
+        fact = self._base_scope_fact(
+            scope_kind,
+            scope_name,
+            _scope_metadata(self.source_path, scope_kind, scope_name, None, tree_node=node),
+        )
+        self._refresh_scope_resolution(fact, ancestors)
+        return fact
+
+    def _base_scope_fact(
+        self, scope_kind: str, scope_name: str, scope: dict[str, object]
+    ) -> dict[str, object]:
+        return {
+            "source_path": self.source_path,
+            "scope": scope,
+            "definitions": [],
             "parameters": [],
-            "assigned_names": sorted(assigned_names, key=_binding_entry_sort_key),
-            "imported_names": sorted(imported_names, key=_binding_entry_sort_key),
-            "references": sorted(references, key=_binding_entry_sort_key),
+            "assigned_names": [],
+            "imported_names": [],
+            "global_declarations": [],
+            "nonlocal_declarations": [],
+            "references": [],
             "resolved_names": [],
             "unresolved_names": [],
-            "warnings": sorted(set(warnings)),
+            "free_variable_candidates": [],
+            "shadowed_names": [],
+            "warnings": [],
             "confidence": SEMANTIC_CONFIDENCE,
             "evidence_labels": list(PYTHON_BINDING_EVIDENCE_LABELS),
             "provenance": _binding_provenance(self.parser_backend),
         }
+
+    def _refresh_scope_resolution(
+        self, fact: dict[str, object], ancestors: list[dict[str, object]]
+    ) -> None:
         fact["resolved_names"] = _resolved_reference_entries(fact)
-        fact["unresolved_names"] = _unresolved_reference_entries(fact)
-        return fact
+        fact["free_variable_candidates"] = _free_variable_candidate_entries(fact, ancestors)
+        fact["unresolved_names"] = _unresolved_reference_entries(fact, ancestors)
+        fact["shadowed_names"] = _shadowed_name_entries(fact, ancestors)
 
 
 def _definition_entries(statement: ast.stmt) -> list[dict[str, object]]:
@@ -586,10 +731,42 @@ def _iter_binding_nodes(statement: ast.stmt) -> list[ast.AST]:
         else:
             children = list(ast.iter_child_nodes(node))
         for child in reversed(children):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(child, _BINDING_SCOPE_BOUNDARY_NODES):
                 continue
             stack.append(child)
     return nodes
+
+
+def _iter_expression_scope_nodes(statement: ast.stmt) -> list[ast.AST]:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return []
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = [statement]
+    while stack:
+        node = stack.pop()
+        if isinstance(
+            node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+        ):
+            nodes.append(node)
+            continue
+        if node is not statement and isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
+_BINDING_SCOPE_BOUNDARY_NODES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
 
 
 def _assignment_targets(statement: ast.stmt) -> list[tuple[str, ast.AST]]:
@@ -619,13 +796,37 @@ def _target_names(node: ast.AST) -> list[tuple[str, ast.AST]]:
     return []
 
 
-def _arguments(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.arg]:
+def _arguments(function: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> list[ast.arg]:
     args = [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]
     if function.args.vararg is not None:
         args.append(function.args.vararg)
     if function.args.kwarg is not None:
         args.append(function.args.kwarg)
     return args
+
+
+def _declaration_entries(
+    statements: list[ast.stmt], declaration_type: type[ast.Global] | type[ast.Nonlocal], kind: str
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for statement in statements:
+        for node in _iter_binding_nodes(statement):
+            if isinstance(node, declaration_type):
+                entries.extend(_definition_entry(name, kind, node) for name in node.names)
+    return entries
+
+
+def _scope_binding_context(fact: dict[str, object]) -> dict[str, object]:
+    scope = fact.get("scope", {})
+    if not isinstance(scope, dict):
+        scope = {}
+    names = {str(item["name"]) for item in _binding_entries(fact, "definitions")}
+    return {
+        "identity": str(scope.get("identity", "")),
+        "kind": str(scope.get("kind", "")),
+        "name": str(scope.get("name", "")),
+        "names": names,
+    }
 
 
 def _definition_entry(name: str, kind: str, node: ast.AST) -> dict[str, object]:
@@ -654,16 +855,78 @@ def _resolved_reference_entries(fact: dict[str, object]) -> list[dict[str, objec
     )
 
 
-def _unresolved_reference_entries(fact: dict[str, object]) -> list[dict[str, object]]:
+def _unresolved_reference_entries(
+    fact: dict[str, object], ancestors: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     defined = {str(item["name"]) for item in _binding_entries(fact, "definitions")}
+    ancestor_names = _ancestor_names(ancestors or [])
     return sorted(
         [
             {**reference, "resolution": "unresolved"}
             for reference in _binding_entries(fact, "references")
             if str(reference["name"]) not in defined
+            and str(reference["name"]) not in ancestor_names
         ],
         key=_binding_entry_sort_key,
     )
+
+
+def _free_variable_candidate_entries(
+    fact: dict[str, object], ancestors: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    defined = {str(item["name"]) for item in _binding_entries(fact, "definitions")}
+    ancestor_names = _ancestor_names(ancestors)
+    return sorted(
+        [
+            {**reference, "resolution": "free_variable_candidate"}
+            for reference in _binding_entries(fact, "references")
+            if str(reference["name"]) not in defined and str(reference["name"]) in ancestor_names
+        ],
+        key=_binding_entry_sort_key,
+    )
+
+
+def _shadowed_name_entries(
+    fact: dict[str, object], ancestors: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for definition in _binding_entries(fact, "definitions"):
+        definition_name = str(definition["name"])
+        for ancestor in ancestors:
+            names = ancestor.get("names", set())
+            if isinstance(names, set) and definition_name in names:
+                entries.append(
+                    {
+                        **definition,
+                        "shadowing": "candidate_local_shadow",
+                        "shadowed_scope": {
+                            "identity": ancestor.get("identity", ""),
+                            "kind": ancestor.get("kind", ""),
+                            "name": ancestor.get("name", ""),
+                        },
+                        "evidence_labels": ["python:ast", "semantic:lexical_scope_boundary"],
+                    }
+                )
+    return sorted(entries, key=_binding_entry_sort_key)
+
+
+def _ancestor_names(ancestors: list[dict[str, object]]) -> set[str]:
+    names: set[str] = set()
+    for ancestor in ancestors:
+        ancestor_names = ancestor.get("names", set())
+        if isinstance(ancestor_names, set):
+            names.update(str(name) for name in ancestor_names)
+    return names
+
+
+def _comprehension_name(node: ast.AST) -> str:
+    if isinstance(node, ast.ListComp):
+        return "<listcomp>"
+    if isinstance(node, ast.SetComp):
+        return "<setcomp>"
+    if isinstance(node, ast.DictComp):
+        return "<dictcomp>"
+    return "<genexpr>"
 
 
 def _binding_scope_has_content(fact: dict[str, object]) -> bool:
@@ -675,6 +938,10 @@ def _binding_scope_has_content(fact: dict[str, object]) -> bool:
             "assigned_names",
             "imported_names",
             "references",
+            "global_declarations",
+            "nonlocal_declarations",
+            "free_variable_candidates",
+            "shadowed_names",
             "warnings",
         )
     )

@@ -370,6 +370,82 @@ def test_semantic_inspect_returns_source_free_python_lexical_bindings(tmp_path):
     assert str(tmp_path) not in result.output
 
 
+def test_semantic_inspect_returns_python_scope_and_shadowing_binding_facts(tmp_path):
+    secret_source = "scope-binding-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        "GLOBAL = 1\n"
+        "\n"
+        "def outer(value):\n"
+        "    shared = value\n"
+        "    items = [shared + value for shared in range(3)]\n"
+        "    mapper = lambda item: item + shared\n"
+        "    def inner(shared):\n"
+        "        nonlocal value\n"
+        "        global GLOBAL\n"
+        "        missing = shared + value + GLOBAL + unknown\n"
+        "        return missing\n"
+        "    return mapper\n"
+        f"hidden = {secret_source!r}\n",
+        encoding="utf-8",
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    bindings = envelope["data"]["facts"]["bindings"]
+    assert [fact["scope"]["kind"] for fact in bindings] == [
+        "module",
+        "function",
+        "comprehension",
+        "lambda",
+        "function",
+    ]
+    assert [fact["scope"]["name"] for fact in bindings] == [
+        "<module>",
+        "outer",
+        "<listcomp>",
+        "<lambda>",
+        "inner",
+    ]
+
+    outer = bindings[1]
+    assert [item["name"] for item in outer["parameters"]] == ["value"]
+    assert [item["name"] for item in outer["assigned_names"]] == ["shared", "items", "mapper"]
+    assert [item["name"] for item in outer["resolved_names"]] == ["value", "mapper"]
+
+    comprehension = bindings[2]
+    assert [item["name"] for item in comprehension["assigned_names"]] == ["shared"]
+    assert [item["name"] for item in comprehension["free_variable_candidates"]] == ["value"]
+    assert [item["name"] for item in comprehension["unresolved_names"]] == ["range"]
+    assert [item["name"] for item in comprehension["shadowed_names"]] == ["shared"]
+    assert comprehension["shadowed_names"][0]["evidence_labels"] == [
+        "python:ast",
+        "semantic:lexical_scope_boundary",
+    ]
+
+    lambda_scope = bindings[3]
+    assert [item["name"] for item in lambda_scope["parameters"]] == ["item"]
+    assert [item["name"] for item in lambda_scope["resolved_names"]] == ["item"]
+    assert [item["name"] for item in lambda_scope["free_variable_candidates"]] == ["shared"]
+
+    inner = bindings[4]
+    assert [item["name"] for item in inner["parameters"]] == ["shared"]
+    assert [item["name"] for item in inner["global_declarations"]] == ["GLOBAL"]
+    assert [item["name"] for item in inner["nonlocal_declarations"]] == ["value"]
+    assert [item["name"] for item in inner["free_variable_candidates"]] == ["GLOBAL", "value"]
+    assert [item["name"] for item in inner["unresolved_names"]] == ["unknown"]
+    assert [item["name"] for item in inner["shadowed_names"]] == ["shared"]
+    assert inner["warnings"] == ["dynamic_binding_unresolved"]
+    assert secret_source not in result.output
+    assert "shared + value" not in result.output
+    assert str(tmp_path) not in result.output
+
+
 def test_semantic_inspect_returns_nested_multiple_return_and_unsupported_cfg(tmp_path):
     (tmp_path / "app.py").write_text(
         "def nested(value):\n"
