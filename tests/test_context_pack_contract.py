@@ -64,6 +64,10 @@ def test_assistant_preflight_schema_contract_is_bounded_and_shared():
     assert "model_specific_tokens" in ASSISTANT_PREFLIGHT_CONTRACT["forbidden_budget_units"]
     assert ASSISTANT_PREFLIGHT_CONTRACT["default_context_pack_enrichment"] == "none"
     assert ASSISTANT_PREFLIGHT_CONTRACT["opt_in_enrichment_reserved_for_later"] is True
+    assert (
+        ASSISTANT_PREFLIGHT_CONTRACT["opt_in_enrichment_option"]
+        == "include_experimental_semantic_hints"
+    )
 
 
 def test_context_pack_budget_contract_sets_explicit_support_group_caps():
