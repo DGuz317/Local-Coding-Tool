@@ -668,6 +668,73 @@ def test_semantic_inspect_marks_limited_and_unsupported_cfg_constructs(tmp_path)
     assert all(any(node["kind"] == "unsupported" for node in fact["nodes"]) for fact in facts)
 
 
+def test_experimental_semantic_jsonl_export_is_deterministic_source_free_and_separate(tmp_path):
+    secret_source = "semantic-jsonl-source-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        "def choose(value):\n"
+        "    if value == 1:\n"
+        "        return 'one'\n"
+        f"    return {secret_source!r}\n",
+        encoding="utf-8",
+    )
+
+    result = index_repository(
+        tmp_path,
+        experimental_semantic_artifact=True,
+        experimental_semantic_jsonl=True,
+    )
+
+    assert result.semantic_debug_export == ".repolens/semantic.jsonl"
+    export_path = tmp_path / ".repolens" / "semantic.jsonl"
+    first = export_path.read_text(encoding="utf-8")
+    index_repository(
+        tmp_path,
+        experimental_semantic_artifact=True,
+        experimental_semantic_jsonl=True,
+    )
+    second = export_path.read_text(encoding="utf-8")
+    assert first == second
+    rows = [json.loads(line) for line in first.splitlines()]
+    assert [row["source_path"] for row in rows] == ["app.py"]
+    assert rows[0]["artifact"] == "semantic_debug_export"
+    assert rows[0]["facts"]["definitions"] == []
+    assert rows[0]["facts"]["calls"] == []
+    assert secret_source not in first
+    assert "value == 1" not in first
+    assert str(tmp_path) not in first
+
+
+def test_semantic_evaluation_covers_release_gate_and_debug_export():
+    result = runner.invoke(
+        app,
+        ["evaluate-semantics", "--export-debug-jsonl", "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert data["release_gate"]["passed"] is True
+    assert data["summary"] == {"failed_cases": 0, "passed_cases": 4, "total_cases": 4}
+    assert data["case_summary"]["supported"] >= 3
+    assert data["case_summary"]["unsupported"] >= 1
+    assert data["case_summary"]["ambiguous"] >= 1
+    assert data["case_summary"]["uncertain"] >= 1
+    assert data["stable_contract_checks"] == {
+        "canonical_graph_hash_unchanged": True,
+        "context_pack_id_unchanged": True,
+        "context_pack_paths_unchanged": True,
+        "default_mcp_output_excludes_semantic_facts": True,
+    }
+    assert data["from_source_debug"] == {
+        "covered": True,
+        "persistent": False,
+        "writes_artifacts": False,
+    }
+    assert data["debug_export"]["path"] == ".repolens/semantic.jsonl"
+    assert data["debug_export"]["passed"] is True
+    assert data["artifact_audit"]["passed"] is True
+
+
 def _canonical_graph_hash(root) -> str:
     with sqlite3.connect(root / ".repolens" / "graph.sqlite") as connection:
         row = connection.execute(

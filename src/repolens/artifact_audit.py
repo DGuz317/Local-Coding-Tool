@@ -24,7 +24,7 @@ from repolens.scanner import ARTIFACT_DIR_NAME
 
 ARTIFACT_AUDIT_VERSION = "0.5.artifact-audit.v1"
 DEFAULT_MAX_ARTIFACT_BYTES = 10_000_000
-_TEXT_ARTIFACT_SUFFIXES = frozenset({".json", ".md", ".txt"})
+_TEXT_ARTIFACT_SUFFIXES = frozenset({".json", ".jsonl", ".md", ".txt"})
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTH|PRIVATE[_-]?KEY)"
     r"[A-Z0-9_.-]*\b\s*[:=]\s*(?![<]?redacted[>]?\b)[^\s,;]+"
@@ -37,6 +37,17 @@ _RAW_AGENT_GUIDANCE_RE = re.compile(
     r"(?i)(?:Non-Negotiable Product Boundaries|Instructions from:|<mcp_instructions>)"
 )
 _RAW_AGENT_GUIDANCE_MIN_CHARS = 200
+_SEMANTIC_FORBIDDEN_FIELD_NAMES = frozenset(
+    {
+        "function_body",
+        "function_signature",
+        "raw_condition_text",
+        "raw_expression_text",
+        "raw_value",
+        "source_snippet",
+        "source_text",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -193,7 +204,7 @@ def _audit_artifact_path(
             )
         )
 
-    if artifact_path.name == GRAPH_STORE_FILENAME:
+    if artifact_path.name == GRAPH_STORE_FILENAME or artifact_path.suffix.lower() == ".sqlite":
         violations.extend(_audit_sqlite_artifact(root, artifact_path))
     elif (
         artifact_path.suffix.lower() in _TEXT_ARTIFACT_SUFFIXES
@@ -223,6 +234,8 @@ def _audit_artifact_path(
             )
             if artifact_path.suffix.lower() == ".json":
                 violations.extend(_audit_json_text(text, rel_path, root=root))
+            elif artifact_path.suffix.lower() == ".jsonl":
+                violations.extend(_audit_jsonl_text(text, rel_path, root=root))
     return violations
 
 
@@ -300,6 +313,26 @@ def _audit_json_text(text: str, rel_path: str, *, root: Path) -> list[ArtifactAu
     violations = list(_audit_payload(payload, location=rel_path, root=root))
     if isinstance(payload, Mapping) and "ok" in payload:
         violations.extend(_audit_mcp_envelope(payload, location=rel_path))
+    return violations
+
+
+def _audit_jsonl_text(text: str, rel_path: str, *, root: Path) -> list[ArtifactAuditViolation]:
+    violations: list[ArtifactAuditViolation] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            violations.append(
+                ArtifactAuditViolation(
+                    check="artifact_boundary",
+                    location=f"{rel_path}:{line_number}",
+                    message="JSONL artifact line could not be parsed",
+                )
+            )
+            continue
+        violations.extend(_audit_payload(payload, location=f"{rel_path}:{line_number}", root=root))
     return violations
 
 
@@ -385,6 +418,12 @@ def _audit_payload(value: Any, *, location: str, root: Path) -> Iterable[Artifac
                     check="source_snippet_leakage",
                     location=child_location,
                     message="forbidden source-bearing field is present",
+                )
+            if key_text in _SEMANTIC_FORBIDDEN_FIELD_NAMES:
+                yield ArtifactAuditViolation(
+                    check="semantic_outputs_source_free",
+                    location=child_location,
+                    message="forbidden semantic source-bearing field is present",
                 )
             yield from _audit_value(key_text, child, child_location, root=root)
             yield from _audit_payload(child, location=child_location, root=root)
