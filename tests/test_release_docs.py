@@ -381,3 +381,83 @@ def test_v0_6_release_docs_record_final_readiness_contract() -> None:
         "docs/releases/v0.6.0.md",
     ):
         assert required in combined
+
+
+def test_v0_7_readme_and_assistant_guide_document_semantic_inspect_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs" / "assistant-usage-guide.md").read_text(encoding="utf-8")
+
+    for required in (
+        "v0.7 Python semantic facts are experimental, source-free metadata stored "
+        "separately from the stable graph.",
+        "`repolens semantic-inspect` reads indexed semantic artifacts by default.",
+        "When indexed semantic artifacts are missing, stale, or incompatible, "
+        "`semantic-inspect` reports artifact status instead of silently parsing live source.",
+        "`semantic-inspect --from-source` is an explicit, non-persistent debug mode.",
+    ):
+        assert required in readme
+
+    for required in (
+        "Treat semantic facts as experimental metadata, not stable graph facts.",
+        "Use indexed `semantic-inspect` output before relying on Python semantic facts.",
+        "If semantic artifacts are missing or stale, ask the user to run "
+        "`repolens index` or `repolens update` instead of using live source implicitly.",
+        "`--from-source` is for one-off debugging only and must not be treated as "
+        "persisted RepoLens state.",
+    ):
+        assert required in guide
+
+
+def test_v0_7_known_limitations_document_python_semantic_boundaries() -> None:
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+
+    for required in (
+        "v0.7 Python semantic analysis is limited to deterministic function-level CFG "
+        "and lexical binding metadata.",
+        "Unsupported or dynamic Python constructs produce warnings, unresolved statuses, "
+        "or unsupported markers instead of guessed facts.",
+        "Runtime dispatch, monkeypatching, metaclasses, decorators with dynamic effects, "
+        "reflection, imports with runtime side effects, and framework behavior are not "
+        "executed or inferred.",
+        "Semantic artifacts must remain source-free and must not mirror code bodies, "
+        "function signatures, raw comments, raw docstrings, raw string literals, secrets, "
+        "or absolute host paths.",
+    ):
+        assert required in limitations
+
+
+def test_v0_7_release_readiness_docs_pin_semantic_gates_and_opt_in_hints() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    tracker = (ROOT / "docs" / "repolens-v0.7-release-tracker.md").read_text(encoding="utf-8")
+
+    for required in (
+        "v0.7 release readiness requires passing semantic evaluation evidence for "
+        "Python CFG, lexical binding, warnings, and no-disclosure fixtures.",
+        "v0.7 release readiness requires artifact audit evidence that semantic artifacts "
+        "and assistant-facing output do not leak source snippets, code bodies, function "
+        "signatures, raw comments, raw docstrings, raw string literals, raw secrets, raw "
+        "Agent Guidance text, or absolute host paths.",
+        "v0.7 release readiness requires evidence that semantic facts are excluded from "
+        "Canonical Graph Hash, default Context Pack IDs, stable graph validation, default "
+        "MCP output, default Assistant Preflight output, and default Context Pack output.",
+        "Optional Context Pack semantic hints are included in v0.7 only behind explicit "
+        "`include_experimental_semantic_hints` opt-in; they are documented, audited, release-gated",
+        "uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py --json",
+        "uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py "
+        "--from-source --json",
+        "uv run repolens evaluate-context --json",
+        "uv run repolens audit-artifacts . --json",
+    ):
+        assert required in readiness
+
+    for required in (
+        "Semantic facts are experimental metadata outside the trusted stable graph contract.",
+        "`semantic-inspect` reads indexed semantic artifacts by default and reports missing, "
+        "stale, or incompatible artifacts explicitly",
+        "`--from-source` is explicit, non-persistent, and isolated from stable graph "
+        "artifacts and default assistant-facing identity",
+        "artifact no-disclosure checks are documented with passing evidence",
+        "Optional Context Pack semantic enrichment may defer to a later v0.7.x or v0.8 "
+        "slice without blocking v0.7",
+    ):
+        assert required in tracker

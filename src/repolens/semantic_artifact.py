@@ -18,6 +18,7 @@ from repolens.parser_backends import (
     default_parser_backend_provenance,
     resolve_parser_backend,
 )
+from repolens.redaction import is_secret_key
 from repolens.scanner import (
     ARTIFACT_DIR_NAME,
     ScanError,
@@ -47,6 +48,7 @@ PYTHON_BINDING_EVIDENCE_LABELS = (
     "python:ast",
     "semantic:python_lexical_bindings",
 )
+SEMANTIC_REDACTED_NAME = "<redacted>"
 
 
 class SemanticArtifactError(RuntimeError):
@@ -983,12 +985,16 @@ def _scope_binding_context(fact: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _semantic_name(name: str) -> str:
+    return SEMANTIC_REDACTED_NAME if is_secret_key(name) else name
+
+
 def _definition_entry(name: str, kind: str, node: ast.AST) -> dict[str, object]:
-    return {"name": name, "kind": kind, "line_range": _line_range(node)}
+    return {"name": _semantic_name(name), "kind": kind, "line_range": _line_range(node)}
 
 
 def _reference_entry(name: str, node: ast.AST) -> dict[str, object]:
-    return {"name": name, "kind": "reference", "line_range": _line_range(node)}
+    return {"name": _semantic_name(name), "kind": "reference", "line_range": _line_range(node)}
 
 
 def _imported_name(alias: ast.alias) -> str:
@@ -1146,10 +1152,11 @@ def _scope_metadata(
         }
     else:
         line_range = {"start": 1, "end": 1}
+    safe_name = _semantic_name(name)
     return {
-        "identity": f"{source_path}:{name}:{line_range['start']}-{line_range['end']}",
+        "identity": f"{source_path}:{safe_name}:{line_range['start']}-{line_range['end']}",
         "kind": kind,
-        "name": name,
+        "name": safe_name,
         "line_range": line_range,
     }
 
@@ -1195,8 +1202,8 @@ class _CfgBuilder:
         return {
             "source_path": self.source_path,
             "function": {
-                "identity": f"{self.source_path}:{self.function.name}:{self.function.lineno}-{self.function.end_lineno or self.function.lineno}",
-                "name": self.function.name,
+                "identity": f"{self.source_path}:{_semantic_name(self.function.name)}:{self.function.lineno}-{self.function.end_lineno or self.function.lineno}",
+                "name": _semantic_name(self.function.name),
                 "line_range": _line_range(self.function),
             },
             "nodes": self.nodes,

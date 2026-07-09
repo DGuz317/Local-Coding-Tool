@@ -17,6 +17,8 @@ Current version: **v0.6.0**.
 
 v0.6.0 improves JavaScript and TypeScript orientation with parser-backed structure, resolver outcome metadata, source-free call-chain facts, and bounded framework route hints. Release notes live in `docs/releases/v0.6.0.md`.
 
+v0.7 Python semantic facts are experimental, source-free metadata stored separately from the stable graph. They are candidate metadata for inspection and evaluation only; they do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, or default MCP output.
+
 ## What Problem Does This Solve?
 
 AI coding assistants often waste context by reading too many files too early.
@@ -128,8 +130,10 @@ uv run repolens search /path/to/repo "query text"
 uv run repolens context /path/to/repo "Describe your task"
 uv run repolens preflight /path/to/repo "Describe your task"
 uv run repolens audit-artifacts /path/to/repo
+uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --json
+uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --from-source --json
+uv run repolens evaluate-semantics --json
 uv run repolens mcp /path/to/repo
-```
 
 Command meanings:
 
@@ -141,6 +145,9 @@ Command meanings:
 - `context`: return a task-scoped Context Pack.
 - `preflight`: return the Assistant Preflight contract for a task, including graph freshness, first-read files, likely tests, candidate commands, focus hints, warnings, and budget metadata.
 - `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants.
+- `repolens semantic-inspect` reads indexed semantic artifacts by default. When indexed semantic artifacts are missing, stale, or incompatible, `semantic-inspect` reports artifact status instead of silently parsing live source.
+- `semantic-inspect --from-source` is an explicit, non-persistent debug mode. It does not persist artifacts, and output is labeled debug metadata rather than indexed repository state.
+- `evaluate-semantics`: run deterministic Python semantic fixture evaluation for control-flow, lexical binding, warning, no-disclosure, stable identity, and artifact-audit evidence.
 - `mcp`: start the read-only stdio MCP server for an assistant.
 
 For JavaScript and TypeScript repositories, v0.6 uses the Tree-sitter JS/TS parser backend by default when the parser and grammar packages are available. If they are unavailable, RepoLens falls back to the legacy bounded scanner and emits parser-backend warnings instead of pretending parser-backed facts exist.
@@ -150,6 +157,15 @@ v0.6 metadata remains orientation-only:
 - Call Chain Facts are source-free structural facts with names, receiver shape, and bounded line ranges. They are not runtime reachability proof, deep semantic call graphs, or data-flow analysis.
 - Framework Route Hints are deterministic hints from local file/config/parser evidence. The first fixture covers Next.js App Router shapes, but hints are not framework emulation or runtime route proof.
 - Resolver outcomes preserve uncertainty with unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings when local evidence is incomplete.
+
+
+For Python repositories, v0.7 semantic facts are experimental, source-free metadata stored separately from stable graph artifacts:
+
+- Control-flow facts describe function-level entry, branch, loop, return, raise, exit, unsupported, and uncertain paths. They are not runtime reachability proof, data-flow analysis, taint analysis, or type inference.
+- Lexical binding facts describe local definitions, parameters, imports, assignments, references, unresolved names, free-variable candidates, shadowing, `global`, and `nonlocal` declarations where deterministic AST evidence exists. They do not prove runtime values or fully resolve dynamic Python behavior.
+- Indexed `semantic-inspect` reads `.repolens/semantic.sqlite` by default and reports missing, stale, or unsupported artifacts with freshness metadata.
+- `--from-source` is explicit, non-persistent debug mode. It does not update `graph.sqlite`, `.repolens/semantic.sqlite`, Canonical Graph Hash inputs, default Context Pack IDs, or default MCP output.
+- Semantic facts and debug/evaluation exports must not include source snippets, raw condition text, function signatures, raw expression text, raw values, code bodies, raw comments, raw docstrings, absolute host paths, or AI prose summaries.
 
 There is also a developer-oriented `benchmark-update` command for update-speed evidence.
 
@@ -494,13 +510,16 @@ Before release, run the full verification gate, review generated artifact behavi
 
 RepoLens v0.6 focuses on improving JS/TS parser and resolver evidence for that deterministic preflight workflow while preserving source-safety and uncertainty.
 
+RepoLens v0.7 focuses on the Python Semantic Analysis Prototype: source-free function-level CFG and lexical binding facts in an experimental layer that remains separate from the stable graph contract.
+
 Current focus:
 
-- local CLI indexing, update, status, report, search, context, and read-only MCP serving;
-- deterministic `.repolens/` graph artifacts;
+- local CLI indexing, update, status, report, search, context, semantic inspection, semantic evaluation, and read-only MCP serving;
+- deterministic `.repolens/` graph artifacts and separate experimental semantic artifacts;
 - task-scoped Context Packs with bounded output;
 - explicit package/workspace evidence, Relationship Candidates, and Graph Quality Warnings;
 - JavaScript and TypeScript workspace import and scoped alias resolution when local evidence is sufficient;
+- Python CFG and lexical binding inspection through source-free experimental metadata;
 - command risk buckets for candidate verification commands that remain found but not run;
 - freshness, warning, limit, confidence, and truncation metadata;
 - safe assistant orientation without whole-source disclosure.
@@ -511,7 +530,7 @@ Deferred or out of scope:
 - HTTP API or HTTP MCP serving;
 - watch mode, Git hooks, or automatic background indexing;
 - browser UI, graph visualization, or hosted service;
-- AI-required graph generation, embeddings, or semantic enrichment;
+- AI-required graph generation, embeddings, hosted semantic enrichment, or AI prose summaries;
 - write-capable MCP tools;
 - runtime package registry lookups during indexing;
-- deep semantic call graphs or full compiler-level resolution.
+- deep semantic call graphs, data-flow, taint analysis, full compiler-level resolution, or runtime Python behavior proof.
