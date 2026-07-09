@@ -33,6 +33,7 @@ from repolens.semantic_artifact import (
     inspect_semantic_source,
     inspect_semantic_source_from_source,
 )
+from repolens.semantic_evaluation import human_semantic_evaluation, run_semantic_evaluation
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
     SEARCH_MAX_RESULTS_LIMIT,
@@ -86,6 +87,13 @@ def index(
             help="Also write experimental .repolens/semantic.sqlite metadata.",
         ),
     ] = False,
+    experimental_semantic_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-jsonl",
+            help="Also write experimental source-free .repolens/semantic.jsonl debug export.",
+        ),
+    ] = False,
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
@@ -94,6 +102,7 @@ def index(
             parser_backend=parser_backend,
             full_graph_index=full_index,
             experimental_semantic_artifact=experimental_semantic_artifact,
+            experimental_semantic_jsonl=experimental_semantic_jsonl,
         )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
@@ -298,6 +307,13 @@ def update(
             help="Also write experimental .repolens/semantic.sqlite metadata.",
         ),
     ] = False,
+    experimental_semantic_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-jsonl",
+            help="Also write experimental source-free .repolens/semantic.jsonl debug export.",
+        ),
+    ] = False,
 ) -> None:
     """Update RepoLens artifacts using live file change classification."""
     try:
@@ -305,6 +321,7 @@ def update(
             repo_path,
             parser_backend=parser_backend,
             experimental_semantic_artifact=experimental_semantic_artifact,
+            experimental_semantic_jsonl=experimental_semantic_jsonl,
         )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
@@ -656,6 +673,48 @@ def evaluate_context(
         return
 
     typer.echo(human_context_evaluation(envelope), nl=False)
+    if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+        raise typer.Exit(1)
+
+
+@app.command("evaluate-semantics")
+def evaluate_semantics(
+    fixture_root: Annotated[
+        Path,
+        typer.Option(
+            "--fixtures",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Committed semantic evaluation fixture directory to run.",
+        ),
+    ] = Path("tests/fixtures/semantic_evaluation"),
+    export_debug_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--export-debug-jsonl",
+            help="Write and verify optional source-free semantic.jsonl debug export in the temp evaluation repo.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Run local Semantic Evaluation fixtures."""
+    envelope = run_semantic_evaluation(
+        fixture_root=fixture_root,
+        export_debug_jsonl=export_debug_jsonl,
+    )
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_semantic_evaluation(envelope), nl=False)
     if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
         raise typer.Exit(1)
 

@@ -29,6 +29,8 @@ from repolens.scanner import (
 SEMANTIC_SCHEMA_VERSION = 3
 SEMANTIC_STORE_FILENAME = "semantic.sqlite"
 SEMANTIC_STORE_PATH = f"{ARTIFACT_DIR_NAME}/{SEMANTIC_STORE_FILENAME}"
+SEMANTIC_JSONL_FILENAME = "semantic.jsonl"
+SEMANTIC_JSONL_PATH = f"{ARTIFACT_DIR_NAME}/{SEMANTIC_JSONL_FILENAME}"
 SEMANTIC_BACKEND = "semantic_skeleton"
 SEMANTIC_EXPERIMENTAL_STATUS = "experimental"
 SEMANTIC_CONFIDENCE = "candidate"
@@ -159,25 +161,18 @@ def write_semantic_artifact(
             )
             source_rows = [
                 (
-                    file.path,
-                    _language_for_path(file.path),
-                    SEMANTIC_BACKEND,
-                    backend.name,
-                    _json_value(
-                        {
-                            "parser_backend": backend.name,
-                            "parser_backend_provenance": parser_provenance,
-                            "semantic_backend": SEMANTIC_BACKEND,
-                        }
-                    ),
-                    SEMANTIC_CONFIDENCE,
-                    _json_value(SEMANTIC_EVIDENCE_LABELS),
-                    SEMANTIC_EXPERIMENTAL_STATUS,
-                    _json_value(_python_cfg_facts(root, file, backend.name)),
-                    _json_value(_python_binding_facts(root, file, backend.name)),
+                    record["source_path"],
+                    record["source_language"],
+                    record["semantic_backend"],
+                    record["parser_backend"],
+                    _json_value(record["provenance"]),
+                    record["confidence"],
+                    _json_value(record["evidence_labels"]),
+                    record["experimental_status"],
+                    _json_value(record["facts"]["control_flow"]),
+                    _json_value(record["facts"]["bindings"]),
                 )
-                for file in sorted(scan.files, key=lambda item: item.path)
-                if _language_for_path(file.path) in {"python", "javascript", "typescript"}
+                for record in _semantic_source_records(root, scan, backend.name, parser_provenance)
             ]
             connection.executemany(
                 """
@@ -208,6 +203,86 @@ def write_semantic_artifact(
                 pass
 
     return SEMANTIC_STORE_PATH
+
+
+def write_semantic_debug_export(
+    root: Path,
+    scan: ScanResult,
+    *,
+    parser_backend: ParserBackendOption = "default",
+) -> str:
+    """Write deterministic source-free semantic debug/evaluation JSONL."""
+    artifact_dir = root / ARTIFACT_DIR_NAME
+    target = root / SEMANTIC_JSONL_PATH
+    backend = resolve_parser_backend(parser_backend)
+    parser_provenance = default_parser_backend_provenance()
+    temp_path: Path | None = None
+
+    try:
+        artifact_dir.mkdir(exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=str(artifact_dir),
+            encoding="utf-8",
+            prefix="semantic-",
+            suffix=".jsonl.tmp",
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            for record in _semantic_source_records(root, scan, backend.name, parser_provenance):
+                temp_file.write(_json_value(record))
+                temp_file.write("\n")
+        os.replace(temp_path, target)
+    except OSError as exc:
+        raise SemanticArtifactError("semantic_debug_export_write_failed") from exc
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+    return SEMANTIC_JSONL_PATH
+
+
+def _semantic_source_records(
+    root: Path,
+    scan: ScanResult,
+    parser_backend: str,
+    parser_provenance: dict[str, object],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for file in sorted(scan.files, key=lambda item: item.path):
+        language = _language_for_path(file.path)
+        if language not in {"python", "javascript", "typescript"}:
+            continue
+        records.append(
+            {
+                "artifact": "semantic_debug_export",
+                "schema_version": SEMANTIC_SCHEMA_VERSION,
+                "source_path": file.path,
+                "source_language": language,
+                "semantic_backend": SEMANTIC_BACKEND,
+                "parser_backend": parser_backend,
+                "experimental_status": SEMANTIC_EXPERIMENTAL_STATUS,
+                "confidence": SEMANTIC_CONFIDENCE,
+                "evidence_labels": list(SEMANTIC_EVIDENCE_LABELS),
+                "provenance": {
+                    "parser_backend": parser_backend,
+                    "parser_backend_provenance": parser_provenance,
+                    "semantic_backend": SEMANTIC_BACKEND,
+                },
+                "facts": {
+                    "bindings": _python_binding_facts(root, file, parser_backend),
+                    "calls": [],
+                    "control_flow": _python_cfg_facts(root, file, parser_backend),
+                    "definitions": [],
+                    "imports": [],
+                    "relationships": [],
+                },
+            }
+        )
+    return records
 
 
 def inspect_semantic_artifact(root: Path) -> SemanticArtifactStatus:
