@@ -206,8 +206,14 @@ class RepoLensMcpTools:
     def suggest_reading_order(self, task: str, max_files: int = 7) -> dict[str, Any]:
         return self._mcp_envelope(self.query.suggest_reading_order(task, max_files=max_files))
 
-    def get_task_context(self, task: str) -> dict[str, Any]:
-        return get_task_context(self.repo_path, task)
+    def get_task_context(
+        self, task: str, include_experimental_semantic_hints: bool = False
+    ) -> dict[str, Any]:
+        return get_task_context(
+            self.repo_path,
+            task,
+            include_experimental_semantic_hints=include_experimental_semantic_hints,
+        )
 
     def assistant_preflight(
         self,
@@ -217,6 +223,7 @@ class RepoLensMcpTools:
         max_items_per_support_group: int | None = None,
         max_candidate_verification_commands: int | None = None,
         max_total_chars: int | None = None,
+        include_experimental_semantic_hints: bool = False,
     ) -> dict[str, Any]:
         budget = _preflight_budget_overrides(
             max_first_read_files=max_first_read_files,
@@ -229,6 +236,7 @@ class RepoLensMcpTools:
             task,
             focus_hints=focus_hints or [],
             budget=budget,
+            include_experimental_semantic_hints=include_experimental_semantic_hints,
         )
 
     def expand_context(
@@ -398,9 +406,11 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
         return tools.suggest_reading_order(task, max_files)
 
     @server.tool()
-    def get_task_context(task: str) -> dict[str, Any]:
+    def get_task_context(
+        task: str, include_experimental_semantic_hints: bool = False
+    ) -> dict[str, Any]:
         """Return a deterministic v0.3 Context Pack for a natural-language task."""
-        return tools.get_task_context(task)
+        return tools.get_task_context(task, include_experimental_semantic_hints)
 
     @server.tool()
     def assistant_preflight(
@@ -410,6 +420,7 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
         max_items_per_support_group: int | None = None,
         max_candidate_verification_commands: int | None = None,
         max_total_chars: int | None = None,
+        include_experimental_semantic_hints: bool = False,
     ) -> dict[str, Any]:
         """Return the bounded v0.5 Assistant Preflight contract before broad reads."""
         return tools.assistant_preflight(
@@ -419,6 +430,7 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
             max_items_per_support_group,
             max_candidate_verification_commands,
             max_total_chars,
+            include_experimental_semantic_hints,
         )
 
     @server.tool()

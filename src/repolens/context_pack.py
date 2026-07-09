@@ -24,6 +24,7 @@ from repolens.mcp_envelope import (
 )
 from repolens.query import GraphQueryService
 from repolens.redaction import redact_text
+from repolens.semantic_artifact import SEMANTIC_STORE_PATH, inspect_semantic_source
 
 _TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__)/|[._-](test|spec)\.", re.IGNORECASE)
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -202,6 +203,7 @@ def get_task_context(
     *,
     focus_hints: Sequence[str] = (),
     budget: Mapping[str, int] | None = None,
+    include_experimental_semantic_hints: bool = False,
 ) -> dict[str, Any]:
     """Return a deterministic v0.3 Context Pack envelope for a natural-language task."""
     active_budget = _context_budget(budget)
@@ -243,6 +245,10 @@ def get_task_context(
         focus_hints=focus_hints,
         budget=active_budget,
     )
+    if include_experimental_semantic_hints:
+        pack = _with_experimental_semantic_hints(repo_root, pack)
+        pack["budget"] = _budget_metadata_from_pack(pack, active_budget)
+        pack = _apply_character_budget(pack, active_budget["max_total_chars"])
     guarded_pack = guard_context_pack_output(pack)
     truncation = dict(guarded_pack["truncation"])
     return guard_context_pack_output(
@@ -264,6 +270,7 @@ def get_assistant_preflight(
     *,
     focus_hints: Sequence[str] = (),
     budget: Mapping[str, int] | None = None,
+    include_experimental_semantic_hints: bool = False,
 ) -> dict[str, Any]:
     """Return the v0.5 Assistant Preflight contract shared by CLI and MCP."""
     context_envelope = get_task_context(
@@ -271,6 +278,7 @@ def get_assistant_preflight(
         task,
         focus_hints=focus_hints,
         budget=budget,
+        include_experimental_semantic_hints=include_experimental_semantic_hints,
     )
     if not context_envelope.get("ok", False):
         return context_envelope
@@ -723,6 +731,152 @@ def _attach_file_metadata(
             item["graph_quality_warning_codes"] = warning_codes
 
 
+def _with_experimental_semantic_hints(repo_root: Path, pack: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach source-free semantic hints from indexed experimental artifacts."""
+    enriched = dict(pack)
+    hint_cache: dict[str, dict[str, Any] | None] = {}
+    for group_name in (
+        "first_read_files",
+        "likely_tests",
+        "supporting_docs",
+        "supporting_configs",
+        "lower_priority_context",
+    ):
+        enriched[group_name] = [
+            _item_with_experimental_semantic_hint(repo_root, item, hint_cache)
+            for item in _sequence(enriched.get(group_name))
+        ]
+    return enriched
+
+
+def _item_with_experimental_semantic_hint(
+    repo_root: Path, item: Any, hint_cache: dict[str, dict[str, Any] | None]
+) -> dict[str, Any]:
+    mapped = dict(_mapping(item))
+    path = str(mapped.get("path", ""))
+    if not path:
+        return mapped
+    if path not in hint_cache:
+        hint_cache[path] = _experimental_semantic_hint(repo_root, path)
+    hint = hint_cache[path]
+    if hint is not None:
+        mapped["experimental_semantic_hints"] = hint
+    return mapped
+
+
+def _experimental_semantic_hint(repo_root: Path, path: str) -> dict[str, Any] | None:
+    result = inspect_semantic_source(repo_root, path)
+    status = result.artifact_status.status
+    if status not in {"present", "stale"}:
+        return None
+    control_flow = [_semantic_control_flow_hint(fact) for fact in result.control_flow[:3]]
+    bindings = [
+        hint
+        for hint in (_semantic_binding_hint(fact) for fact in result.bindings[:3])
+        if hint is not None
+    ]
+    warnings = sorted(set(str(warning) for warning in result.warnings))
+    if not control_flow and not bindings and not warnings:
+        return None
+    freshness = dict(result.artifact_freshness)
+    return {
+        "bindings": bindings,
+        "confidence": "candidate",
+        "control_flow": control_flow,
+        "experimental": True,
+        "experimental_status": result.experimental_status or "experimental",
+        "freshness": freshness,
+        "limits": {
+            "max_binding_scopes": 3,
+            "max_control_flow_functions": 3,
+            "source_snippets": 0,
+        },
+        "provenance": {
+            "artifact": SEMANTIC_STORE_PATH,
+            "inspection_mode": result.inspection_mode,
+            "parser_backend": result.parser_backend,
+            "semantic_backend": result.semantic_backend,
+            "source": "indexed_semantic_artifact",
+        },
+        "source_path": result.source_path,
+        "warnings": warnings,
+    }
+
+
+def _semantic_control_flow_hint(fact: Mapping[str, Any]) -> dict[str, Any]:
+    nodes = [_mapping(node) for node in _sequence(fact.get("nodes"))]
+    edges = [_mapping(edge) for edge in _sequence(fact.get("edges"))]
+    node_counts = _counts_by_text_key(nodes, "kind")
+    edge_counts = _counts_by_text_key(edges, "kind")
+    terminal_nodes = [node for node in nodes if str(node.get("kind")) in {"return", "raise"}]
+    raise_nodes = [node for node in nodes if str(node.get("kind")) == "raise"]
+    function = _mapping(fact.get("function"))
+    return {
+        "confidence": str(fact.get("confidence", "candidate")),
+        "edge_counts": edge_counts,
+        "evidence_labels": [str(item) for item in _sequence(fact.get("evidence_labels"))],
+        "function": {
+            "line_range": _mapping(function.get("line_range")),
+        },
+        "node_counts": node_counts,
+        "provenance": _mapping(fact.get("provenance")),
+        "raise_paths": [
+            {"line_range": _mapping(node.get("line_range"))} for node in raise_nodes[:3]
+        ],
+        "shape": {
+            "has_branch": node_counts.get("branch", 0) > 0,
+            "has_loop": node_counts.get("loop", 0) > 0,
+            "multiple_exits": len(terminal_nodes) > 1,
+            "raise_path_count": len(raise_nodes),
+            "terminal_path_count": len(terminal_nodes),
+        },
+        "warnings": [str(warning) for warning in _sequence(fact.get("warnings"))],
+    }
+
+
+def _semantic_binding_hint(fact: Mapping[str, Any]) -> dict[str, Any] | None:
+    unresolved = _binding_hint_locations(fact, "unresolved_names", "unresolved_binding")
+    shadowed = _binding_hint_locations(fact, "shadowed_names", "shadowed_local")
+    warnings = [str(warning) for warning in _sequence(fact.get("warnings"))]
+    if not unresolved and not shadowed and not warnings:
+        return None
+    scope = _mapping(fact.get("scope"))
+    return {
+        "confidence": str(fact.get("confidence", "candidate")),
+        "evidence_labels": [str(item) for item in _sequence(fact.get("evidence_labels"))],
+        "provenance": _mapping(fact.get("provenance")),
+        "scope": {
+            "kind": str(scope.get("kind", "")),
+            "line_range": _mapping(scope.get("line_range")),
+        },
+        "shadowed_locals": shadowed,
+        "unresolved_bindings": unresolved,
+        "warnings": warnings,
+    }
+
+
+def _binding_hint_locations(fact: Mapping[str, Any], key: str, kind: str) -> list[dict[str, Any]]:
+    locations = []
+    for item in _sequence(fact.get(key))[:5]:
+        mapped = _mapping(item)
+        location = {"kind": kind, "line_range": _mapping(mapped.get("line_range"))}
+        if key == "shadowed_names":
+            shadowed_scope = _mapping(mapped.get("shadowed_scope"))
+            location["shadowed_scope"] = {"kind": str(shadowed_scope.get("kind", ""))}
+        locations.append(location)
+    return locations
+
+
+def _counts_by_text_key(items: Sequence[Mapping[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key, ""))
+        if not value:
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return {value: counts[value] for value in sorted(counts)}
+
+
 def _command_item(
     command: Any,
     *,
@@ -931,6 +1085,22 @@ def _budget_metadata(
         "approx_tokens": serialized_chars // budget["approx_token_estimate_divisor"] + 1,
         "used_chars": serialized_chars,
     }
+
+
+def _budget_metadata_from_pack(
+    pack: Mapping[str, Any], budget: Mapping[str, int]
+) -> dict[str, Any]:
+    return _budget_metadata(
+        budget,
+        [_mapping(item) for item in _sequence(pack.get("first_read_files"))],
+        [_mapping(item) for item in _sequence(pack.get("likely_tests"))],
+        [_mapping(item) for item in _sequence(pack.get("candidate_verification_commands"))],
+        [_mapping(item) for item in _sequence(pack.get("supporting_docs"))],
+        [_mapping(item) for item in _sequence(pack.get("supporting_configs"))],
+        [_mapping(item) for item in _sequence(pack.get("agent_guidance"))],
+        [_mapping(item) for item in _sequence(pack.get("risk_signals"))],
+        [_mapping(item) for item in _sequence(pack.get("lower_priority_context"))],
+    )
 
 
 def _preflight_budget_controls(

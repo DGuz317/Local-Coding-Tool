@@ -561,13 +561,24 @@ def context(
         ),
     ],
     task: Annotated[str, typer.Argument(help="Natural-language task to orient around.")],
+    include_experimental_semantic_hints: Annotated[
+        bool,
+        typer.Option(
+            "--include-experimental-semantic-hints",
+            help="Opt in to bounded source-free hints from indexed semantic artifacts.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
     ] = False,
 ) -> None:
     """Return a deterministic, bounded Context Pack for a task."""
-    envelope = get_task_context(repo_path, task)
+    envelope = get_task_context(
+        repo_path,
+        task,
+        include_experimental_semantic_hints=include_experimental_semantic_hints,
+    )
     if json_output:
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
         if not envelope.get("ok", False):
@@ -616,6 +627,13 @@ def preflight(
         int | None,
         typer.Option("--max-total-chars", help="Deterministic character cap."),
     ] = None,
+    include_experimental_semantic_hints: Annotated[
+        bool,
+        typer.Option(
+            "--include-experimental-semantic-hints",
+            help="Opt in to bounded source-free hints from indexed semantic artifacts.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
@@ -633,6 +651,7 @@ def preflight(
         task,
         focus_hints=focus_hint or [],
         budget=budget,
+        include_experimental_semantic_hints=include_experimental_semantic_hints,
     )
     if json_output:
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))

@@ -174,6 +174,94 @@ def test_context_pack_cli_and_mcp_use_same_service(tmp_path):
     assert "Lower-priority context to inspect later" in human_result.output
 
 
+def test_context_pack_and_preflight_opt_in_to_indexed_semantic_hints(tmp_path):
+    secret_source = "semantic-hints-source-must-not-leak"
+    _write_text(
+        tmp_path / "src" / "workflow.py",
+        dedent(
+            f"""
+            def run(items):
+                total = 0
+                for item in items:
+                    if item.skip:
+                        continue
+                    if item.fail:
+                        raise RuntimeError({secret_source!r})
+                    total += missing_value
+                total = [total for total in items]
+                return total
+            """
+        ).lstrip(),
+    )
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+    task = "Fix src/workflow.py run workflow"
+    default_context = get_task_context(tmp_path, task)
+    default_preflight = get_assistant_preflight(tmp_path, task)
+    opt_in_context = get_task_context(
+        tmp_path,
+        task,
+        include_experimental_semantic_hints=True,
+    )
+    opt_in_preflight = get_assistant_preflight(
+        tmp_path,
+        task,
+        include_experimental_semantic_hints=True,
+    )
+    cli_context_result = runner.invoke(
+        app,
+        [
+            "context",
+            str(tmp_path),
+            task,
+            "--include-experimental-semantic-hints",
+            "--json",
+        ],
+    )
+    mcp_preflight = RepoLensMcpTools(tmp_path).assistant_preflight(
+        task,
+        include_experimental_semantic_hints=True,
+    )
+
+    assert default_context["ok"] is True
+    assert default_preflight["ok"] is True
+    assert "experimental_semantic_hints" not in json.dumps(default_context)
+    assert "experimental_semantic_hints" not in json.dumps(default_preflight)
+    assert cli_context_result.exit_code == 0
+    assert json.loads(cli_context_result.output) == opt_in_context
+    assert opt_in_preflight == mcp_preflight
+
+    context_hint = opt_in_context["data"]["first_read_files"][0]["experimental_semantic_hints"]
+    preflight_hint = opt_in_preflight["data"]["first_read_files"][0]["experimental_semantic_hints"]
+    assert context_hint == preflight_hint
+    assert context_hint["experimental"] is True
+    assert context_hint["experimental_status"] == "experimental"
+    assert context_hint["confidence"] == "candidate"
+    assert context_hint["limits"] == {
+        "max_binding_scopes": 3,
+        "max_control_flow_functions": 3,
+        "source_snippets": 0,
+    }
+    assert context_hint["provenance"]["artifact"] == ".repolens/semantic.sqlite"
+    assert context_hint["freshness"]["fresh"] is True
+    assert context_hint["control_flow"][0]["shape"] == {
+        "has_branch": True,
+        "has_loop": True,
+        "multiple_exits": True,
+        "raise_path_count": 1,
+        "terminal_path_count": 2,
+    }
+    assert context_hint["control_flow"][0]["raise_paths"] == [
+        {"line_range": {"start": 7, "end": 7}}
+    ]
+    assert any(binding["unresolved_bindings"] for binding in context_hint["bindings"])
+    assert any(binding["shadowed_locals"] for binding in context_hint["bindings"])
+    serialized = json.dumps(opt_in_context, sort_keys=True)
+    assert secret_source not in serialized
+    assert "item.skip" not in serialized
+    assert "RuntimeError" not in serialized
+    assert "def run" not in serialized
+
+
 def test_assistant_preflight_cli_and_mcp_share_bounded_contract(tmp_path):
     _write_context_fixture_repo(tmp_path)
     index_repository(tmp_path)
