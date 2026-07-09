@@ -85,11 +85,15 @@ class SemanticInspectResult:
     control_flow: tuple[dict[str, object], ...] = ()
     bindings: tuple[dict[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
+    inspection_mode: str = "indexed_artifact"
+    debug_mode: dict[str, object] | None = None
+    provenance: dict[str, object] | None = None
 
     def to_cli_data(self) -> dict[str, object]:
         return {
             "artifact_freshness": self.artifact_freshness,
             "artifact_status": self.artifact_status.to_cli_data(),
+            "debug_mode": self.debug_mode,
             "experimental_status": self.experimental_status or SEMANTIC_EXPERIMENTAL_STATUS,
             "facts": {
                 "calls": [],
@@ -103,7 +107,9 @@ class SemanticInspectResult:
                 "fact_set": "python_branch_cfg" if self.control_flow else "semantic_skeleton_empty",
                 "source_snippets": 0,
             },
+            "inspection_mode": self.inspection_mode,
             "parser_backend": self.parser_backend,
+            "provenance": self.provenance,
             "schema_version": SEMANTIC_SCHEMA_VERSION,
             "semantic_backend": self.semantic_backend or SEMANTIC_BACKEND,
             "source_language": self.source_language,
@@ -305,6 +311,79 @@ def inspect_semantic_source(root: Path, source_path: Path | str) -> SemanticInsp
         control_flow=_row_control_flow(row),
         bindings=_row_bindings(row),
         warnings=tuple(warnings),
+    )
+
+
+def inspect_semantic_source_from_source(
+    root: Path, source_path: Path | str
+) -> SemanticInspectResult:
+    """Live source-free semantic inspection without writing semantic artifacts."""
+    normalized_source_path = _normalize_source_path(root, source_path)
+    language = _language_for_path(normalized_source_path)
+    backend = resolve_parser_backend("default")
+    parser_provenance = default_parser_backend_provenance()
+    artifact_status = SemanticArtifactStatus(
+        status="live_debug",
+        reason="semantic_from_source_debug_mode",
+    )
+    debug_mode: dict[str, object] = {
+        "enabled": True,
+        "label": "live source debug output; not indexed repository state",
+        "persistent": False,
+        "writes_artifacts": False,
+    }
+    artifact_freshness: dict[str, object] = {
+        "fresh": None,
+        "reason": "live_source_debug_not_indexed_artifact",
+        "checked_without_live_parse": False,
+        "recommended_action": "repolens index . --experimental-semantic-artifact",
+    }
+    provenance: dict[str, object] = {
+        "mode": "from_source",
+        "parser_backend": backend.name,
+        "parser_backend_provenance": parser_provenance,
+        "semantic_backend": SEMANTIC_BACKEND,
+    }
+    warnings: list[str] = ["Live --from-source debug output is not indexed repository state."]
+
+    source_file = root / normalized_source_path
+    if language not in {"python", "javascript", "typescript"}:
+        warnings.append("Requested source path has unsupported semantic language.")
+        return SemanticInspectResult(
+            source_path=normalized_source_path,
+            artifact_status=artifact_status,
+            artifact_freshness=artifact_freshness,
+            source_language=language,
+            semantic_backend=SEMANTIC_BACKEND,
+            parser_backend=backend.name,
+            control_flow=(),
+            bindings=(),
+            warnings=tuple(warnings),
+            inspection_mode="from_source_debug",
+            debug_mode=debug_mode,
+            provenance=provenance,
+        )
+
+    try:
+        size_bytes = source_file.stat().st_size
+    except OSError:
+        warnings.append("Requested source path cannot be read for live semantic debug inspection.")
+        size_bytes = 0
+
+    file = ScannedFile(path=normalized_source_path, size_bytes=size_bytes)
+    return SemanticInspectResult(
+        source_path=normalized_source_path,
+        artifact_status=artifact_status,
+        artifact_freshness=artifact_freshness,
+        source_language=language,
+        semantic_backend=SEMANTIC_BACKEND,
+        parser_backend=backend.name,
+        control_flow=tuple(_python_cfg_facts(root, file, backend.name)),
+        bindings=tuple(_python_binding_facts(root, file, backend.name)),
+        warnings=tuple(warnings),
+        inspection_mode="from_source_debug",
+        debug_mode=debug_mode,
+        provenance=provenance,
     )
 
 

@@ -207,6 +207,87 @@ def test_semantic_inspect_reports_missing_artifact_without_parsing_live_source(t
     assert str(tmp_path) not in result.output
 
 
+def test_semantic_inspect_from_source_is_explicit_live_non_persistent_debug_output(tmp_path):
+    secret_source = "from-source-debug-must-not-leak"
+    (tmp_path / "app.py").write_text(
+        f"def run(flag):\n    if flag:\n        return {secret_source!r}\n    return 'safe'\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--from-source", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert envelope["ok"] is True
+    assert data["inspection_mode"] == "from_source_debug"
+    assert data["artifact_status"]["status"] == "live_debug"
+    assert data["artifact_status"]["reason"] == "semantic_from_source_debug_mode"
+    assert data["debug_mode"] == {
+        "enabled": True,
+        "label": "live source debug output; not indexed repository state",
+        "persistent": False,
+        "writes_artifacts": False,
+    }
+    assert data["artifact_freshness"] == {
+        "checked_without_live_parse": False,
+        "fresh": None,
+        "reason": "live_source_debug_not_indexed_artifact",
+        "recommended_action": "repolens index . --experimental-semantic-artifact",
+    }
+    assert data["provenance"]["mode"] == "from_source"
+    assert data["provenance"]["semantic_backend"] == "semantic_skeleton"
+    assert data["provenance"]["parser_backend"] == "tree_sitter_js_ts"
+    assert data["semantic_backend"] == "semantic_skeleton"
+    assert data["parser_backend"] == "tree_sitter_js_ts"
+    assert data["source_language"] == "python"
+    assert [node["kind"] for node in data["facts"]["control_flow"][0]["nodes"]] == [
+        "entry",
+        "branch",
+        "return",
+        "return",
+        "exit",
+    ]
+    assert [fact["scope"]["kind"] for fact in data["facts"]["bindings"]] == [
+        "module",
+        "function",
+    ]
+    assert envelope["warnings"] == [
+        "Live --from-source debug output is not indexed repository state."
+    ]
+    assert secret_source not in result.output
+    assert str(tmp_path) not in result.output
+    assert not (tmp_path / ".repolens" / "semantic.sqlite").exists()
+    assert not (tmp_path / ".repolens" / "semantic.jsonl").exists()
+    assert not (tmp_path / ".repolens" / "graph.sqlite").exists()
+    assert not (tmp_path / ".repolens" / "graph.json").exists()
+
+
+def test_semantic_inspect_default_does_not_parse_live_source_when_from_source_exists(tmp_path):
+    secret_source = "default-mode-must-not-live-parse"
+    (tmp_path / "app.py").write_text(
+        f"def run(flag):\n    if flag:\n        return {secret_source!r}\n    return 'safe'\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    envelope = json.loads(result.output)
+    data = envelope["data"]
+    assert data["inspection_mode"] == "indexed_artifact"
+    assert data["artifact_status"]["status"] == "missing"
+    assert data["facts"]["control_flow"] == []
+    assert data["facts"]["bindings"] == []
+    assert secret_source not in result.output
+
+
 def test_semantic_inspect_reports_stale_artifact_with_freshness_metadata(tmp_path):
     (tmp_path / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     index_repository(tmp_path, experimental_semantic_artifact=True)

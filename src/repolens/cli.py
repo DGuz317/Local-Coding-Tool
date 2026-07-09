@@ -28,7 +28,11 @@ from repolens.indexer import RepoLensIndexError, index_repository, update_reposi
 from repolens.mcp_server import run_mcp_server
 from repolens.query import QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT, GraphQueryService
 from repolens.report import RepoLensReportError, read_graph_report
-from repolens.semantic_artifact import inspect_semantic_artifact, inspect_semantic_source
+from repolens.semantic_artifact import (
+    inspect_semantic_artifact,
+    inspect_semantic_source,
+    inspect_semantic_source_from_source,
+)
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
     SEARCH_MAX_RESULTS_LIMIT,
@@ -737,9 +741,20 @@ def semantic_inspect(
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
     ] = False,
+    from_source: Annotated[
+        bool,
+        typer.Option(
+            "--from-source",
+            help="Live source-free debug parse without reading or writing semantic artifacts.",
+        ),
+    ] = False,
 ) -> None:
-    """Inspect indexed semantic artifact metadata for one source file."""
-    result = inspect_semantic_source(repo_path, source_path)
+    """Inspect indexed semantic metadata, or explicit live debug facts with --from-source."""
+    result = (
+        inspect_semantic_source_from_source(repo_path, source_path)
+        if from_source
+        else inspect_semantic_source(repo_path, source_path)
+    )
     data = result.to_cli_data()
     envelope = {
         "data": data,
@@ -752,6 +767,9 @@ def semantic_inspect(
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
         return
 
+    typer.echo(f"Semantic inspection mode: {result.inspection_mode}")
+    if from_source:
+        typer.echo("Live debug output: not indexed repository state; artifacts are not written.")
     typer.echo(f"Semantic artifact status: {result.artifact_status.status}")
     typer.echo(f"Source path: {result.source_path}")
     typer.echo(f"Source language: {result.source_language or 'unknown'}")
