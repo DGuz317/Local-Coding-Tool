@@ -296,6 +296,160 @@ def test_mcp_envelope_redacts_secret_like_metadata_at_output_boundary(tmp_path):
     assert "should-not-leak" not in str(result)
 
 
+def test_create_ai_proposal_service_and_mcp_facade_return_disabled_standard_envelope(
+    tmp_path,
+):
+    from repolens.ai_proposal import create_ai_proposal
+
+    task = "Summarize the bounded context pack"
+
+    service_envelope = create_ai_proposal(
+        tmp_path,
+        kind="context_pack_summary",
+        task=task,
+    )
+    mcp_envelope = RepoLensMcpTools(tmp_path).create_ai_proposal(
+        kind="context_pack_summary",
+        task=task,
+    )
+
+    assert mcp_envelope == service_envelope
+    _assert_ai_proposal_envelope(
+        service_envelope,
+        kind="context_pack_summary",
+        task=task,
+        status="disabled",
+        reason_code="ai_disabled",
+        provider_configured=False,
+    )
+
+
+def test_create_ai_proposal_reports_unavailable_when_enabled_without_provider_config(
+    tmp_path,
+):
+    from repolens.ai_proposal import create_ai_proposal
+
+    task = "Explain architecture from bounded metadata"
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="architecture_explanation",
+        task=task,
+        enable_ai=True,
+    )
+
+    _assert_ai_proposal_envelope(
+        envelope,
+        kind="architecture_explanation",
+        task=task,
+        status="unavailable",
+        reason_code="provider_unconfigured",
+        provider_configured=False,
+    )
+
+
+def test_create_ai_proposal_rejects_unsupported_kind_before_provider_fallback(tmp_path):
+    from repolens.ai_proposal import create_ai_proposal
+
+    task = "Find ownership hypotheses"
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="ownership_hypothesis",
+        task=task,
+        enable_ai=True,
+    )
+
+    _assert_ai_proposal_envelope(
+        envelope,
+        kind="ownership_hypothesis",
+        task=task,
+        status="unsupported_kind",
+        reason_code="unsupported_kind",
+        provider_configured=False,
+    )
+
+
+def _assert_ai_proposal_envelope(
+    envelope,
+    *,
+    kind: str,
+    task: str,
+    status: str,
+    reason_code: str,
+    provider_configured: bool,
+) -> None:
+    assert set(envelope) >= {
+        "confidence",
+        "data",
+        "evidence",
+        "freshness",
+        "limits",
+        "ok",
+        "truncation",
+        "warnings",
+    }
+    assert envelope["ok"] is True
+    assert envelope["truncation"] == {"fields": [], "truncated": False}
+
+    data = envelope["data"]
+    assert data["ai_proposal_version"] == "0.8.ai_proposal.v1"
+    assert data["kind"] == kind
+    assert data["status"] == status
+    assert data["reason"]["code"] == reason_code
+    assert data["provider"] == {
+        "configured": provider_configured,
+        "name": None,
+        "model": None,
+    }
+    assert data["request"]["kind"] == kind
+    assert data["request"]["task"] == task
+    assert data["request"]["metadata_only"] is True
+    assert data["safety"] == {
+        "provider_called": False,
+        "network_accessed": False,
+        "file_written": False,
+        "command_executed": False,
+        "patch_applied": False,
+        "remote_posted": False,
+    }
+
+
+def test_mcp_stdio_smoke_lists_exact_tools_and_calls_create_ai_proposal(tmp_path):
+    async def run_smoke() -> None:
+        server_params = StdioServerParameters(
+            command="uv",
+            args=["run", "repolens", "mcp", str(tmp_path)],
+            env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                tool_names = [tool.name for tool in tools.tools]
+                assert tool_names == list(MCP_TOOL_NAMES)
+                assert "create_ai_proposal" in tool_names
+
+                result = await session.call_tool(
+                    "create_ai_proposal",
+                    arguments={
+                        "kind": "context_pack_summary",
+                        "task": "Summarize the bounded context pack",
+                    },
+                )
+                assert result.structuredContent is not None
+                _assert_ai_proposal_envelope(
+                    result.structuredContent,
+                    kind="context_pack_summary",
+                    task="Summarize the bounded context pack",
+                    status="disabled",
+                    reason_code="ai_disabled",
+                    provider_configured=False,
+                )
+
+    asyncio.run(run_smoke())
+
+
 def test_mcp_stdio_smoke_lists_exact_tools_and_calls_status(tmp_path):
     async def run_smoke() -> None:
         server_params = StdioServerParameters(
