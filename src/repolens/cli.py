@@ -28,6 +28,12 @@ from repolens.indexer import RepoLensIndexError, index_repository, update_reposi
 from repolens.mcp_server import run_mcp_server
 from repolens.query import QUERY_DEFAULT_LIMIT, QUERY_MAX_LIMIT, GraphQueryService
 from repolens.report import RepoLensReportError, read_graph_report
+from repolens.semantic_artifact import (
+    inspect_semantic_artifact,
+    inspect_semantic_source,
+    inspect_semantic_source_from_source,
+)
+from repolens.semantic_evaluation import human_semantic_evaluation, run_semantic_evaluation
 from repolens.text_search import (
     SEARCH_DEFAULT_MAX_RESULTS,
     SEARCH_MAX_RESULTS_LIMIT,
@@ -74,11 +80,29 @@ def index(
             help="Also write .repolens/graph-index-full.md; this may be large.",
         ),
     ] = False,
+    experimental_semantic_artifact: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-artifact",
+            help="Also write experimental .repolens/semantic.sqlite metadata.",
+        ),
+    ] = False,
+    experimental_semantic_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-jsonl",
+            help="Also write experimental source-free .repolens/semantic.jsonl debug export.",
+        ),
+    ] = False,
 ) -> None:
     """Safely discover repository files and bootstrap RepoLens artifacts."""
     try:
         result = index_repository(
-            repo_path, parser_backend=parser_backend, full_graph_index=full_index
+            repo_path,
+            parser_backend=parser_backend,
+            full_graph_index=full_index,
+            experimental_semantic_artifact=experimental_semantic_artifact,
+            experimental_semantic_jsonl=experimental_semantic_jsonl,
         )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
@@ -276,10 +300,29 @@ def update(
             help="Parser backend to use: default, stable, tree_sitter_js_ts, or experimental.",
         ),
     ] = "default",
+    experimental_semantic_artifact: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-artifact",
+            help="Also write experimental .repolens/semantic.sqlite metadata.",
+        ),
+    ] = False,
+    experimental_semantic_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-semantic-jsonl",
+            help="Also write experimental source-free .repolens/semantic.jsonl debug export.",
+        ),
+    ] = False,
 ) -> None:
     """Update RepoLens artifacts using live file change classification."""
     try:
-        result = update_repository(repo_path, parser_backend=parser_backend)
+        result = update_repository(
+            repo_path,
+            parser_backend=parser_backend,
+            experimental_semantic_artifact=experimental_semantic_artifact,
+            experimental_semantic_jsonl=experimental_semantic_jsonl,
+        )
     except RepoLensIndexError as exc:
         error = str(exc) or exc.__class__.__name__
         if json_output:
@@ -518,13 +561,24 @@ def context(
         ),
     ],
     task: Annotated[str, typer.Argument(help="Natural-language task to orient around.")],
+    include_experimental_semantic_hints: Annotated[
+        bool,
+        typer.Option(
+            "--include-experimental-semantic-hints",
+            help="Opt in to bounded source-free hints from indexed semantic artifacts.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
     ] = False,
 ) -> None:
     """Return a deterministic, bounded Context Pack for a task."""
-    envelope = get_task_context(repo_path, task)
+    envelope = get_task_context(
+        repo_path,
+        task,
+        include_experimental_semantic_hints=include_experimental_semantic_hints,
+    )
     if json_output:
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
         if not envelope.get("ok", False):
@@ -573,6 +627,13 @@ def preflight(
         int | None,
         typer.Option("--max-total-chars", help="Deterministic character cap."),
     ] = None,
+    include_experimental_semantic_hints: Annotated[
+        bool,
+        typer.Option(
+            "--include-experimental-semantic-hints",
+            help="Opt in to bounded source-free hints from indexed semantic artifacts.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
@@ -590,6 +651,7 @@ def preflight(
         task,
         focus_hints=focus_hint or [],
         budget=budget,
+        include_experimental_semantic_hints=include_experimental_semantic_hints,
     )
     if json_output:
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
@@ -630,6 +692,48 @@ def evaluate_context(
         return
 
     typer.echo(human_context_evaluation(envelope), nl=False)
+    if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+        raise typer.Exit(1)
+
+
+@app.command("evaluate-semantics")
+def evaluate_semantics(
+    fixture_root: Annotated[
+        Path,
+        typer.Option(
+            "--fixtures",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Committed semantic evaluation fixture directory to run.",
+        ),
+    ] = Path("tests/fixtures/semantic_evaluation"),
+    export_debug_jsonl: Annotated[
+        bool,
+        typer.Option(
+            "--export-debug-jsonl",
+            help="Write and verify optional source-free semantic.jsonl debug export in the temp evaluation repo.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Run local Semantic Evaluation fixtures."""
+    envelope = run_semantic_evaluation(
+        fixture_root=fixture_root,
+        export_debug_jsonl=export_debug_jsonl,
+    )
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_semantic_evaluation(envelope), nl=False)
     if not envelope.get("ok", False) or not envelope["data"]["release_gate"]["passed"]:
         raise typer.Exit(1)
 
@@ -689,6 +793,68 @@ def audit_artifacts_command(
         raise typer.Exit(1)
 
 
+@app.command("semantic-inspect")
+def semantic_inspect(
+    source_path: Annotated[
+        Path,
+        typer.Argument(
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=False,
+            help="Repository-relative Python source path to inspect from semantic artifacts.",
+        ),
+    ],
+    repo_path: Annotated[
+        Path,
+        typer.Option(
+            "--repo-path",
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path containing .repolens artifacts.",
+        ),
+    ] = Path("."),
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+    from_source: Annotated[
+        bool,
+        typer.Option(
+            "--from-source",
+            help="Live source-free debug parse without reading or writing semantic artifacts.",
+        ),
+    ] = False,
+) -> None:
+    """Inspect indexed semantic metadata, or explicit live debug facts with --from-source."""
+    result = (
+        inspect_semantic_source_from_source(repo_path, source_path)
+        if from_source
+        else inspect_semantic_source(repo_path, source_path)
+    )
+    data = result.to_cli_data()
+    envelope = {
+        "data": data,
+        "limits": data["limits"],
+        "ok": True,
+        "warnings": list(result.warnings),
+    }
+
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        return
+
+    typer.echo(f"Semantic inspection mode: {result.inspection_mode}")
+    if from_source:
+        typer.echo("Live debug output: not indexed repository state; artifacts are not written.")
+    typer.echo(f"Semantic artifact status: {result.artifact_status.status}")
+    typer.echo(f"Source path: {result.source_path}")
+    typer.echo(f"Source language: {result.source_language or 'unknown'}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+
+
 @app.command()
 def status(
     repo_path: Annotated[
@@ -709,6 +875,7 @@ def status(
 ) -> None:
     """Report whether RepoLens graph artifacts are available."""
     graph_status = inspect_graph_artifacts(repo_path)
+    semantic_status = inspect_semantic_artifact(repo_path)
     missing_artifacts = list(graph_status.missing_artifacts)
     recommended_action = f"repolens index {shlex.quote(str(repo_path))}"
 
@@ -723,6 +890,7 @@ def status(
         if graph_status.status in {"stale", "rebuild_required"}
         else None,
         "repo_path": str(repo_path),
+        "semantic_artifact": semantic_status.to_cli_data(),
         "status": graph_status.status,
         "supported_schema_version": graph_status.supported_schema_version,
     }

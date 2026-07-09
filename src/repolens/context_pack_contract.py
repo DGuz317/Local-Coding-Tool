@@ -75,6 +75,7 @@ ASSISTANT_PREFLIGHT_CONTRACT = {
     "forbidden_budget_units": ("model_specific_tokens",),
     "default_context_pack_enrichment": "none",
     "opt_in_enrichment_reserved_for_later": True,
+    "opt_in_enrichment_option": "include_experimental_semantic_hints",
 }
 
 CONTEXT_PACK_ITEM_KINDS = (

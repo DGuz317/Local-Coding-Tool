@@ -1,8 +1,10 @@
-# RepoLens MCP v0.6 Assistant Usage Guide
+# RepoLens MCP v0.7 Assistant Usage Guide
 
 RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.6, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata. For JavaScript and TypeScript tasks, preflight may also use parser-backed imports, exports, top-level symbols, resolver outcomes, source-free Call Chain Facts, and Framework Route Hints.
 
-Assistant Preflight and Context Packs are orientation-only. They do not include source snippets, function or method signatures, code bodies, raw comments, paragraph excerpts, raw Agent Guidance instructions, or persisted assistant session state. Use them to choose what to read next, not as a substitute for reading files before editing.
+In v0.7, Python semantic facts are an experimental inspection and evaluation layer, not part of the default Assistant Preflight or stable graph contract. They are source-free candidate metadata for function-level control flow and lexical binding, stored separately from `graph.sqlite`, and excluded from Canonical Graph Hash, default Context Pack IDs, stable graph validation, and default MCP output.
+
+Assistant Preflight and Context Packs are orientation-only. They do not include source snippets, function or method signatures, code bodies, raw condition text, raw expression text, raw values, raw comments, paragraph excerpts, raw Agent Guidance instructions, AI prose summaries, or persisted assistant session state. Use them to choose what to read next, not as a substitute for reading files before editing.
 
 ## v0.6 JS/TS Orientation Rules
 
@@ -10,6 +12,15 @@ Assistant Preflight and Context Packs are orientation-only. They do not include 
 - Treat Call Chain Facts as structural metadata, not runtime proof. They can help decide what file to read first, but they do not prove a call executes.
 - Treat Framework Route Hints as route-orientation hints, not framework emulation. Next.js App Router hints come from local path and parser evidence, not from running Next.js.
 - Treat resolver outcomes as evidence labels. Unresolved aliases, unsupported package entrypoints, ambiguous exports, or incomplete workspace evidence remain candidates or warnings.
+
+## v0.7 Python Semantic Inspection Rules
+
+- Treat semantic facts as experimental metadata, not stable graph facts. They describe bounded Python CFG and lexical binding evidence; they do not prove runtime reachability, data flow, taint, inferred types, raw values, or dynamic behavior.
+- Use indexed `semantic-inspect` output before relying on Python semantic facts. By default, the command reads `.repolens/semantic.sqlite` and reports missing, stale, or incompatible artifact status instead of silently parsing live source.
+- If semantic artifacts are missing or stale, ask the user to run `repolens index` or `repolens update` instead of using live source implicitly.
+- Use `repolens semantic-inspect path/to/file.py --repo-path /absolute/path/to/repo --from-source --json` only for explicit debug inspection. `--from-source` is for one-off debugging only and must not be treated as persisted RepoLens state.
+- Treat `semantic.jsonl`, when present, as a deterministic debug/evaluation export, not the stable semantic database contract.
+- Default MCP tools do not include semantic facts unless the caller explicitly opts in. Optional Context Pack and Assistant Preflight semantic hints are included in v0.7 only behind `include_experimental_semantic_hints`; default output remains unchanged without that flag.
 
 ## Setup Flow
 

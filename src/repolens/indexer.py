@@ -24,6 +24,11 @@ from repolens.graph_store import (
 )
 from repolens.parser_backends import ParserBackendOption
 from repolens.scanner import ARTIFACT_DIR_NAME, ScanError, ScanResult, scan_repository
+from repolens.semantic_artifact import (
+    SemanticArtifactError,
+    write_semantic_artifact,
+    write_semantic_debug_export,
+)
 
 SCAN_ARTIFACT_PATH = f"{ARTIFACT_DIR_NAME}/scan.json"
 ARTIFACT_GITIGNORE_CONTENT = "*\n!.gitignore\n"
@@ -43,11 +48,13 @@ class IndexResult:
     scan_artifact: str = SCAN_ARTIFACT_PATH
     graph_store: str = GRAPH_STORE_PATH
     graph_exports: tuple[str, ...] = GRAPH_EXPORT_PATHS
+    semantic_artifact: str | None = None
+    semantic_debug_export: str | None = None
     warnings: tuple[str, ...] = ()
 
     def to_cli_data(self) -> dict[str, object]:
         scan_data = self.scan.to_artifact_dict()
-        return {
+        data = {
             "artifact_dir": self.artifact_dir,
             "counts": scan_data["counts"],
             "eligible_files": scan_data["files"],
@@ -57,6 +64,13 @@ class IndexResult:
             "scan_artifact": self.scan_artifact,
             "skipped_paths": scan_data["skipped_paths"],
         }
+        if self.semantic_artifact is not None:
+            data["semantic_artifact"] = self.semantic_artifact
+            data["semantic_artifact_status"] = "experimental"
+        if self.semantic_debug_export is not None:
+            data["semantic_debug_export"] = self.semantic_debug_export
+            data["semantic_debug_export_status"] = "experimental_debug_only"
+        return data
 
 
 @dataclass(frozen=True)
@@ -88,6 +102,8 @@ def index_repository(
     file_changes: tuple[FileChange, ...] = (),
     parser_backend: ParserBackendOption = "default",
     full_graph_index: bool = False,
+    experimental_semantic_artifact: bool = False,
+    experimental_semantic_jsonl: bool = False,
 ) -> IndexResult:
     """Run the safe discovery index path for ``repo_path`` and write bootstrap artifacts."""
     try:
@@ -117,15 +133,38 @@ def index_repository(
             warnings = (
                 f"Full graph index export may be large; RepoLens wrote {FULL_GRAPH_INDEX_PATH}.",
             )
-    except (GraphStoreError, GraphExportError) as exc:
+        semantic_artifact = None
+        semantic_debug_export = None
+        if experimental_semantic_artifact:
+            semantic_artifact = write_semantic_artifact(
+                root,
+                scan,
+                parser_backend=parser_backend,
+            )
+        if experimental_semantic_jsonl:
+            semantic_debug_export = write_semantic_debug_export(
+                root,
+                scan,
+                parser_backend=parser_backend,
+            )
+    except (GraphStoreError, GraphExportError, SemanticArtifactError) as exc:
         raise RepoLensIndexError(str(exc)) from exc
-    return IndexResult(root=root, scan=scan, graph_exports=graph_exports, warnings=warnings)
+    return IndexResult(
+        root=root,
+        scan=scan,
+        graph_exports=graph_exports,
+        semantic_artifact=semantic_artifact,
+        semantic_debug_export=semantic_debug_export,
+        warnings=warnings,
+    )
 
 
 def update_repository(
     repo_path: Path | str,
     *,
     parser_backend: ParserBackendOption = "default",
+    experimental_semantic_artifact: bool = False,
+    experimental_semantic_jsonl: bool = False,
 ) -> UpdateResult:
     """Update an existing graph, or initialize one when artifacts are missing."""
     try:
@@ -162,10 +201,29 @@ def update_repository(
         else:
             graph_store.rebuild(scan, file_changes=changes, parser_backend=parser_backend)
             mode = "initialized" if initialized else "full_rebuild"
-    except (GraphStoreError, GraphExportError) as exc:
+        semantic_artifact = None
+        semantic_debug_export = None
+        if experimental_semantic_artifact:
+            semantic_artifact = write_semantic_artifact(
+                root,
+                scan,
+                parser_backend=parser_backend,
+            )
+        if experimental_semantic_jsonl:
+            semantic_debug_export = write_semantic_debug_export(
+                root,
+                scan,
+                parser_backend=parser_backend,
+            )
+    except (GraphStoreError, GraphExportError, SemanticArtifactError) as exc:
         raise RepoLensIndexError(str(exc)) from exc
 
-    index = IndexResult(root=root, scan=scan)
+    index = IndexResult(
+        root=root,
+        scan=scan,
+        semantic_artifact=semantic_artifact,
+        semantic_debug_export=semantic_debug_export,
+    )
     return UpdateResult(
         root=root,
         index=index,

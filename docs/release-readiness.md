@@ -1,6 +1,8 @@
-# RepoLens MCP v0.6 Release Readiness
+# RepoLens MCP v0.7 Release Readiness
 
 This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
+
+v0.7 release readiness is about the Python Semantic Analysis Prototype: experimental, source-free Python CFG and lexical binding facts that remain separate from the stable graph contract while proving deterministic semantic inspection, evaluation, artifact safety, and release-gate evidence.
 
 v0.5 release readiness is about a stable Assistant Preflight adoption path. Assistants should call preflight before broad file reads, then use the returned first-read files, likely tests, warnings, freshness, budget metadata, and candidate commands as orientation only.
 
@@ -14,14 +16,15 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 
 - Project and distribution name: `repolens` / RepoLens MCP.
 - License wording and whether a license file should be added before release.
-- PyPI publishing remains deferred for v0.6 unless a maintainer opens an explicit release issue.
-- Docker registry publishing remains deferred for v0.6 unless a maintainer opens an explicit release issue.
+- PyPI publishing remains deferred for v0.7 unless a maintainer opens an explicit release issue.
+- Docker registry publishing remains deferred for v0.7 unless a maintainer opens an explicit release issue.
 - Assistant client config examples for OpenCode, Claude Desktop, and Cursor-style MCP are accurate for the current CLI command shape.
 - Final README positioning and whether the README should target users, contributors, or both.
-- Known limitations in `docs/known-limitations.md` reflect dogfooding outcomes and are acceptable for release.
+- Known limitations in `docs/known-limitations.md` reflect dogfooding and semantic evaluation outcomes and are acceptable for release.
 - v0.4 maintainer release judgment for issue #128 remains recorded as the v0.5 prerequisite.
 - Final v0.5 maintainer release judgment is recorded before v0.5 is cut.
 - Final v0.6 maintainer release judgment is recorded before v0.6 is cut.
+- Final v0.7 maintainer release judgment is recorded before v0.7 is cut.
 
 ## Local Verification Gate
 
@@ -33,7 +36,10 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy src/repolens
 uv run repolens evaluate-context --json
-uv run repolens index . --json
+uv run repolens evaluate-semantics --export-debug-jsonl --json
+uv run repolens index . --experimental-semantic-artifact --json
+uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py --json
+uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py --from-source --json
 uv run repolens audit-artifacts . --json
 uv build --out-dir /tmp/repolens-dist --clear
 ```
@@ -64,6 +70,24 @@ The v0.6 assistant-facing contract keeps Assistant Preflight as the first step b
 - Framework Route Hints are deterministic hints from local file/config/parser evidence, not framework emulation, compiler output, bundler output, or runtime route proof.
 - Resolver outcomes preserve uncertainty for unsupported aliases, ambiguous exports, incomplete workspace evidence, and complex package entrypoints through unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings.
 - Assistant-facing output must continue to omit source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, and absolute host paths.
+
+## v0.7 Assistant-Facing Documentation
+
+The v0.7 assistant-facing contract keeps semantic facts out of default MCP and Context Pack output while documenting the explicit CLI inspection path:
+
+- v0.7 Python semantic facts are experimental, source-free metadata stored separately from the stable graph.
+- `semantic-inspect` reads indexed semantic artifacts by default; missing, stale, or incompatible artifacts return artifact status and freshness instead of implicit live parsing.
+- `semantic-inspect --from-source` is explicit, non-persistent debug output, not indexed repository state.
+- Python CFG facts and lexical binding facts are candidate metadata, not runtime reachability proof, data-flow analysis, taint analysis, type inference, raw-value recovery, or dynamic behavior proof.
+- Assistant-facing output and semantic artifacts must omit source snippets, code bodies, function signatures, raw condition text, raw expression text, raw values, raw comments, raw docstrings, raw string literals, raw secrets, raw Agent Guidance text, absolute host paths, and AI prose summaries.
+
+v0.7 release readiness requires passing semantic evaluation evidence for Python CFG, lexical binding, warnings, and no-disclosure fixtures.
+
+v0.7 release readiness requires artifact audit evidence that semantic artifacts and assistant-facing output do not leak source snippets, code bodies, function signatures, raw comments, raw docstrings, raw string literals, raw secrets, raw Agent Guidance text, or absolute host paths.
+
+v0.7 release readiness requires evidence that semantic facts are excluded from Canonical Graph Hash, default Context Pack IDs, stable graph validation, default MCP output, default Assistant Preflight output, and default Context Pack output.
+
+Optional Context Pack semantic hints are included in v0.7 only behind explicit `include_experimental_semantic_hints` opt-in; they are documented, audited, release-gated, and absent from default Context Pack and Assistant Preflight output.
 
 ## Isolated Native Install Smoke
 
@@ -193,6 +217,19 @@ uv run repolens evaluate-context --json
 ```
 
 The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, JS/TS call chains, alias ambiguity, re-export behavior, workspace package imports, route hints, and no-source-disclosure negatives.
+
+Latest local evidence for issue #190 on 2026-07-09:
+
+- Blocker status: #181, #182, #183, #184, #185, #186, #187, #188, and #189 are closed before final readiness judgment. Optional Context Pack semantic hints are included only behind explicit `include_experimental_semantic_hints` opt-in and do not change default Context Pack or Assistant Preflight output.
+- Assistant-facing docs: README, `docs/assistant-usage-guide.md`, `docs/known-limitations.md`, `docs/repolens-v0.7-release-tracker.md`, and this readiness file explain that Python semantic facts are experimental, source-free, separate from the stable graph contract, and not default MCP or Context Pack output.
+- Semantic inspection evidence: `uv run repolens index . --experimental-semantic-artifact --json` returned `ok: true`, wrote `.repolens/semantic.sqlite`, indexed 225 eligible files, and skipped 19 paths. `uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py --json` returned `ok: true`, `inspection_mode: indexed_artifact`, present/current artifact status, `schema_version: 3`, `source_snippets: 0`, Python CFG branch/return/exit facts, and lexical binding facts. `uv run repolens semantic-inspect tests/fixtures/semantic_evaluation/branch_cfg.py --from-source --json` returned `ok: true`, `inspection_mode: from_source_debug`, `persistent: false`, `writes_artifacts: false`, and the warning `Live --from-source debug output is not indexed repository state.`
+- Semantic evaluation evidence: `uv run repolens evaluate-semantics --export-debug-jsonl --json` returned `ok: true`, release gate passed, 4/4 semantic cases passed, case summary `supported: 3`, `unsupported: 1`, `ambiguous: 1`, and `uncertain: 2`. Stable contract checks confirmed Canonical Graph Hash unchanged, default Context Pack ID unchanged, default Context Pack paths unchanged, and default MCP output excludes semantic facts. Debug export evidence confirmed `.repolens/semantic.jsonl` was written, deterministic, source-free, separate from stable graph, and passed.
+- Context evaluation evidence: `uv run repolens evaluate-context --json` returned `ok: true`, release gate passed, 27/27 total cases passed, 26/26 release-blocking cases passed, 5/5 Assistant Preflight dogfood cases passed, 2/2 artifact audit cases passed, 37 candidate commands marked not run, and 1 stale graph risk case.
+- Artifact audit evidence: `uv run repolens audit-artifacts . --json` returned `ok: true`, audited 9 artifacts including `.repolens/semantic.sqlite`, and reported 0 violations. Audit checks passed for source snippet leakage, absolute host paths, raw secret-like values, raw Agent Guidance mirroring, oversized artifacts, candidate commands not run, JS/TS Call Chain Facts source-free columns, artifact boundary, and MCP/preflight contract preservation.
+- Optional Context Pack semantic hints evidence: issue #189 is closed, and `uv run pytest` includes `test_context_pack_and_preflight_opt_in_to_indexed_semantic_hints`, which proves default Context Pack and Assistant Preflight output omit `experimental_semantic_hints`, opt-in output includes bounded source-free hints, CLI and MCP outputs agree, and raw source strings do not leak.
+- No-disclosure judgment: v0.7 semantic artifacts, debug/evaluation exports, default Context Packs, default Assistant Preflight, and MCP-facing output must not include source snippets, raw condition text, function signatures, raw expression text, raw values, function bodies, code bodies, raw comments, raw docstrings, raw string literals, raw secrets, raw Agent Guidance text, absolute host paths, or AI prose summaries. The semantic secret-like symbol regression test covers redaction of function, parameter, assignment, and semantic identity names before artifact audit.
+- Full verification gate: passed in this branch. `uv run pytest` passed 230/230 tests. `uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy src/repolens` passed. `uv run repolens evaluate-context --json`, `uv run repolens evaluate-semantics --export-debug-jsonl --json`, `uv run repolens index . --experimental-semantic-artifact --json`, indexed and live `semantic-inspect`, `uv run repolens audit-artifacts . --json`, and `uv build --out-dir /tmp/repolens-dist --clear` passed. Build produced `/tmp/repolens-dist/repolens-0.6.0.tar.gz` and `/tmp/repolens-dist/repolens-0.6.0-py3-none-any.whl`; package versioning remains a separate release-management concern.
+- Maintainer release judgment: approved for v0.7 release readiness after the full verification gate passes. Optional Context Pack semantic hints are included only behind explicit opt-in and remain experimental, bounded, source-free metadata.
 
 Latest local evidence for issue #170 on 2026-07-06:
 

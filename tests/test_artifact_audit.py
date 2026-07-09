@@ -69,6 +69,31 @@ def test_audit_artifacts_reports_negative_fixture_failures_clearly(tmp_path):
     assert any("must remain discovered-only" in violation["message"] for violation in violations)
 
 
+def test_audit_artifacts_detects_source_bearing_semantic_jsonl_fields(tmp_path):
+    _write_audit_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_text(
+        tmp_path / ".repolens" / "semantic.jsonl",
+        json.dumps(
+            {
+                "source_path": "src/auth/login.ts",
+                "raw_condition_text": "input.user.trim().toLowerCase().length > 0",
+                "function_signature": "validateLogin(input)",
+                "raw_value": f"{tmp_path.as_posix()}/src/auth/login.ts",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+    envelope = audit_artifacts(tmp_path)
+
+    assert envelope["ok"] is False
+    checks = {violation["check"] for violation in envelope["data"]["violations"]}
+    assert "semantic_outputs_source_free" in checks
+    assert "absolute_host_paths" in checks
+
+
 def _write_negative_artifact(root) -> None:
     payload = {
         "ok": True,
