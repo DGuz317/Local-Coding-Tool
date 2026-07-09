@@ -1,6 +1,6 @@
-# RepoLens MCP v0.6 Known Limitations
+# RepoLens MCP v0.7 Known Limitations
 
-These limitations are acceptable for v0.6 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight or expansion, corrupt artifacts, stale graph facts, or unusable workflows.
+These limitations are acceptable for v0.7 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation, Semantic Evaluation, artifact audit, or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight, stale semantic inspection, corrupt artifacts, stale graph facts, or unusable workflows.
 
 ## Resolution Limits
 
@@ -16,12 +16,21 @@ These limitations are acceptable for v0.6 when they remain explicit, safe, and n
 
 ## Semantic Analysis Limits
 
-- RepoLens does not build deep semantic call graphs, control-flow graphs, data-flow graphs, or taint analysis.
+- v0.7 Python semantic facts are experimental, source-free candidate metadata outside the stable graph contract. They do not affect Canonical Graph Hash, default Context Pack IDs, stable graph validation, default MCP output, default Assistant Preflight output, or default Context Pack output.
+- v0.7 Python semantic analysis is limited to deterministic function-level CFG and lexical binding metadata.
+- Python CFG facts are function-level structural metadata for bounded constructs such as `if`, loops, `return`, `raise`, sequential `with` blocks, and limited `try` shapes. They are not runtime reachability proof, data-flow analysis, taint analysis, type inference, exception modeling, or a deep semantic call graph.
+- Python lexical binding facts describe deterministic AST-level local definitions, parameters, imports, assignments, references, unresolved names, shadowing, free-variable candidates, `global`, and `nonlocal` declarations. They do not prove runtime values, object identity, import execution, descriptor behavior, monkeypatching, reflection, decorators, metaclasses, generated attributes, or dynamic scope effects.
+- Unsupported or dynamic Python constructs produce warnings, unresolved statuses, or unsupported markers instead of guessed facts. This includes complex `match` behavior, async scheduling, generators, `yield`, `await`, dynamic `exec`/`eval`, dynamic imports, runtime mutation of `globals()` or `locals()`, and cross-module type/runtime inference.
+- Runtime dispatch, monkeypatching, metaclasses, decorators with dynamic effects, reflection, imports with runtime side effects, and framework behavior are not executed or inferred.
+- Indexed `semantic-inspect` reads `.repolens/semantic.sqlite` by default. Missing, stale, or incompatible artifacts report artifact status and freshness; RepoLens does not silently parse live source unless the user passes explicit `--from-source`.
+- `semantic-inspect --from-source` is a non-persistent live debug mode. It does not write `graph.sqlite`, `.repolens/semantic.sqlite`, `semantic.jsonl`, Canonical Graph Hash inputs, default Context Pack IDs, stable graph validation inputs, or default MCP output.
+- `semantic.jsonl`, when generated for debug/evaluation, is bounded, deterministic, source-free, and audit-covered. It is not the stable semantic database contract.
+- Semantic artifacts must remain source-free and must not mirror code bodies, function signatures, raw comments, raw docstrings, raw string literals, secrets, or absolute host paths.
+- Optional Context Pack semantic hints are included only behind explicit `include_experimental_semantic_hints` opt-in and remain experimental, bounded, source-free metadata; default Context Packs remain deterministic graph-orientation bundles, not semantic embedding search results or AI intent classifiers.
 - Call Chain Facts are shallow parser-derived structural metadata with method names, receiver shape, and bounded line ranges. They are not runtime reachability proof, data-flow evidence, framework lifecycle evidence, or a semantic call graph.
 - Framework Route Hints are deterministic local hints, not runtime route proof. RepoLens does not run Next.js, emulate framework loaders, inspect build output, or execute package-manager, bundler, compiler, framework, or test commands to discover routes.
 - Impact Analysis is deterministic edit-planning context, not a guarantee of runtime reachability.
 - Suggested Reading Order is a bounded heuristic over graph facts and may be shallow for docs/config-only repositories.
-- Context Packs are deterministic task-matching and graph-orientation bundles, not semantic embedding search results or AI intent classifiers.
 - Structural Summaries are derived from graph facts and structural metadata, not LLM-generated prose summaries.
 
 ## Context Pack Limits
@@ -59,7 +68,8 @@ These limitations are acceptable for v0.6 when they remain explicit, safe, and n
 - No runtime package registry lookups during normal indexing or MCP serving.
 - No full framework emulation or runtime package-manager, bundler, compiler, framework, or test execution during indexing, Context Pack generation, preflight, or artifact audit.
 - No persisted Context Pack sessions or server-side assistant memory.
-- No PyPI, Docker registry, or hosted publishing automation in v0.6.
+- No PyPI, Docker registry, or hosted publishing automation in v0.7.
+- No PyPI, Docker registry, or hosted publishing automation in v0.6 remains true for the v0.7 readiness branch.
 
 ## Dogfooding And Evaluation Outcomes Reflected Here
 
@@ -72,3 +82,5 @@ The v0.5 dogfood evaluation pack in `docs/dogfood/2026-07-02-v0.5-dogfood-evalua
 No PyPI, Docker registry, or hosted publishing automation in v0.5 was accepted as a release boundary and remains unchanged in v0.6.
 
 The v0.6 dogfood evaluation pack in `docs/dogfood/2026-07-06-v0.6-dogfood-evaluation-pack.md` adds release-blocking checks for JS/TS call chains, re-export behavior, workspace imports, route hints, stale graph behavior, and no-source-disclosure negatives. Parser timing and file-count evidence are bounded local fixture evidence only; use them to document limitations, not to justify parse caches, worker pools, indexing parallelism, telemetry, package-manager execution, compiler execution, or framework execution.
+
+The v0.7 semantic evaluation suite in `tests/fixtures/semantic_evaluation` adds release-blocking checks for deterministic Python CFG, lexical binding, unsupported/uncertain constructs, no-source-disclosure negatives, stable identity exclusion, and semantic debug/evaluation export audit behavior. Use those results to document limitations, not to broaden into data-flow, taint, type inference, dynamic runtime emulation, package-manager execution, compiler execution, framework execution, AI summaries, embeddings, telemetry, or hosted services.

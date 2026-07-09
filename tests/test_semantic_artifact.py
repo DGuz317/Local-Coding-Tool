@@ -5,6 +5,7 @@ import sqlite3
 
 from typer.testing import CliRunner
 
+from repolens.artifact_audit import audit_artifacts
 from repolens.cli import app
 from repolens.context_pack import get_task_context
 from repolens.indexer import index_repository
@@ -63,6 +64,40 @@ def test_experimental_semantic_artifact_records_source_free_metadata(tmp_path):
     assert (
         b"do-not-disclose-source" not in (tmp_path / ".repolens" / "semantic.sqlite").read_bytes()
     )
+
+
+def test_semantic_artifact_redacts_secret_like_symbol_names_before_audit(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "def issue_auth_token(password_input):\n"
+        "    token_secret = password_input\n"
+        "    if token_secret:\n"
+        "        return 1\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+
+    index_repository(tmp_path, experimental_semantic_artifact=True)
+
+    audit = audit_artifacts(tmp_path)
+    assert audit["ok"] is True, audit["data"]["violations"]
+
+    inspect_result = runner.invoke(
+        app,
+        ["semantic-inspect", "app.py", "--repo-path", str(tmp_path), "--json"],
+    )
+    assert inspect_result.exit_code == 0
+    data = json.loads(inspect_result.output)["data"]
+    control_flow = data["facts"]["control_flow"]
+    bindings = data["facts"]["bindings"]
+    assert control_flow[0]["function"]["name"] == "<redacted>"
+    assert control_flow[0]["function"]["identity"] == "app.py:<redacted>:1-5"
+    assert bindings[0]["definitions"][0]["name"] == "<redacted>"
+    assert bindings[1]["scope"]["name"] == "<redacted>"
+    assert bindings[1]["scope"]["identity"] == "app.py:<redacted>:1-5"
+    assert bindings[1]["parameters"][0]["name"] == "<redacted>"
+    assert bindings[1]["assigned_names"][0]["name"] == "<redacted>"
+    for raw_name in ("issue_auth_token", "password_input", "token_secret"):
+        assert raw_name not in inspect_result.output
 
 
 def test_experimental_semantic_artifact_excluded_from_stable_identity(tmp_path):
