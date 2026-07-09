@@ -324,6 +324,55 @@ def test_create_ai_proposal_service_and_mcp_facade_return_disabled_standard_enve
     )
 
 
+def test_create_ai_proposal_mcp_facade_returns_configured_test_provider_success_after_indexing(
+    tmp_path,
+):
+    _write_preflight_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    result = RepoLensMcpTools(tmp_path).create_ai_proposal(
+        kind="context_pack_summary",
+        task="Summarize auth login context without exposing API_TOKEN=mcp-secret-204",
+        enable_ai=True,
+        provider="test",
+        model="context-pack-summary-v1",
+    )
+
+    assert result["ok"] is True
+    data = result["data"]
+    assert data["status"] == "available"
+    assert data["kind"] == "context_pack_summary"
+    provider = data["provider"]
+    assert provider["configured"] is True
+    assert provider["name"] == "test"
+    assert provider["model"] == "context-pack-summary-v1"
+    proposal = data["proposal"]
+    assert proposal["kind"] == "context_pack_summary"
+    proposal_provider = proposal["provider"]
+    assert proposal_provider["name"] == "test"
+    assert proposal_provider["model"] == "context-pack-summary-v1"
+    assert proposal["input_boundary"]["default_scope"] == "bounded_repolens_metadata"
+    assert set(proposal["input_boundary"]["excluded_material"]) >= {
+        "source_bodies",
+        "raw_comments",
+        "raw_secrets",
+        "raw_agent_guidance_text",
+        "credential_values",
+    }
+    assert proposal["source_disclosure"]["source_text_included"] is False
+    assert proposal["source_disclosure"]["raw_comments_included"] is False
+    assert proposal["source_disclosure"]["raw_secrets_included"] is False
+    assert proposal["source_disclosure"]["raw_agent_guidance_text_included"] is False
+    assert proposal["deterministic_evidence"]["first_read_files"][0]["path"] == (
+        "src/auth/login.ts"
+    )
+    assert proposal["ai_interpretation"]["summary"]
+
+    serialized = str(result)
+    assert "mcp-secret-204" not in serialized
+    assert "return input.user" not in serialized
+
+
 def test_create_ai_proposal_reports_unavailable_when_enabled_without_provider_config(
     tmp_path,
 ):

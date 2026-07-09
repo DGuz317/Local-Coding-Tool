@@ -10,6 +10,7 @@ from typing import Any
 REDACTED_VALUE = "redacted"
 REDACTED_COMMAND_VALUE = "<redacted>"
 MAX_REDACTED_COMMAND_CHARS = 240
+REDACTION_POLICY_VERSION = "0.8.redaction.v1"
 _SECRET_TEXT_VALUE = "<redacted>"
 
 SECRET_FILE_NAMES = frozenset(
@@ -51,6 +52,10 @@ SAFE_METADATA_KEYS = frozenset(
         "approx_tokens",
         "approx_tokens_avoided_vs_lexical",
         "approximate_token_estimate",
+        "credential_values_included",
+        "provider_error_payload_included",
+        "raw_agent_guidance_text_included",
+        "raw_secrets_included",
     }
 )
 COMMAND_SECRET_OPTIONS = (
