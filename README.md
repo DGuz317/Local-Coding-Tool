@@ -17,7 +17,7 @@ Current version: **v0.7.0**.
 
 v0.7.0 adds the Python Semantic Analysis Prototype: experimental, source-free function-level control-flow and lexical binding metadata stored separately from the stable graph. Release notes live in `docs/releases/v0.7.0.md`.
 
-v0.7 semantic facts are candidate metadata for inspection and evaluation only. They do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, default Assistant Preflight output, or default MCP output.
+v0.7 Python semantic facts are experimental, source-free metadata stored separately from the stable graph. They are candidate metadata for inspection and evaluation only; they do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, default Assistant Preflight output, or default MCP output.
 
 ## What Problem Does This Solve?
 
