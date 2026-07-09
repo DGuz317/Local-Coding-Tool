@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from repolens.ai_proposal import create_ai_proposal, human_ai_proposal
 from repolens.artifact_audit import (
     DEFAULT_MAX_ARTIFACT_BYTES,
     RepoLensArtifactAuditError,
@@ -660,6 +661,71 @@ def preflight(
         return
 
     typer.echo(human_assistant_preflight(envelope), nl=False)
+    if not envelope.get("ok", False):
+        raise typer.Exit(1)
+
+
+@app.command("create-ai-proposal")
+def create_ai_proposal_command(
+    repo_path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+            help="Repository path for bounded RepoLens metadata.",
+        ),
+    ],
+    kind: Annotated[str, typer.Argument(help="AI Proposal kind to request.")],
+    task: Annotated[
+        str | None,
+        typer.Argument(help="Optional natural-language task context."),
+    ] = None,
+    context_pack_id: Annotated[
+        str | None,
+        typer.Option("--context-pack-id", help="Optional Context Pack ID reference."),
+    ] = None,
+    target: Annotated[
+        str | None,
+        typer.Option("--target", help="Optional repo-relative target path or symbol."),
+    ] = None,
+    enable_ai: Annotated[
+        bool,
+        typer.Option("--enable-ai", help="Explicitly enable AI Proposal provider use."),
+    ] = False,
+    provider: Annotated[
+        str | None,
+        typer.Option("--provider", help="Explicit AI provider name; no default is assumed."),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="Explicit AI model name; no default is assumed."),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit a machine-readable JSON envelope."),
+    ] = False,
+) -> None:
+    """Return the v0.8 AI Proposal safety path without provider execution."""
+    envelope = create_ai_proposal(
+        repo_path,
+        kind,
+        task=task,
+        context_pack_id=context_pack_id,
+        target=target,
+        enable_ai=enable_ai,
+        provider=provider,
+        model=model,
+    )
+    if json_output:
+        typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
+        if not envelope.get("ok", False):
+            raise typer.Exit(1)
+        return
+
+    typer.echo(human_ai_proposal(envelope), nl=False)
     if not envelope.get("ok", False):
         raise typer.Exit(1)
 
