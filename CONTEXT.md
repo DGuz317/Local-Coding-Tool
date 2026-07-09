@@ -1,14 +1,18 @@
-# RepoLens
+# RepoLens Domain Context
 
-RepoLens currently describes a repository as a local, deterministic graph so coding assistants can inspect structure and plan safe read-only queries before editing. Proposed post-v0.4 planning language treats RepoLens as a layered local code intelligence engine whose deterministic graph remains the trusted foundation.
+RepoLens describes a repository as a local, evidence-backed code intelligence graph so coding assistants and developers can understand, plan, review, and eventually act on repository knowledge without losing provenance or safety boundaries.
 
-## Language
+## Purpose
 
-### Post-v0.4 planning language
+This file defines the shared product language for RepoLens planning, issues, ADRs, and implementation discussions. It is a glossary and boundary document, not a release plan, API specification, or approval to implement every future layer.
 
-Terms involving Code Intelligence Engine, AI Proposal, Semantic Analysis Prototype, Active Workflow, Graph Store Seam, Assistant Preflight, Framework Route Hint, and related future layers are proposed planning language until ADR 0006 and the v0.5 tracker are accepted. They do not loosen the current v0.4 implementation guardrails.
+Use versioned planning documents under `docs/` for release scope. Use this file to keep those plans consistent about what RepoLens terms mean, what each term avoids, and where deterministic graph facts end before semantic prototypes, AI Proposals, or active workflows begin.
 
-### Glossary
+## Planning Status
+
+Terms involving Code Intelligence Engine, AI Proposal Layer, AI Proposal, Semantic Analysis Prototype, Active Workflow, Graph Store Seam, Assistant Preflight, Framework Route Hint, and related future layers are proposed planning language until accepted by the relevant ADR and version tracker. They do not loosen current implementation guardrails.
+
+## Glossary
 
 **Code Intelligence Engine**:
 A local system that helps assistants and developers understand, plan, review, and safely act on repository knowledge. In RepoLens, it is broader than assistant preflight but remains grounded in evidence-backed repository facts.
@@ -58,25 +62,49 @@ _Avoid_: Serialized item payload, session handle, source-bearing handle
 A deterministic summary of repository structure for a repo, package, directory, file, symbol, or test group, built from graph facts, relationships, reasons, and freshness signals rather than generated prose or source excerpts.
 _Avoid_: AI summary, source excerpt, prose digest
 
+**AI Proposal Layer**:
+The optional v0.8 layer that asks an explicitly configured AI provider to explain, review, rank, or propose from bounded RepoLens metadata while keeping every result outside the trusted deterministic graph.
+_Avoid_: Chatbot product layer, default AI dependency, AI-owned graph
+
+**AI Proposal Contract**:
+The stable output boundary for AI-derived material, including proposal kind, proposal schema version, provider/model provenance, input boundary, source-disclosure status, evidence references, confidence labels, warnings, limitations, input packer version, redaction policy version, input digest, graph schema version, and Canonical Graph Hash. It must make the distinction between deterministic evidence and AI interpretation visible to callers without persisting raw AI input by default.
+_Avoid_: Free-form AI prose, hidden provider metadata, unlabeled generated output, raw prompt archive
+
 **AI Proposal**:
-A labeled, optional AI-derived suggestion, explanation, ranking, or possible graph fact that is not part of the trusted deterministic graph. It may inform deterministic extractor/resolver changes or regression fixtures, but it does not become graph truth through direct promotion.
+A labeled, optional AI-derived suggestion, explanation, ranking, review proposal, patch plan, convention proposal, deterministic fact opportunity, ownership hypothesis, or task-intent proposal that is not part of the trusted deterministic graph. It may inform deterministic extractor/resolver changes or regression fixtures, but it does not become graph truth through direct promotion.
 _Avoid_: Confirmed graph fact, hidden AI inference, unlabeled summary
 
-**AI Summary**:
-A labeled AI Proposal that explains repository structure, behavior, risk, or intent from bounded RepoLens metadata and approved context. It is separate from Structural Summary and must not mirror source bodies or become deterministic graph truth.
-_Avoid_: Structural Summary, source digest, confirmed graph fact
+**Context Pack Summary Proposal**:
+A labeled AI Proposal that summarizes an existing Context Pack from bounded RepoLens metadata and approved context. It is separate from Structural Summary, must not mirror source bodies, and must not change Context Pack ID, ranking, or deterministic graph facts.
+_Avoid_: Structural Summary, source digest, confirmed graph fact, hidden reranking
+
+**Architecture Explanation Proposal**:
+A labeled AI Proposal that explains how a repository area, package, file group, or Context Pack fits into the broader system using deterministic evidence references and explicit limitations. It is explanatory orientation, not a source of new graph relationships.
+_Avoid_: Architecture fact, runtime behavior proof, undocumented ownership claim
 
 **AI Input Boundary**:
 The default rule that optional AI features consume bounded RepoLens metadata and approved Context Pack output rather than raw source text. Source text may be used only through an explicit scoped approval path and must not be persisted as raw AI artifact content.
 _Avoid_: Silent source upload, source-mirroring AI cache, default raw-code prompt
 
 **AI Provider Boundary**:
-The rule that AI features are disabled by default and make no hidden network calls. External providers may be used only through explicit user configuration, with credentials kept out of RepoLens artifacts and provider/model provenance attached to AI Proposal output.
-_Avoid_: Built-in hosted dependency, hidden telemetry, artifact-stored credential
+The rule that AI features are disabled by default and make no hidden network calls. External providers may be used only through explicit local configuration, with credentials supplied by environment variables, credential values kept out of RepoLens config and artifacts, provider errors redacted, and provider/model provenance attached to AI Proposal output.
+_Avoid_: Built-in hosted dependency, hidden telemetry, artifact-stored credential, provider fallback
 
-**Ownership Proposal**:
+**AI Proposal Persistence Boundary**:
+The rule that AI Proposals are returned ephemerally by default. Saving AI Proposal artifacts requires an explicit save option and saved proposals must pass Artifact Safety Audit without storing raw source-bearing inputs, credentials, or unredacted provider errors.
+_Avoid_: Implicit AI cache, source-bearing proposal archive, automatic `.repolens` accumulation
+
+**Ownership Hypothesis**:
 A labeled AI Proposal or candidate explanation about which package or area may be responsible for a path when definitive Package Ownership evidence is unavailable. It is not Package Ownership and must not participate in definitive ownership traversal.
 _Avoid_: Likely ownership, inferred package owner, AI-owned package
+
+**Convention Proposal**:
+A labeled AI Proposal that suggests a repository convention, such as likely test placement, area naming, documentation location, or review pattern, from bounded RepoLens metadata. It must not silently change deterministic task matching, Context Pack ranking, resolver behavior, ownership, or graph traversal.
+_Avoid_: Deterministic convention rule, hidden ranking input, inferred resolver behavior
+
+**Deterministic Fact Opportunity**:
+A labeled AI Proposal that describes a possible missing or improved deterministic graph fact, relationship, warning, or fixture opportunity. It is a candidate for future human review and deterministic implementation, not a traversable edge or trusted artifact fact.
+_Avoid_: AI-promoted graph edge, low-confidence fact, hidden graph mutation
 
 **Docs/Config Orientation**:
 Structured metadata that helps an assistant navigate documentation and configuration tasks through paths, links, mentions, package references, commands, ownership facts, and warnings. It excludes paragraph excerpts, raw comments, raw instruction text, and raw configuration value dumps.
@@ -150,9 +178,9 @@ _Avoid_: Status-only update, blind full rebuild
 Graph freshness context that accounts for the Git branch and commit associated with the indexed artifacts. It can support explicit branch comparison metadata, but it does not imply automatic multi-branch graph storage.
 _Avoid_: Multi-branch graph index, hidden branch checkout
 
-**Local PR Review Report**:
-A local report that reviews an explicit branch, diff, or graph snapshot comparison using RepoLens facts and optional AI Proposals. It does not post remote PR comments, call hosting-provider APIs, or mutate branches by default.
-_Avoid_: GitHub bot review, remote PR mutation, hosted review service
+**Local Change Review Proposal**:
+A local read-only AI Proposal that reviews an explicit branch, diff, changed-path set, or graph snapshot comparison using RepoLens facts. It may include review proposals, test gap proposals, related tests, candidate verification commands, risks, and graph warnings, but it does not post remote PR comments, call hosting-provider APIs, run commands, mutate branches, or assert confirmed defects.
+_Avoid_: GitHub bot review, remote PR mutation, hosted review service, automatic command execution, confirmed defect report
 
 **Redaction Policy**:
 The bounded safety rule for removing obvious secrets from RepoLens artifacts, user-provided task text, generated handles, and assistant-facing output while preserving useful repository structure. It targets high-risk secret patterns rather than ordinary paths, package names, or symbol names.
@@ -266,9 +294,9 @@ _Avoid_: Auto-run approval, command recommendation
 An explicitly enabled local workflow that can propose edits, compare branches, or run approved commands outside the default read-only MCP surface. It requires per-action approval and auditable plans; it must not treat Candidate Verification Commands as automatic execution requests.
 _Avoid_: Default MCP write tool, automatic command execution
 
-**Patch Proposal**:
-A reviewable patch plan or diff proposal produced by RepoLens or an optional AI layer before any file write occurs. Applying it is an Active Workflow action that requires Workflow Approval for each file write.
-_Avoid_: Automatic edit, default MCP patch, unreviewed write
+**Patch Plan Proposal**:
+A labeled AI Proposal that outlines a possible implementation sequence, target files to inspect, tests to update, risk notes, and candidate verification commands before any file write occurs. It is planning output only in v0.8; producing apply-ready diffs, writing files, or running commands belongs to an explicitly approved Active Workflow surface.
+_Avoid_: Automatic edit, default MCP patch, unreviewed write, apply-ready v0.8 diff
 
 **Workflow Approval**:
 An explicit user decision for one proposed file write or command execution after reviewing a dry-run plan. It is not blanket approval for a session, and high-risk commands require exact-command override rather than inheriting approval from a broader plan.
