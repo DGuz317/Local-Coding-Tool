@@ -13,11 +13,11 @@ RepoLens is local-first. Normal indexing and MCP usage do not require AI models,
 
 ## Current Release
 
-Current version: **v0.6.0**.
+Current version: **v0.7.0**.
 
-v0.6.0 improves JavaScript and TypeScript orientation with parser-backed structure, resolver outcome metadata, source-free call-chain facts, and bounded framework route hints. Release notes live in `docs/releases/v0.6.0.md`.
+v0.7.0 adds the Python Semantic Analysis Prototype: experimental, source-free function-level control-flow and lexical binding metadata stored separately from the stable graph. Release notes live in `docs/releases/v0.7.0.md`.
 
-v0.7 Python semantic facts are experimental, source-free metadata stored separately from the stable graph. They are candidate metadata for inspection and evaluation only; they do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, or default MCP output.
+v0.7 semantic facts are candidate metadata for inspection and evaluation only. They do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, default Assistant Preflight output, or default MCP output.
 
 ## What Problem Does This Solve?
 
