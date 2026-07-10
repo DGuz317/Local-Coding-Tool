@@ -129,6 +129,7 @@ uv run repolens report /path/to/repo
 uv run repolens search /path/to/repo "query text"
 uv run repolens context /path/to/repo "Describe your task"
 uv run repolens preflight /path/to/repo "Describe your task"
+uv run repolens create-ai-proposal /path/to/repo context_pack_summary "Describe your task" --enable-ai --provider test --model context-pack-summary-v1 --json
 uv run repolens audit-artifacts /path/to/repo
 uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --json
 uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --from-source --json
@@ -144,7 +145,8 @@ Command meanings:
 - `search`: search scanner-approved live text with capped previews.
 - `context`: return a task-scoped Context Pack.
 - `preflight`: return the Assistant Preflight contract for a task, including graph freshness, first-read files, likely tests, candidate commands, focus hints, warnings, and budget metadata.
-- `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants.
+- `create-ai-proposal`: explicitly request an optional v0.8 AI Proposal from bounded RepoLens metadata; AI is disabled by default and the current implementation supports only the local deterministic `test` provider.
+- `audit-artifacts`: locally check generated `.repolens/` artifacts and representative assistant-facing output for disclosure and safety invariants. Pass `--include-ai-proposals` to audit explicitly saved proposal artifacts.
 - `repolens semantic-inspect` reads indexed semantic artifacts by default. When indexed semantic artifacts are missing, stale, or incompatible, `semantic-inspect` reports artifact status instead of silently parsing live source.
 - `semantic-inspect --from-source` is an explicit, non-persistent debug mode. It does not persist artifacts, and output is labeled debug metadata rather than indexed repository state.
 - `evaluate-semantics`: run deterministic Python semantic fixture evaluation for control-flow, lexical binding, warning, no-disclosure, stable identity, and artifact-audit evidence.
@@ -210,6 +212,7 @@ Use RepoLens MCP for this repository before broad file exploration. Start each t
 For more assistant setup details, see:
 
 - `docs/assistant-usage-guide.md`
+- `docs/ai-proposals.md` for v0.8 provider setup, metadata input, persistence, trust boundaries, and proposal limitations
 - `docs/mcp-tool-examples.md`
 - `docs/opencode-mcp.example.jsonc`
 
