@@ -7,6 +7,7 @@ from pathlib import Path
 from textwrap import dedent
 
 from repolens.ai_proposal import create_ai_proposal
+from repolens.artifact_audit import audit_artifacts
 from repolens.context_pack import get_task_context
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION
 from repolens.graph import GRAPH_SCHEMA_VERSION
@@ -54,6 +55,62 @@ def test_context_pack_summary_test_provider_returns_available_contract_without_s
     assert ai_interpretation["summary"]
     assert proposal["evidence_refs"]
     _assert_no_forbidden_disclosures(envelope)
+
+
+def test_ai_proposal_is_ephemeral_by_default_and_explicit_save_persists_bounded_artifact(
+    tmp_path,
+):
+    _write_ai_proposal_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    ephemeral = create_ai_proposal(
+        tmp_path,
+        kind="context_pack_summary",
+        task=TASK,
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model=TEST_MODEL,
+    )
+
+    assert ephemeral["ok"] is True
+    assert ephemeral["data"]["persistence"] == {
+        "saved": False,
+        "path": None,
+        "explicit_save_required": True,
+        "artifact_dir": ".repolens/ai-proposals",
+    }
+    assert not (tmp_path / ".repolens" / "ai-proposals").exists()
+
+    saved = create_ai_proposal(
+        tmp_path,
+        kind="context_pack_summary",
+        task=TASK,
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model=TEST_MODEL,
+        save=True,
+    )
+
+    assert saved["ok"] is True
+    persistence = saved["data"]["persistence"]
+    assert persistence["saved"] is True
+    assert persistence["safety_audit_passed"] is True
+    saved_path = tmp_path / persistence["path"]
+    saved_payload = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert saved_payload["artifact_label"] == "ai_proposal_artifact"
+    assert saved_payload["kind"] == "context_pack_summary"
+    assert saved_payload["input_digest"] == _proposal(saved)["input_digest"]
+    assert saved_payload["proposal"]["source_disclosure"] == _proposal(saved)["source_disclosure"]
+    assert "raw_input" not in saved_payload
+    assert "prompt" not in saved_payload
+    _assert_no_forbidden_disclosures(saved_payload)
+    audit = audit_artifacts(tmp_path, include_ai_proposals=True)
+    saved_artifact_violations = [
+        violation
+        for violation in audit["data"]["violations"]
+        if str(violation["location"]).startswith(persistence["path"])
+    ]
+    assert not saved_artifact_violations
 
 
 def test_context_pack_summary_input_digest_is_stable_and_changes_with_bounded_metadata(

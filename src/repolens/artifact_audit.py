@@ -24,6 +24,8 @@ from repolens.scanner import ARTIFACT_DIR_NAME
 
 ARTIFACT_AUDIT_VERSION = "0.5.artifact-audit.v1"
 DEFAULT_MAX_ARTIFACT_BYTES = 10_000_000
+AI_PROPOSAL_ARTIFACT_SUBDIR = "ai-proposals"
+MAX_AI_PROPOSAL_OUTPUT_BYTES = 100_000
 _TEXT_ARTIFACT_SUFFIXES = frozenset({".json", ".jsonl", ".md", ".txt"})
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b[A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTH|PRIVATE[_-]?KEY)"
@@ -76,6 +78,7 @@ def audit_artifacts(
     repo_path: Path | str,
     *,
     max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+    include_ai_proposals: bool = False,
 ) -> dict[str, Any]:
     """Audit generated artifacts and representative assistant-facing output."""
     try:
@@ -97,7 +100,7 @@ def audit_artifacts(
 
     violations: list[ArtifactAuditViolation] = []
     audited_artifacts: list[str] = []
-    artifact_paths = _artifact_paths(root, artifact_dir)
+    artifact_paths = _artifact_paths(root, artifact_dir, include_ai_proposals=include_ai_proposals)
     for artifact_path in artifact_paths:
         rel_path = _repo_relative(root, artifact_path)
         audited_artifacts.append(rel_path)
@@ -115,6 +118,7 @@ def audit_artifacts(
         "raw_agent_guidance_mirroring": True,
         "raw_secret_like_values": True,
         "source_snippet_leakage": True,
+        "saved_ai_proposals": include_ai_proposals,
     }
     deduped_violations = _dedupe_violations(violations)
     violation_dicts = [violation.to_dict() for violation in deduped_violations]
@@ -131,7 +135,10 @@ def audit_artifacts(
             },
             "violations": violation_dicts,
         },
-        "limits": {"max_artifact_bytes": max_artifact_bytes},
+        "limits": {
+            "include_ai_proposals": include_ai_proposals,
+            "max_artifact_bytes": max_artifact_bytes,
+        },
         "ok": not deduped_violations,
         "warnings": [],
     }
@@ -154,9 +161,13 @@ def human_artifact_audit(envelope: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _artifact_paths(root: Path, artifact_dir: Path) -> tuple[Path, ...]:
+def _artifact_paths(
+    root: Path, artifact_dir: Path, *, include_ai_proposals: bool
+) -> tuple[Path, ...]:
     paths: list[Path] = []
     for path in artifact_dir.rglob("*"):
+        if not include_ai_proposals and _is_ai_proposal_path(root, path):
+            continue
         paths.append(path)
     return tuple(sorted(paths, key=lambda path: _repo_relative(root, path)))
 
@@ -234,6 +245,8 @@ def _audit_artifact_path(
             )
             if artifact_path.suffix.lower() == ".json":
                 violations.extend(_audit_json_text(text, rel_path, root=root))
+                if _is_ai_proposal_path(root, artifact_path):
+                    violations.extend(_audit_ai_proposal_text(text, rel_path))
             elif artifact_path.suffix.lower() == ".jsonl":
                 violations.extend(_audit_jsonl_text(text, rel_path, root=root))
     return violations
@@ -313,6 +326,107 @@ def _audit_json_text(text: str, rel_path: str, *, root: Path) -> list[ArtifactAu
     violations = list(_audit_payload(payload, location=rel_path, root=root))
     if isinstance(payload, Mapping) and "ok" in payload:
         violations.extend(_audit_mcp_envelope(payload, location=rel_path))
+    return violations
+
+
+def _audit_ai_proposal_text(text: str, rel_path: str) -> list[ArtifactAuditViolation]:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return [
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=rel_path,
+                message="saved AI Proposal artifact JSON could not be parsed",
+            )
+        ]
+    artifact = _mapping(payload)
+    proposal = _mapping(artifact.get("proposal"))
+    violations: list[ArtifactAuditViolation] = []
+    if artifact.get("artifact_label") != "ai_proposal_artifact":
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.artifact_label",
+                message="saved AI Proposal artifact label is missing",
+            )
+        )
+    if proposal.get("kind") != artifact.get("kind") or not proposal.get("kind"):
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.kind",
+                message="saved AI Proposal kind is missing or inconsistent",
+            )
+        )
+    if not proposal.get("input_digest") or proposal.get("input_digest") != artifact.get(
+        "input_digest"
+    ):
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.input_digest",
+                message="saved AI Proposal input digest is missing or inconsistent",
+            )
+        )
+    provenance = _mapping(proposal.get("provenance"))
+    provider = _mapping(proposal.get("provider"))
+    if not provenance.get("provider") or not provenance.get("model"):
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal.provenance",
+                message="saved AI Proposal provider/model provenance is missing",
+            )
+        )
+    provider_config_keys = [*provider.keys(), *provenance.keys()]
+    if any(_looks_like_credential_key(str(key)) for key in provider_config_keys):
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal.provider",
+                message="saved AI Proposal provider config contains credential-like keys",
+            )
+        )
+    disclosure = _mapping(proposal.get("source_disclosure"))
+    if not disclosure or any(value is not False for value in disclosure.values()):
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal.source_disclosure",
+                message="saved AI Proposal source-disclosure metadata is missing or unsafe",
+            )
+        )
+    if disclosure.get("provider_error_payload_included") is not False:
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal.source_disclosure.provider_error_payload_included",
+                message="saved AI Proposal includes unredacted provider error metadata",
+            )
+        )
+    deterministic_label = _mapping(proposal.get("deterministic_evidence")).get("label")
+    interpretation_label = _mapping(proposal.get("ai_interpretation")).get("label")
+    if not deterministic_label or not interpretation_label:
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal.labels",
+                message="saved AI Proposal labels are missing",
+            )
+        )
+    proposal_bytes = len(json.dumps(proposal, sort_keys=True).encode("utf-8"))
+    if proposal_bytes > MAX_AI_PROPOSAL_OUTPUT_BYTES:
+        violations.append(
+            ArtifactAuditViolation(
+                check="saved_ai_proposals",
+                location=f"{rel_path}.proposal",
+                message=(
+                    f"saved AI Proposal output size {proposal_bytes} exceeds limit "
+                    f"{MAX_AI_PROPOSAL_OUTPUT_BYTES}"
+                ),
+            )
+        )
     return violations
 
 
@@ -538,6 +652,21 @@ def _repo_relative(root: Path, path: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _is_ai_proposal_path(root: Path, path: Path) -> bool:
+    parts = _repo_relative(root, path).split("/")
+    return (
+        len(parts) >= 2
+        and parts[0] == ARTIFACT_DIR_NAME
+        and parts[1] == AI_PROPOSAL_ARTIFACT_SUBDIR
+    )
+
+
+def _looks_like_credential_key(key: str) -> bool:
+    return bool(
+        re.search(r"(?i)(token|secret|password|passwd|api[_-]?key|private[_-]?key|credential)", key)
+    )
 
 
 def _is_within(root: Path, path: Path) -> bool:
