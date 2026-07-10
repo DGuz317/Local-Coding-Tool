@@ -22,6 +22,16 @@ Assistant Preflight and Context Packs are orientation-only. They do not include 
 - Treat `semantic.jsonl`, when present, as a deterministic debug/evaluation export, not the stable semantic database contract.
 - Default MCP tools do not include semantic facts unless the caller explicitly opts in. Optional Context Pack and Assistant Preflight semantic hints are included in v0.7 only behind `include_experimental_semantic_hints`; default output remains unchanged without that flag.
 
+## v0.8 AI Proposal Rules
+
+AI Proposals are optional, disabled by default, and separate from deterministic graph facts. A proposal request must explicitly enable AI and name both the provider and model; RepoLens makes no hidden provider call and has no provider fallback. The current implementation supports only the local deterministic `test` provider.
+
+Default AI input is bounded, redacted RepoLens metadata rather than whole source files. Proposals are ephemeral unless the caller explicitly requests `--save`; saved artifacts are checked by Artifact Safety Audit. Proposal generation never changes Canonical Graph Hash, Context Pack IDs or ranking, resolver behavior, or Package Ownership.
+
+Treat Context Pack Summary, Architecture Explanation, and Patch Plan Proposals as limited interpretations of available evidence. In particular, Patch Plan Proposals cannot write files, apply patches, or execute their Candidate Verification Commands. Active Workflow behavior is deferred to v0.9 and is not available through the v0.8 read-only MCP surface.
+
+See `docs/ai-proposals.md` for provider and credential environment-variable setup, CLI examples, persistence auditing, per-kind limitations, and deferred capabilities.
+
 ## Setup Flow
 
 1. Index the target repository:
