@@ -171,6 +171,26 @@ def test_mcp_text_search_does_not_read_oversized_files(tmp_path):
     assert result["limits"]["max_file_size_bytes"] == DEFAULT_MAX_FILE_SIZE_BYTES
 
 
+def test_mcp_create_ai_proposal_returns_architecture_explanation(tmp_path):
+    _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
+    index_repository(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.create_ai_proposal(
+        "architecture_explanation",
+        target="src/app.py",
+        enable_ai=True,
+        provider="test",
+        model="architecture-explanation-v1",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "available"
+    proposal = result["data"]["proposal"]
+    assert proposal["kind"] == "architecture_explanation"
+    assert proposal["deterministic_evidence"]["target_node"]["path"] == "src/app.py"
+
+
 def test_mcp_surface_has_no_source_file_read_tool_behavior():
     forbidden_terms = ("read_file", "read_source", "get_file", "source_file", "cat")
 

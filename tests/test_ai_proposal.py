@@ -147,6 +147,82 @@ def test_context_pack_summary_creation_does_not_mutate_context_pack_graph_artifa
     assert _user_file_bytes(tmp_path) == before_user_files
 
 
+def test_architecture_explanation_returns_metadata_only_target_explanation(tmp_path):
+    _write_architecture_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    before_graph_hash = _metadata_value(tmp_path, "canonical_graph_hash")
+    before_artifacts = _artifact_bytes(tmp_path)
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="architecture_explanation",
+        target="src/app/main.ts",
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="architecture-explanation-v1",
+    )
+
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    assert data["status"] == "available"
+    assert data["kind"] == "architecture_explanation"
+    proposal = data["proposal"]
+    assert isinstance(proposal, Mapping)
+    assert proposal["kind"] == "architecture_explanation"
+    assert proposal["input_packer_version"] == "0.8.architecture_explanation_input.v1"
+    assert proposal["input_digest"].startswith("sha256:")
+    assert proposal["graph_schema_version"] == GRAPH_SCHEMA_VERSION
+    assert proposal["evidence_refs"]
+    assert proposal["deterministic_evidence"]["target_node"]["path"] == "src/app/main.ts"
+    assert proposal["ai_interpretation"]["responsibilities"]
+    assert any("Semantic fact types" in item for item in proposal["limitations"])
+    assert any("No ownership" in item for item in proposal["limitations"])
+    _assert_boundary_excludes_source_material(proposal)
+    assert _metadata_value(tmp_path, "canonical_graph_hash") == before_graph_hash
+    assert _artifact_bytes(tmp_path) == before_artifacts
+
+
+def test_architecture_explanation_surfaces_relationship_candidates_and_warnings(tmp_path):
+    _write_architecture_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="architecture_explanation",
+        target="src/app/main.ts",
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="architecture-explanation-v1",
+    )
+
+    proposal = _proposal(envelope)
+    deterministic = proposal["deterministic_evidence"]
+    assert deterministic["relationship_candidates"]
+    assert "graph_quality:ambiguous_import_relationship" in deterministic["graph_quality_warnings"]
+    assert any(
+        "graph_quality:javascript_unresolved_import_relationships" in warning
+        for warning in proposal["warnings"]
+    )
+
+
+def test_architecture_explanation_validates_missing_target(tmp_path):
+    _write_architecture_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="architecture_explanation",
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="architecture-explanation-v1",
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["data"]["status"] == "unavailable"
+    assert envelope["data"]["reason"]["code"] == "missing_target"
+    assert envelope["data"]["proposal"] is None
+
+
 def test_context_pack_summary_provider_error_is_structured_and_redacted(tmp_path):
     _write_ai_proposal_fixture_repo(tmp_path)
     index_repository(tmp_path)
@@ -266,6 +342,16 @@ def _assert_boundary_excludes_source_material(proposal: Mapping[str, object]) ->
     assert disclosure["raw_agent_guidance_text_included"] is False
     assert disclosure["credential_values_included"] is False
     assert disclosure["provider_error_payload_included"] is False
+
+
+def _write_architecture_fixture_repo(root: Path) -> None:
+    _write_text(root / "package.json", '{"name":"architecture-demo"}\n')
+    _write_text(root / "src" / "lib" / "ambiguous.ts", "export const value = 1;\n")
+    _write_text(root / "src" / "lib" / "ambiguous.tsx", "export const value = 2;\n")
+    _write_text(
+        root / "src" / "app" / "main.ts",
+        "import ambiguous from '../lib/ambiguous';\nexport const app = ambiguous;\n",
+    )
 
 
 def _write_ai_proposal_fixture_repo(root: Path) -> None:

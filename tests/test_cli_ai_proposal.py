@@ -128,6 +128,47 @@ def test_create_ai_proposal_cli_json_returns_configured_test_provider_success_af
     assert "CLI_RAW_COMMENT_SENTINEL_204" not in serialized
 
 
+def test_create_ai_proposal_cli_json_returns_architecture_explanation(tmp_path):
+    _write_architecture_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "create-ai-proposal",
+            str(tmp_path),
+            "architecture_explanation",
+            "--target",
+            "src/app/main.ts",
+            "--enable-ai",
+            "--provider",
+            "test",
+            "--model",
+            "architecture-explanation-v1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cli_envelope = json.loads(result.output)
+    assert cli_envelope["ok"] is True
+    assert cli_envelope["data"]["status"] == "available"
+    proposal = cli_envelope["data"]["proposal"]
+    assert proposal["kind"] == "architecture_explanation"
+    assert proposal["deterministic_evidence"]["target_node"]["path"] == "src/app/main.ts"
+    assert proposal["evidence_refs"]
+
+
+def _write_architecture_fixture_repo(root: Path) -> None:
+    _write_text(root / "package.json", '{"name":"architecture-demo"}\n')
+    _write_text(root / "src" / "lib" / "ambiguous.ts", "export const value = 1;\n")
+    _write_text(root / "src" / "lib" / "ambiguous.tsx", "export const value = 2;\n")
+    _write_text(
+        root / "src" / "app" / "main.ts",
+        "import ambiguous from '../lib/ambiguous';\nexport const app = ambiguous;\n",
+    )
+
+
 def _write_context_summary_fixture_repo(root: Path) -> None:
     _write_text(
         root / "package.json",

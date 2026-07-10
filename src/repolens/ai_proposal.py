@@ -13,10 +13,12 @@ from repolens.context_pack import get_task_context
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION
 from repolens.graph import GRAPH_SCHEMA_VERSION
 from repolens.mcp_envelope import mcp_success, truncation_metadata
+from repolens.query import GraphQueryService
 from repolens.redaction import REDACTION_POLICY_VERSION, redact_payload, redact_text
 
 AI_PROPOSAL_VERSION = "0.8.ai_proposal.v1"
 AI_INPUT_PACKER_VERSION = "0.8.context_pack_summary_input.v1"
+AI_ARCHITECTURE_INPUT_PACKER_VERSION = "0.8.architecture_explanation_input.v1"
 AI_TEST_PROVIDER_NAME = "test"
 AI_TEST_PROVIDER_ENV_VAR = "REPOLENS_AI_TEST_PROVIDER_TOKEN"
 AI_TEST_PROVIDER_ERROR_MODEL = "raise-provider-error"
@@ -132,7 +134,7 @@ def create_ai_proposal(
             warnings=["AI Proposal requests require explicit provider and model configuration."],
         )
 
-    if normalized_kind != "context_pack_summary":
+    if normalized_kind not in {"architecture_explanation", "context_pack_summary"}:
         return _proposal_envelope(
             repo_root=repo_root,
             kind=normalized_kind,
@@ -143,7 +145,7 @@ def create_ai_proposal(
             context_pack_id=context_pack_id,
             target=target,
             warnings=[
-                "Only context_pack_summary has a configured provider path in this slice; "
+                "This AI Proposal kind has no configured provider path in this slice; "
                 "no provider fallback was attempted."
             ],
         )
@@ -159,6 +161,15 @@ def create_ai_proposal(
             context_pack_id=context_pack_id,
             target=target,
             warnings=["Configured provider is not supported by this local RepoLens slice."],
+        )
+
+    if normalized_kind == "architecture_explanation":
+        return _create_architecture_explanation_proposal(
+            repo_root,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            provider_config=provider_config,
         )
 
     if not task:
@@ -332,7 +343,12 @@ def _proposal_envelope(
     confidence = "medium" if proposal is not None else "none"
     evidence = [{"source": "v0.8_ai_provider_boundary", "issue": 203}]
     if proposal is not None:
-        evidence.append({"source": "context_pack_summary_proposal", "issue": 204})
+        evidence.append(
+            {
+                "source": f"{kind}_proposal",
+                "issue": 205 if kind == "architecture_explanation" else 204,
+            }
+        )
     return mcp_success(
         data=data,
         confidence=confidence,
@@ -345,6 +361,251 @@ def _proposal_envelope(
         truncation=context_truncation or truncation_metadata(),
         warnings=warnings,
     )
+
+
+def _create_architecture_explanation_proposal(
+    repo_root: Path,
+    *,
+    task: str | None,
+    context_pack_id: str | None,
+    target: str | None,
+    provider_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not target and not task:
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="architecture_explanation",
+            status="unavailable",
+            reason="missing_target",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=[
+                "Architecture Explanation Proposals require a target or a task-backed Context Pack."
+            ],
+        )
+    if context_pack_id and not task:
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="architecture_explanation",
+            status="unavailable",
+            reason="missing_task",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=["Context Pack targets require the task used to rebuild bounded metadata."],
+        )
+
+    context_envelope: Mapping[str, Any] | None = None
+    if task:
+        context_envelope = get_task_context(repo_root, task)
+        if not context_envelope.get("ok", False):
+            return _proposal_envelope(
+                repo_root=repo_root,
+                kind="architecture_explanation",
+                status="unavailable",
+                reason="context_pack_unavailable",
+                provider_config=provider_config,
+                task=task,
+                context_pack_id=context_pack_id,
+                target=target,
+                warnings=[
+                    "Context Pack metadata is unavailable; run repolens index before requesting "
+                    "an Architecture Explanation Proposal."
+                ],
+            )
+        generated_pack_id = str(_mapping(context_envelope.get("data")).get("context_pack_id", ""))
+        if context_pack_id and context_pack_id != generated_pack_id:
+            return _proposal_envelope(
+                repo_root=repo_root,
+                kind="architecture_explanation",
+                status="unavailable",
+                reason="context_pack_id_mismatch",
+                provider_config=provider_config,
+                task=task,
+                context_pack_id=context_pack_id,
+                target=target,
+                warnings=[
+                    "Requested Context Pack ID does not match the deterministic pack rebuilt "
+                    "from the supplied task."
+                ],
+            )
+        context_pack_id = context_pack_id or generated_pack_id
+
+    packed_input = _pack_architecture_explanation_input(
+        repo_root,
+        task=task,
+        context_envelope=context_envelope,
+        target=target,
+    )
+    if packed_input.get("target_resolution", {}).get("status") in {"unresolved", "ambiguous"}:
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="architecture_explanation",
+            status="unavailable",
+            reason="target_unresolved",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=["Architecture Explanation target could not be resolved unambiguously."],
+        )
+
+    input_digest = _input_digest(packed_input)
+    proposal = _test_provider_architecture_explanation(
+        packed_input,
+        provider_config=provider_config,
+        input_digest=input_digest,
+    )
+    return _proposal_envelope(
+        repo_root=repo_root,
+        kind="architecture_explanation",
+        status="available",
+        reason="proposal_available",
+        provider_config=provider_config,
+        task=task,
+        context_pack_id=context_pack_id,
+        target=target,
+        warnings=list(proposal["warnings"]),
+        proposal=proposal,
+        safety=_TEST_PROVIDER_SAFETY_FLAGS,
+    )
+
+
+def _pack_architecture_explanation_input(
+    repo_root: Path,
+    *,
+    task: str | None,
+    context_envelope: Mapping[str, Any] | None,
+    target: str | None,
+) -> dict[str, Any]:
+    query = GraphQueryService(repo_root)
+    context_pack = _mapping(context_envelope.get("data")) if context_envelope else {}
+    target_ref = _clean_optional(target) or _first_context_path(context_pack) or "."
+    node_envelope = query.get_node(reference=target_ref)
+    node_data = _mapping(node_envelope.get("data"))
+    node = _mapping(node_data.get("node"))
+    resolution_status = (
+        "resolved" if node else "ambiguous" if node_data.get("ambiguous") else "unresolved"
+    )
+    neighbors_envelope: Mapping[str, Any] = {}
+    impact_envelope: Mapping[str, Any] = {}
+    if node:
+        node_id = str(node.get("id", target_ref))
+        neighbors_envelope = query.get_neighbors(node_id=node_id, depth=1, max_results=12)
+        impact_envelope = query.impact_analysis(node_id, depth=1, max_results=12)
+    paths = _architecture_paths(node=node, context_pack=context_pack)
+    file_metadata = query.context_pack_file_metadata(paths) if paths else {}
+    packed = {
+        "input_packer_version": AI_ARCHITECTURE_INPUT_PACKER_VERSION,
+        "redaction_policy_version": REDACTION_POLICY_VERSION,
+        "proposal_kind": "architecture_explanation",
+        "request": {"task": task or "", "target": target_ref},
+        "context_pack": _pack_architecture_context_pack(context_pack),
+        "target_resolution": {
+            "status": resolution_status,
+            "reference": target_ref,
+            "node": _pack_node(node),
+            "candidates": [
+                _pack_node(_mapping(candidate.get("node")))
+                for candidate in _sequence(node_data.get("candidates"))
+            ],
+        },
+        "neighbors": _pack_neighbors(_mapping(neighbors_envelope.get("data"))),
+        "impact": _pack_impact(_mapping(impact_envelope.get("data"))),
+        "file_metadata": _pack_file_metadata(_mapping(file_metadata.get("data"))),
+        "envelope": {
+            "evidence": _safe_evidence_refs(_sequence(node_envelope.get("evidence"))),
+            "warnings": sorted(
+                set(
+                    str(warning)
+                    for warning in [
+                        *_sequence(node_envelope.get("warnings")),
+                        *_sequence(neighbors_envelope.get("warnings")),
+                        *_sequence(impact_envelope.get("warnings")),
+                        *_sequence(file_metadata.get("warnings")),
+                    ]
+                )
+            ),
+        },
+        "input_boundary": _public_input_boundary(),
+        "source_disclosure": dict(_SOURCE_DISCLOSURE),
+    }
+    return redact_payload(packed)
+
+
+def _test_provider_architecture_explanation(
+    packed_input: Mapping[str, Any],
+    *,
+    provider_config: Mapping[str, Any],
+    input_digest: str,
+) -> dict[str, Any]:
+    target_resolution = _mapping(packed_input.get("target_resolution"))
+    node = _mapping(target_resolution.get("node"))
+    neighbors = [
+        _mapping(item) for item in _sequence(_mapping(packed_input.get("neighbors")).get("items"))
+    ]
+    file_metadata = _mapping(packed_input.get("file_metadata"))
+    relationship_candidates = _flatten_relationship_candidates(file_metadata)
+    graph_quality_warnings = sorted(
+        set(
+            str(code)
+            for candidate in relationship_candidates
+            for code in [candidate.get("warning_code")]
+            if code
+        )
+    )
+    warnings = [
+        *[
+            str(warning)
+            for warning in _sequence(_mapping(packed_input.get("envelope")).get("warnings"))
+        ],
+        *graph_quality_warnings,
+        "Generated by configured local test provider from bounded architecture metadata.",
+    ]
+    path = str(node.get("path") or node.get("id") or target_resolution.get("reference") or "")
+    neighbor_labels = [str(item.get("label") or item.get("id")) for item in neighbors[:5]]
+    evidence_refs = _architecture_evidence_refs(packed_input)
+    return {
+        "kind": "architecture_explanation",
+        "proposal_schema_version": AI_PROPOSAL_VERSION,
+        "provider": {"name": provider_config.get("name"), "model": provider_config.get("model")},
+        "provenance": {
+            "provider": provider_config.get("name"),
+            "model": provider_config.get("model"),
+            "environment": _mapping(provider_config.get("environment")),
+        },
+        "input_boundary": _public_input_boundary(),
+        "source_disclosure": dict(_SOURCE_DISCLOSURE),
+        "evidence_refs": evidence_refs,
+        "confidence": "medium",
+        "warnings": list(dict.fromkeys(warnings)),
+        "limitations": [
+            *_PROPOSAL_LIMITATIONS,
+            "Semantic fact types may be unavailable; this explanation uses indexed metadata only.",
+            "No ownership, dependency, route, runtime behavior, or graph facts are created.",
+        ],
+        "input_packer_version": AI_ARCHITECTURE_INPUT_PACKER_VERSION,
+        "redaction_policy_version": REDACTION_POLICY_VERSION,
+        "input_digest": input_digest,
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "target": {"reference": target_resolution.get("reference"), "node": node},
+        "deterministic_evidence": {
+            "label": "deterministic_architecture_metadata",
+            "target_node": node,
+            "neighboring_areas": neighbors,
+            "relationship_candidates": relationship_candidates,
+            "graph_quality_warnings": graph_quality_warnings,
+        },
+        "ai_interpretation": {
+            "label": "ai_interpretation_not_graph_fact",
+            "responsibilities": _architecture_responsibilities(path, node, neighbor_labels),
+            "neighboring_areas": neighbor_labels,
+            "limitations": "Explanation is bounded to RepoLens metadata and does not assert runtime behavior.",
+        },
+    }
 
 
 def _pack_context_pack_summary_input(context_envelope: Mapping[str, Any]) -> dict[str, Any]:
@@ -483,6 +744,146 @@ def _test_provider_context_pack_summary(
             "next_actions": [str(action) for action in _sequence(context_pack.get("next_actions"))],
         },
     }
+
+
+def _first_context_path(context_pack: Mapping[str, Any]) -> str | None:
+    for group in ("first_read_files", "lower_priority_context", "supporting_docs"):
+        for item in _sequence(context_pack.get(group)):
+            path = _mapping(item).get("path")
+            if path:
+                return str(path)
+    return None
+
+
+def _architecture_paths(*, node: Mapping[str, Any], context_pack: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    if node.get("path"):
+        paths.append(str(node["path"]))
+    for group in ("first_read_files", "likely_tests", "supporting_docs", "supporting_configs"):
+        for item in _sequence(context_pack.get(group)):
+            path = _mapping(item).get("path")
+            if path:
+                paths.append(str(path))
+    return sorted(dict.fromkeys(paths))[:20]
+
+
+def _pack_architecture_context_pack(context_pack: Mapping[str, Any]) -> dict[str, Any]:
+    if not context_pack:
+        return {}
+    return {
+        "context_pack_id": context_pack.get("context_pack_id", ""),
+        "context_pack_version": context_pack.get("context_pack_version", CONTEXT_PACK_VERSION),
+        "task_fingerprint": context_pack.get("task_fingerprint", ""),
+        "first_read_files": [
+            _pack_context_item(item) for item in _sequence(context_pack.get("first_read_files"))
+        ],
+        "likely_tests": [
+            _pack_context_item(item) for item in _sequence(context_pack.get("likely_tests"))
+        ],
+        "ambiguity": [
+            _pack_context_item(item) for item in _sequence(context_pack.get("ambiguity"))
+        ],
+        "truncation": _mapping(context_pack.get("truncation")),
+    }
+
+
+def _pack_node(node: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: node.get(key)
+        for key in ("id", "kind", "label", "path", "line_range", "metadata")
+        if key in node and node.get(key) not in (None, "")
+    }
+
+
+def _pack_neighbors(data: Mapping[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for item in _sequence(data.get("neighbors"))[:12]:
+        mapped = _mapping(item)
+        node = _mapping(mapped.get("node"))
+        edge = _mapping(mapped.get("edge"))
+        items.append(
+            {
+                "id": node.get("id"),
+                "kind": node.get("kind"),
+                "label": node.get("label"),
+                "path": node.get("path"),
+                "edge_kind": edge.get("kind"),
+                "direction": mapped.get("direction"),
+                "confidence": edge.get("confidence"),
+                "evidence": _safe_evidence_refs(_sequence(edge.get("evidence"))),
+            }
+        )
+    return {"items": items, "truncated": bool(data.get("truncated", False))}
+
+
+def _pack_impact(data: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: data.get(key)
+        for key in (
+            "target",
+            "resolved_target",
+            "direct_dependents",
+            "direct_dependencies",
+            "candidate_verification_commands",
+            "candidates",
+        )
+        if key in data
+    }
+
+
+def _pack_file_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "package_boundaries": data.get("package_boundaries", {}),
+        "relationship_candidates": data.get("relationship_candidates", {}),
+        "route_hints": data.get("route_hints", {}),
+        "structural_summaries": data.get("structural_summaries", {}),
+        "workspace_memberships": data.get("workspace_memberships", {}),
+    }
+
+
+def _flatten_relationship_candidates(file_metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for path, candidates in sorted(_mapping(file_metadata.get("relationship_candidates")).items()):
+        for candidate in _sequence(candidates):
+            mapped = _mapping(candidate)
+            if mapped:
+                flattened.append({"path": path, **mapped})
+    return flattened[:20]
+
+
+def _architecture_evidence_refs(packed_input: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    target = _mapping(_mapping(packed_input.get("target_resolution")).get("node"))
+    if target.get("id"):
+        refs.append(f"node:{target['id']}")
+    for neighbor in _sequence(_mapping(packed_input.get("neighbors")).get("items")):
+        mapped = _mapping(neighbor)
+        if mapped.get("id"):
+            refs.append(f"neighbor:{mapped['id']}:{mapped.get('edge_kind', '')}")
+    for candidate in _flatten_relationship_candidates(_mapping(packed_input.get("file_metadata"))):
+        refs.append(
+            f"relationship_candidate:{candidate.get('path', '')}:{candidate.get('warning_code', '')}"
+        )
+    return list(dict.fromkeys(refs))[:12]
+
+
+def _architecture_responsibilities(
+    path: str, node: Mapping[str, Any], neighbor_labels: Sequence[str]
+) -> list[str]:
+    kind = str(node.get("kind", "target"))
+    label = str(node.get("label") or path or "the target")
+    responsibilities = [
+        f"{label} is represented as a {kind} in indexed RepoLens metadata.",
+    ]
+    if path:
+        responsibilities.append(f"The explanation is scoped to repository metadata for {path}.")
+    if neighbor_labels:
+        responsibilities.append(
+            "Neighboring areas are inferred from recorded graph edges: "
+            + ", ".join(neighbor_labels[:5])
+            + "."
+        )
+    return responsibilities
 
 
 def _pack_context_item(value: Any) -> dict[str, Any]:
