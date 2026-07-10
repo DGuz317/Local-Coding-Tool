@@ -223,6 +223,95 @@ def test_architecture_explanation_validates_missing_target(tmp_path):
     assert envelope["data"]["proposal"] is None
 
 
+def test_patch_plan_proposal_returns_read_only_plan_with_not_run_commands(tmp_path):
+    _write_ai_proposal_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    before_pack = get_task_context(tmp_path, TASK)["data"]
+    before_graph_hash = _metadata_value(tmp_path, "canonical_graph_hash")
+    before_artifacts = _artifact_bytes(tmp_path)
+    before_user_files = _user_file_bytes(tmp_path)
+
+    envelope = create_ai_proposal(
+        tmp_path,
+        kind="patch_plan",
+        task=TASK,
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="patch-plan-v1",
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["data"]["status"] == "available"
+    assert envelope["data"]["kind"] == "patch_plan"
+    assert envelope["data"]["safety"] == {
+        "provider_called": True,
+        "network_accessed": False,
+        "file_written": False,
+        "command_executed": False,
+        "patch_applied": False,
+        "remote_posted": False,
+    }
+    proposal = _proposal(envelope)
+    assert proposal["kind"] == "patch_plan"
+    assert proposal["input_packer_version"] == "0.8.patch_plan_input.v1"
+    assert proposal["goal"]
+    assert proposal["target_files_to_inspect"][0]["path"] == "src/auth/login.ts"
+    assert proposal["suggested_edit_sequence"][0]["path"] == "src/auth/login.ts"
+    assert proposal["related_tests_to_inspect_or_update"][0]["path"] == "tests/login.test.ts"
+    assert proposal["docs_config_risk_notes"]
+    assert proposal["graph_evidence_refs"] == proposal["evidence_refs"]
+    assert proposal["implementation_boundary"] == {
+        "read_only": True,
+        "can_apply": False,
+        "apply_ready_diff_included": False,
+        "commands_executed": False,
+        "files_written": False,
+        "branches_mutated": False,
+        "remote_posts_created": False,
+    }
+    commands = proposal["candidate_verification_commands"]
+    assert commands
+    assert all(command["run"] is False for command in commands)
+    assert all(command["not_run"] is True for command in commands)
+    assert all(command["auto_run_recommended"] is False for command in commands)
+    assert "diff" not in proposal
+    assert "patch" not in proposal
+    _assert_boundary_excludes_source_material(proposal)
+    assert (
+        get_task_context(tmp_path, TASK)["data"]["context_pack_id"]
+        == before_pack["context_pack_id"]
+    )
+    assert _metadata_value(tmp_path, "canonical_graph_hash") == before_graph_hash
+    assert _artifact_bytes(tmp_path) == before_artifacts
+    assert _user_file_bytes(tmp_path) == before_user_files
+    _assert_no_forbidden_disclosures(envelope)
+
+
+def test_patch_plan_input_digest_is_stable(tmp_path):
+    _write_ai_proposal_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    first = create_ai_proposal(
+        tmp_path,
+        kind="patch_plan",
+        task=TASK,
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="patch-plan-v1",
+    )
+    second = create_ai_proposal(
+        tmp_path,
+        kind="patch_plan",
+        task=TASK,
+        enable_ai=True,
+        provider=TEST_PROVIDER,
+        model="patch-plan-v1",
+    )
+
+    assert second == first
+    assert _proposal(first)["input_digest"] == _proposal(second)["input_digest"]
+
+
 def test_context_pack_summary_provider_error_is_structured_and_redacted(tmp_path):
     _write_ai_proposal_fixture_repo(tmp_path)
     index_repository(tmp_path)
