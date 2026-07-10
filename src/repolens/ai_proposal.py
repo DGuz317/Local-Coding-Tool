@@ -19,6 +19,7 @@ from repolens.redaction import REDACTION_POLICY_VERSION, redact_payload, redact_
 AI_PROPOSAL_VERSION = "0.8.ai_proposal.v1"
 AI_INPUT_PACKER_VERSION = "0.8.context_pack_summary_input.v1"
 AI_ARCHITECTURE_INPUT_PACKER_VERSION = "0.8.architecture_explanation_input.v1"
+AI_PATCH_PLAN_INPUT_PACKER_VERSION = "0.8.patch_plan_input.v1"
 AI_TEST_PROVIDER_NAME = "test"
 AI_TEST_PROVIDER_ENV_VAR = "REPOLENS_AI_TEST_PROVIDER_TOKEN"
 AI_TEST_PROVIDER_ERROR_MODEL = "raise-provider-error"
@@ -134,22 +135,6 @@ def create_ai_proposal(
             warnings=["AI Proposal requests require explicit provider and model configuration."],
         )
 
-    if normalized_kind not in {"architecture_explanation", "context_pack_summary"}:
-        return _proposal_envelope(
-            repo_root=repo_root,
-            kind=normalized_kind,
-            status="unavailable",
-            reason="provider_execution_unavailable",
-            provider_config=provider_config,
-            task=task,
-            context_pack_id=context_pack_id,
-            target=target,
-            warnings=[
-                "This AI Proposal kind has no configured provider path in this slice; "
-                "no provider fallback was attempted."
-            ],
-        )
-
     if provider_config["name"] != AI_TEST_PROVIDER_NAME:
         return _proposal_envelope(
             repo_root=repo_root,
@@ -165,6 +150,15 @@ def create_ai_proposal(
 
     if normalized_kind == "architecture_explanation":
         return _create_architecture_explanation_proposal(
+            repo_root,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            provider_config=provider_config,
+        )
+
+    if normalized_kind == "patch_plan":
+        return _create_patch_plan_proposal(
             repo_root,
             task=task,
             context_pack_id=context_pack_id,
@@ -346,7 +340,7 @@ def _proposal_envelope(
         evidence.append(
             {
                 "source": f"{kind}_proposal",
-                "issue": 205 if kind == "architecture_explanation" else 204,
+                "issue": _proposal_issue(kind),
             }
         )
     return mcp_success(
@@ -608,6 +602,87 @@ def _test_provider_architecture_explanation(
     }
 
 
+def _create_patch_plan_proposal(
+    repo_root: Path,
+    *,
+    task: str | None,
+    context_pack_id: str | None,
+    target: str | None,
+    provider_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not task:
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="patch_plan",
+            status="unavailable",
+            reason="missing_task",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=["Patch Plan Proposals require a task to rebuild bounded input."],
+        )
+
+    context_envelope = get_task_context(repo_root, task)
+    if not context_envelope.get("ok", False):
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="patch_plan",
+            status="unavailable",
+            reason="context_pack_unavailable",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=[
+                "Context Pack metadata is unavailable; run repolens index before requesting "
+                "a Patch Plan Proposal."
+            ],
+        )
+
+    context_pack = _mapping(context_envelope.get("data"))
+    generated_pack_id = str(context_pack.get("context_pack_id", ""))
+    if context_pack_id and context_pack_id != generated_pack_id:
+        return _proposal_envelope(
+            repo_root=repo_root,
+            kind="patch_plan",
+            status="unavailable",
+            reason="context_pack_id_mismatch",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=[
+                "Requested Context Pack ID does not match the deterministic pack rebuilt "
+                "from the supplied task."
+            ],
+        )
+
+    packed_input = _pack_patch_plan_input(context_envelope, target=target)
+    input_digest = _input_digest(packed_input)
+    proposal = _test_provider_patch_plan(
+        packed_input,
+        provider_config=provider_config,
+        input_digest=input_digest,
+    )
+    return _proposal_envelope(
+        repo_root=repo_root,
+        kind="patch_plan",
+        status="available",
+        reason="proposal_available",
+        provider_config=provider_config,
+        task=task,
+        context_pack_id=context_pack_id or generated_pack_id,
+        target=target,
+        warnings=list(proposal["warnings"]),
+        proposal=proposal,
+        context_freshness=_mapping(context_envelope.get("freshness")),
+        context_limits=_mapping(context_envelope.get("limits")),
+        context_truncation=_mapping(context_envelope.get("truncation")),
+        safety=_TEST_PROVIDER_SAFETY_FLAGS,
+    )
+
+
 def _pack_context_pack_summary_input(context_envelope: Mapping[str, Any]) -> dict[str, Any]:
     context_pack = _mapping(context_envelope.get("data"))
     freshness = _mapping(context_pack.get("freshness"))
@@ -670,6 +745,103 @@ def _pack_context_pack_summary_input(context_envelope: Mapping[str, Any]) -> dic
         "source_disclosure": dict(_SOURCE_DISCLOSURE),
     }
     return redact_payload(packed)
+
+
+def _pack_patch_plan_input(
+    context_envelope: Mapping[str, Any], *, target: str | None
+) -> dict[str, Any]:
+    packed = _pack_context_pack_summary_input(context_envelope)
+    packed["input_packer_version"] = AI_PATCH_PLAN_INPUT_PACKER_VERSION
+    packed["proposal_kind"] = "patch_plan"
+    packed["request"] = {"target": target or ""}
+    return redact_payload(packed)
+
+
+def _test_provider_patch_plan(
+    packed_input: Mapping[str, Any],
+    *,
+    provider_config: Mapping[str, Any],
+    input_digest: str,
+) -> dict[str, Any]:
+    context_pack = _mapping(packed_input.get("context_pack"))
+    freshness = _mapping(context_pack.get("freshness"))
+    first_read_files = [_mapping(item) for item in _sequence(context_pack.get("first_read_files"))]
+    likely_tests = [_mapping(item) for item in _sequence(context_pack.get("likely_tests"))]
+    docs = [_mapping(item) for item in _sequence(context_pack.get("supporting_docs"))]
+    configs = [_mapping(item) for item in _sequence(context_pack.get("supporting_configs"))]
+    risks = [_mapping(item) for item in _sequence(context_pack.get("risk_signals"))]
+    commands = [
+        _patch_plan_command(item)
+        for item in _sequence(context_pack.get("candidate_verification_commands"))
+    ]
+    evidence_refs = _proposal_evidence_refs(context_pack)
+    warnings = [
+        str(warning)
+        for warning in _sequence(_mapping(packed_input.get("envelope")).get("warnings"))
+    ]
+    warnings.append(
+        "Generated by configured local test provider from bounded Context Pack metadata."
+    )
+    target_paths = [_deterministic_item_evidence(item) for item in first_read_files]
+    test_paths = [_deterministic_item_evidence(item) for item in likely_tests]
+    return {
+        "kind": "patch_plan",
+        "proposal_schema_version": AI_PROPOSAL_VERSION,
+        "provider": {"name": provider_config.get("name"), "model": provider_config.get("model")},
+        "provenance": {
+            "provider": provider_config.get("name"),
+            "model": provider_config.get("model"),
+            "environment": _mapping(provider_config.get("environment")),
+        },
+        "input_boundary": _public_input_boundary(),
+        "source_disclosure": dict(_SOURCE_DISCLOSURE),
+        "implementation_boundary": {
+            "read_only": True,
+            "can_apply": False,
+            "apply_ready_diff_included": False,
+            "commands_executed": False,
+            "files_written": False,
+            "branches_mutated": False,
+            "remote_posts_created": False,
+        },
+        "evidence_refs": evidence_refs,
+        "graph_evidence_refs": evidence_refs,
+        "confidence": "medium",
+        "warnings": warnings,
+        "limitations": [
+            *_PROPOSAL_LIMITATIONS,
+            "Patch Plan Proposals are planning metadata only and cannot be applied by RepoLens v0.8.",
+            "Suggested edits are not diffs and may be incomplete when graph evidence is sparse.",
+        ],
+        "input_packer_version": AI_PATCH_PLAN_INPUT_PACKER_VERSION,
+        "redaction_policy_version": REDACTION_POLICY_VERSION,
+        "input_digest": input_digest,
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "canonical_graph_hash": freshness.get("canonical_graph_hash", ""),
+        "context_pack_id": context_pack.get("context_pack_id", ""),
+        "context_pack_version": context_pack.get("context_pack_version", CONTEXT_PACK_VERSION),
+        "goal": _patch_plan_goal(str(context_pack.get("task", ""))),
+        "target_files_to_inspect": target_paths,
+        "suggested_edit_sequence": _patch_plan_edit_sequence(first_read_files),
+        "related_tests_to_inspect_or_update": test_paths,
+        "docs_config_risk_notes": _patch_plan_risk_notes(docs, configs, risks),
+        "candidate_verification_commands": commands,
+        "deterministic_evidence": {
+            "label": "deterministic_patch_plan_metadata",
+            "context_pack_id": context_pack.get("context_pack_id", ""),
+            "target_files_to_inspect": target_paths,
+            "related_tests_to_inspect_or_update": test_paths,
+            "docs_config_risk_notes": _patch_plan_risk_notes(docs, configs, risks),
+            "candidate_verification_commands": commands,
+            "warnings": warnings[:-1],
+        },
+        "ai_interpretation": {
+            "label": "ai_interpretation_not_apply_ready_patch",
+            "goal": _patch_plan_goal(str(context_pack.get("task", ""))),
+            "suggested_edit_sequence": _patch_plan_edit_sequence(first_read_files),
+            "limitations": "Planning metadata only; no diff, command run, or repository mutation was produced.",
+        },
+    }
 
 
 def _test_provider_context_pack_summary(
@@ -903,6 +1075,13 @@ def _pack_context_item(value: Any) -> dict[str, Any]:
         "relationships",
         "related_tests",
         "command",
+        "name",
+        "purpose",
+        "risk_bucket",
+        "run",
+        "not_run",
+        "auto_run_recommended",
+        "found",
         "risk_category",
         "package",
         "line_range",
@@ -946,6 +1125,67 @@ def _deterministic_item_evidence(item: Any) -> dict[str, Any]:
     }
 
 
+def _patch_plan_command(value: Any) -> dict[str, Any]:
+    command = _pack_context_item(value)
+    command["run"] = False
+    command["not_run"] = True
+    command["auto_run_recommended"] = False
+    command["recommendation"] = "candidate_not_run_metadata"
+    return command
+
+
+def _patch_plan_goal(task: str) -> str:
+    return f"Plan metadata-only implementation steps for: {task or 'the requested task'}"
+
+
+def _patch_plan_edit_sequence(
+    first_read_files: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    steps = []
+    for index, item in enumerate(first_read_files[:5], start=1):
+        path = str(item.get("path") or "")
+        steps.append(
+            {
+                "step": index,
+                "path": path,
+                "action": "inspect_then_edit_if_needed",
+                "reason": item.get("reason", ""),
+                "confidence": item.get("confidence", ""),
+            }
+        )
+    if not steps:
+        steps.append(
+            {
+                "step": 1,
+                "path": "",
+                "action": "inspect_context_pack_before_editing",
+                "reason": "No first-read file was identified from bounded metadata.",
+                "confidence": "low",
+            }
+        )
+    return steps
+
+
+def _patch_plan_risk_notes(
+    docs: Sequence[Mapping[str, Any]],
+    configs: Sequence[Mapping[str, Any]],
+    risks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    notes = []
+    for group, items in (("doc", docs), ("config", configs), ("risk", risks)):
+        for item in items:
+            notes.append(
+                {
+                    "kind": group,
+                    "path": item.get("path", ""),
+                    "reason": item.get("reason", ""),
+                    "confidence": item.get("confidence", ""),
+                    "evidence_refs": _safe_evidence_refs(_sequence(item.get("evidence"))),
+                }
+            )
+    return notes[:12]
+
+
 def _summary_sentence(task: str, first_paths: Sequence[str], test_paths: Sequence[str]) -> str:
     task_text = task or "the requested task"
     primary = ", ".join(first_paths[:3]) if first_paths else "no first-read file"
@@ -960,6 +1200,14 @@ def _summary_sentence(task: str, first_paths: Sequence[str], test_paths: Sequenc
 def _input_digest(packed_input: Mapping[str, Any]) -> str:
     payload = json.dumps(packed_input, sort_keys=True, separators=(",", ":"), default=str)
     return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _proposal_issue(kind: str) -> int:
+    if kind == "architecture_explanation":
+        return 205
+    if kind == "patch_plan":
+        return 206
+    return 204
 
 
 def _provider_config(*, enable_ai: bool, provider: str | None, model: str | None) -> dict[str, Any]:

@@ -128,6 +128,40 @@ def test_create_ai_proposal_cli_json_returns_configured_test_provider_success_af
     assert "CLI_RAW_COMMENT_SENTINEL_204" not in serialized
 
 
+def test_create_ai_proposal_cli_json_returns_patch_plan(tmp_path):
+    _write_context_summary_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "create-ai-proposal",
+            str(tmp_path),
+            "patch_plan",
+            "Plan login validation change",
+            "--enable-ai",
+            "--provider",
+            "test",
+            "--model",
+            "patch-plan-v1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cli_envelope = json.loads(result.output)
+    assert cli_envelope["ok"] is True
+    assert cli_envelope["data"]["status"] == "available"
+    proposal = cli_envelope["data"]["proposal"]
+    assert proposal["kind"] == "patch_plan"
+    assert proposal["implementation_boundary"]["can_apply"] is False
+    assert proposal["implementation_boundary"]["apply_ready_diff_included"] is False
+    assert all(
+        command["run"] is False and command["auto_run_recommended"] is False
+        for command in proposal["candidate_verification_commands"]
+    )
+
+
 def test_create_ai_proposal_cli_json_returns_architecture_explanation(tmp_path):
     _write_architecture_fixture_repo(tmp_path)
     index_repository(tmp_path)

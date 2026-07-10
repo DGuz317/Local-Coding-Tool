@@ -171,6 +171,33 @@ def test_mcp_text_search_does_not_read_oversized_files(tmp_path):
     assert result["limits"]["max_file_size_bytes"] == DEFAULT_MAX_FILE_SIZE_BYTES
 
 
+def test_mcp_create_ai_proposal_returns_patch_plan(tmp_path):
+    _write_text(
+        tmp_path / "package.json",
+        '{"scripts":{"test":"pytest tests/test_app.py"}}\n',
+    )
+    _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
+    _write_text(tmp_path / "tests" / "test_app.py", "from src.app import app\n")
+    index_repository(tmp_path)
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.create_ai_proposal(
+        "patch_plan",
+        task="Plan app.py change",
+        enable_ai=True,
+        provider="test",
+        model="patch-plan-v1",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "available"
+    proposal = result["data"]["proposal"]
+    assert proposal["kind"] == "patch_plan"
+    assert proposal["target_files_to_inspect"]
+    assert proposal["implementation_boundary"]["can_apply"] is False
+    assert all(command["run"] is False for command in proposal["candidate_verification_commands"])
+
+
 def test_mcp_create_ai_proposal_returns_architecture_explanation(tmp_path):
     _write_text(tmp_path / "src" / "app.py", "def app():\n    return 1\n")
     index_repository(tmp_path)
