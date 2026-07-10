@@ -461,3 +461,46 @@ def test_v0_7_release_readiness_docs_pin_semantic_gates_and_opt_in_hints() -> No
         "slice without blocking v0.7",
     ):
         assert required in tracker
+
+
+def test_v0_8_release_docs_record_ai_proposal_gates_and_dogfood_limits() -> None:
+    readiness = (ROOT / "docs" / "release-readiness.md").read_text(encoding="utf-8")
+    limitations = (ROOT / "docs" / "known-limitations.md").read_text(encoding="utf-8")
+    release_notes = (ROOT / "docs" / "releases" / "v0.8.0.md").read_text(encoding="utf-8")
+    dogfood = (ROOT / "docs" / "dogfood" / "2026-07-10-v0.8-ai-proposal-layer.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "AI is disabled by default",
+        "does not change Canonical Graph Hash, Context Pack IDs or ranking",
+        "schema `0.8.ai_proposal.v1`",
+        "--include-ai-proposals",
+        "external-provider dogfood could not run",
+        "does not claim external-model quality",
+    ):
+        assert required in readiness
+
+    for required in (
+        "v0.8 supports only the local deterministic `test` provider",
+        "Patch Plan Proposals may omit relevant files, tests, docs/config risks",
+        "Active Workflow remains deferred beyond v0.8",
+    ):
+        assert required in limitations
+
+    for required in (
+        "disabled by default",
+        "External-provider dogfood could not be run",
+        "does not establish external-model quality",
+        "does not apply patches, write project files, execute commands, mutate branches",
+    ):
+        assert required in release_notes
+
+    for required in (
+        "Context Pack Summary Proposal",
+        "Architecture Explanation Proposal",
+        "Patch Plan Proposal",
+        "No output observed in this run claimed new graph facts",
+        "External-provider dogfood could not be run",
+    ):
+        assert required in dogfood
