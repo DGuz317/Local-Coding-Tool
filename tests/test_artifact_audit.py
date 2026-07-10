@@ -69,6 +69,68 @@ def test_audit_artifacts_reports_negative_fixture_failures_clearly(tmp_path):
     assert any("must remain discovered-only" in violation["message"] for violation in violations)
 
 
+def test_audit_artifacts_checks_saved_ai_proposals_only_when_explicitly_requested(tmp_path):
+    _write_audit_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_saved_ai_proposal_artifact(tmp_path)
+
+    default_audit = audit_artifacts(tmp_path)
+    explicit_audit = audit_artifacts(tmp_path, include_ai_proposals=True)
+
+    assert default_audit["ok"] is True, default_audit["data"]["violations"]
+    assert (
+        ".repolens/ai-proposals/context_pack_summary-good.json"
+        not in default_audit["data"]["audited_artifacts"]
+    )
+    assert explicit_audit["ok"] is True, explicit_audit["data"]["violations"]
+    assert (
+        ".repolens/ai-proposals/context_pack_summary-good.json"
+        in explicit_audit["data"]["audited_artifacts"]
+    )
+    assert explicit_audit["data"]["checks"]["saved_ai_proposals"] is True
+
+
+def test_audit_artifacts_rejects_unsafe_saved_ai_proposal_fixture(tmp_path):
+    _write_audit_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_saved_ai_proposal_artifact(
+        tmp_path,
+        name="bad.json",
+        proposal_updates={
+            "provenance": {"provider": "test"},
+            "source_disclosure": {
+                "source_text_included": True,
+                "provider_error_payload_included": True,
+            },
+            "deterministic_evidence": {},
+            "provider": {"api_key": "<redacted>"},
+            "ai_interpretation": {
+                "label": "ai_interpretation_not_graph_fact",
+                "summary": "function leakedSource() { return true; }",
+                "provider_error": "API_TOKEN=abc123",
+            },
+        },
+    )
+
+    envelope = audit_artifacts(tmp_path, include_ai_proposals=True)
+
+    assert envelope["ok"] is False
+    saved_violations = [
+        violation
+        for violation in envelope["data"]["violations"]
+        if violation["check"] == "saved_ai_proposals"
+    ]
+    messages = "\n".join(violation["message"] for violation in saved_violations)
+    assert "provider/model provenance is missing" in messages
+    assert "source-disclosure metadata is missing or unsafe" in messages
+    assert "provider config contains credential-like keys" in messages
+    assert "unredacted provider error metadata" in messages
+    assert "labels are missing" in messages
+    checks = {violation["check"] for violation in envelope["data"]["violations"]}
+    assert "source_snippet_leakage" in checks
+    assert "raw_secret_like_values" in checks
+
+
 def test_audit_artifacts_detects_source_bearing_semantic_jsonl_fields(tmp_path):
     _write_audit_fixture_repo(tmp_path)
     index_repository(tmp_path)
@@ -92,6 +154,53 @@ def test_audit_artifacts_detects_source_bearing_semantic_jsonl_fields(tmp_path):
     checks = {violation["check"] for violation in envelope["data"]["violations"]}
     assert "semantic_outputs_source_free" in checks
     assert "absolute_host_paths" in checks
+
+
+def _write_saved_ai_proposal_artifact(
+    root,
+    *,
+    name: str = "context_pack_summary-good.json",
+    proposal_updates: dict | None = None,
+) -> None:
+    proposal = {
+        "kind": "context_pack_summary",
+        "proposal_schema_version": "0.8.ai_proposal.v1",
+        "provider": {"name": "test", "model": "context-pack-summary-v1"},
+        "provenance": {"provider": "test", "model": "context-pack-summary-v1"},
+        "input_boundary": {
+            "default_scope": "bounded_repolens_metadata",
+            "source_text_included": False,
+            "raw_prompt_persisted": False,
+            "excluded_material": ["source_bodies"],
+        },
+        "source_disclosure": {
+            "source_text_included": False,
+            "raw_comments_included": False,
+            "raw_secrets_included": False,
+            "raw_agent_guidance_text_included": False,
+            "large_raw_documents_included": False,
+            "credential_values_included": False,
+            "provider_error_payload_included": False,
+        },
+        "input_digest": "sha256:good",
+        "deterministic_evidence": {"label": "deterministic_context_pack_metadata"},
+        "ai_interpretation": {"label": "ai_interpretation_not_graph_fact"},
+        "warnings": [],
+        "limitations": [],
+    }
+    if proposal_updates:
+        proposal.update(proposal_updates)
+    payload = {
+        "artifact_label": "ai_proposal_artifact",
+        "artifact_schema_version": "0.8.saved_ai_proposal.v1",
+        "kind": proposal["kind"],
+        "input_digest": proposal["input_digest"],
+        "provider": proposal["provider"],
+        "provenance": proposal["provenance"],
+        "source_disclosure": proposal["source_disclosure"],
+        "proposal": proposal,
+    }
+    _write_text(root / ".repolens" / "ai-proposals" / name, json.dumps(payload, sort_keys=True))
 
 
 def _write_negative_artifact(root) -> None:

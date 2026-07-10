@@ -703,6 +703,10 @@ def create_ai_proposal_command(
         str | None,
         typer.Option("--model", help="Explicit AI model name; no default is assumed."),
     ] = None,
+    save: Annotated[
+        bool,
+        typer.Option("--save", help="Explicitly persist the bounded AI Proposal artifact."),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
@@ -718,6 +722,7 @@ def create_ai_proposal_command(
         enable_ai=enable_ai,
         provider=provider,
         model=model,
+        save=save,
     )
     if json_output:
         typer.echo(json.dumps(envelope, indent=2, sort_keys=True))
@@ -825,6 +830,13 @@ def audit_artifacts_command(
             help="Maximum allowed size for any one generated artifact.",
         ),
     ] = DEFAULT_MAX_ARTIFACT_BYTES,
+    include_ai_proposals: Annotated[
+        bool,
+        typer.Option(
+            "--include-ai-proposals",
+            help="Explicitly audit saved AI Proposal artifacts under .repolens/ai-proposals.",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit a machine-readable JSON envelope."),
@@ -832,7 +844,11 @@ def audit_artifacts_command(
 ) -> None:
     """Audit local RepoLens artifacts for disclosure and safety invariants."""
     try:
-        envelope = audit_artifacts(repo_path, max_artifact_bytes=max_artifact_bytes)
+        envelope = audit_artifacts(
+            repo_path,
+            max_artifact_bytes=max_artifact_bytes,
+            include_ai_proposals=include_ai_proposals,
+        )
     except RepoLensArtifactAuditError as exc:
         error = str(exc) or exc.__class__.__name__
         envelope = {

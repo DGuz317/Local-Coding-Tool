@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from repolens.artifact_audit import audit_artifacts
 from repolens.context_pack import get_task_context
 from repolens.context_pack_contract import CONTEXT_PACK_VERSION
 from repolens.graph import GRAPH_SCHEMA_VERSION
@@ -88,6 +89,7 @@ def create_ai_proposal(
     enable_ai: bool = False,
     provider: str | None = None,
     model: str | None = None,
+    save: bool = False,
 ) -> dict[str, Any]:
     """Return a v0.8 AI Proposal envelope without hidden provider fallback."""
     repo_root = Path(repo_path)
@@ -155,6 +157,7 @@ def create_ai_proposal(
             context_pack_id=context_pack_id,
             target=target,
             provider_config=provider_config,
+            save=save,
         )
 
     if normalized_kind == "patch_plan":
@@ -164,6 +167,7 @@ def create_ai_proposal(
             context_pack_id=context_pack_id,
             target=target,
             provider_config=provider_config,
+            save=save,
         )
 
     if not task:
@@ -239,21 +243,25 @@ def create_ai_proposal(
             safety=_TEST_PROVIDER_SAFETY_FLAGS,
         )
 
-    return _proposal_envelope(
+    return _with_optional_saved_artifact(
+        _proposal_envelope(
+            repo_root=repo_root,
+            kind=normalized_kind,
+            status="available",
+            reason="proposal_available",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id or generated_pack_id,
+            target=target,
+            warnings=list(proposal["warnings"]),
+            proposal=proposal,
+            context_freshness=_mapping(context_envelope.get("freshness")),
+            context_limits=_mapping(context_envelope.get("limits")),
+            context_truncation=_mapping(context_envelope.get("truncation")),
+            safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        ),
         repo_root=repo_root,
-        kind=normalized_kind,
-        status="available",
-        reason="proposal_available",
-        provider_config=provider_config,
-        task=task,
-        context_pack_id=context_pack_id or generated_pack_id,
-        target=target,
-        warnings=list(proposal["warnings"]),
-        proposal=proposal,
-        context_freshness=_mapping(context_envelope.get("freshness")),
-        context_limits=_mapping(context_envelope.get("limits")),
-        context_truncation=_mapping(context_envelope.get("truncation")),
-        safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        save=save,
     )
 
 
@@ -289,6 +297,11 @@ def human_ai_proposal(envelope: Mapping[str, Any]) -> str:
                 f"Canonical graph hash: {proposal.get('canonical_graph_hash', '')}",
             ]
         )
+    persistence = data.get("persistence")
+    if isinstance(persistence, Mapping) and persistence.get("saved"):
+        lines.append(f"Saved artifact: {persistence.get('path', '')}")
+    if not (isinstance(persistence, Mapping) and persistence.get("saved")):
+        lines.append("Proposal persistence: ephemeral")
     lines.append(
         "No network call, command execution, file write, patch application, or remote post "
         "was performed."
@@ -332,6 +345,12 @@ def _proposal_envelope(
         "input_boundary": _public_input_boundary(),
         "source_disclosure": dict(_SOURCE_DISCLOSURE),
         "safety": dict(safety or _NO_ACTION_SAFETY_FLAGS),
+        "persistence": {
+            "saved": False,
+            "path": None,
+            "explicit_save_required": True,
+            "artifact_dir": ".repolens/ai-proposals",
+        },
         "supported_kinds": sorted(AI_PROPOSAL_SUPPORTED_KINDS),
     }
     confidence = "medium" if proposal is not None else "none"
@@ -357,6 +376,59 @@ def _proposal_envelope(
     )
 
 
+def _with_optional_saved_artifact(
+    envelope: dict[str, Any], *, repo_root: Path, save: bool
+) -> dict[str, Any]:
+    if not save:
+        return envelope
+    data = _mapping(envelope.get("data"))
+    proposal = _mapping(data.get("proposal"))
+    if not proposal:
+        return envelope
+
+    artifact = {
+        "artifact_label": "ai_proposal_artifact",
+        "artifact_schema_version": "0.8.saved_ai_proposal.v1",
+        "kind": proposal.get("kind"),
+        "input_digest": proposal.get("input_digest"),
+        "provider": proposal.get("provider"),
+        "provenance": proposal.get("provenance"),
+        "source_disclosure": proposal.get("source_disclosure"),
+        "proposal": proposal,
+    }
+    digest = str(proposal.get("input_digest", "sha256:unknown")).replace("sha256:", "")
+    kind = str(proposal.get("kind", "proposal"))
+    rel_path = f".repolens/ai-proposals/{kind}-{digest[:16]}.json"
+    output_path = repo_root / rel_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    audit = audit_artifacts(repo_root, include_ai_proposals=True)
+    saved_artifact_violations = [
+        violation
+        for violation in _sequence(_mapping(audit.get("data")).get("violations"))
+        if str(_mapping(violation).get("location", "")).startswith(rel_path)
+    ]
+    persistence = dict(_mapping(data.get("persistence")))
+    persistence.update(
+        {
+            "saved": True,
+            "path": rel_path,
+            "safety_audit_passed": not saved_artifact_violations,
+        }
+    )
+    envelope_data = dict(data)
+    envelope_data["persistence"] = persistence
+    safety = dict(_mapping(envelope_data.get("safety")))
+    safety["file_written"] = True
+    envelope_data["safety"] = safety
+    envelope["data"] = envelope_data
+    if saved_artifact_violations:
+        envelope["ok"] = False
+        envelope["error"] = {"message": "saved_ai_proposal_failed_artifact_safety_audit"}
+    return envelope
+
+
 def _create_architecture_explanation_proposal(
     repo_root: Path,
     *,
@@ -364,6 +436,7 @@ def _create_architecture_explanation_proposal(
     context_pack_id: str | None,
     target: str | None,
     provider_config: Mapping[str, Any],
+    save: bool,
 ) -> dict[str, Any]:
     if not target and not task:
         return _proposal_envelope(
@@ -453,18 +526,22 @@ def _create_architecture_explanation_proposal(
         provider_config=provider_config,
         input_digest=input_digest,
     )
-    return _proposal_envelope(
+    return _with_optional_saved_artifact(
+        _proposal_envelope(
+            repo_root=repo_root,
+            kind="architecture_explanation",
+            status="available",
+            reason="proposal_available",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            warnings=list(proposal["warnings"]),
+            proposal=proposal,
+            safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        ),
         repo_root=repo_root,
-        kind="architecture_explanation",
-        status="available",
-        reason="proposal_available",
-        provider_config=provider_config,
-        task=task,
-        context_pack_id=context_pack_id,
-        target=target,
-        warnings=list(proposal["warnings"]),
-        proposal=proposal,
-        safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        save=save,
     )
 
 
@@ -609,6 +686,7 @@ def _create_patch_plan_proposal(
     context_pack_id: str | None,
     target: str | None,
     provider_config: Mapping[str, Any],
+    save: bool,
 ) -> dict[str, Any]:
     if not task:
         return _proposal_envelope(
@@ -665,21 +743,25 @@ def _create_patch_plan_proposal(
         provider_config=provider_config,
         input_digest=input_digest,
     )
-    return _proposal_envelope(
+    return _with_optional_saved_artifact(
+        _proposal_envelope(
+            repo_root=repo_root,
+            kind="patch_plan",
+            status="available",
+            reason="proposal_available",
+            provider_config=provider_config,
+            task=task,
+            context_pack_id=context_pack_id or generated_pack_id,
+            target=target,
+            warnings=list(proposal["warnings"]),
+            proposal=proposal,
+            context_freshness=_mapping(context_envelope.get("freshness")),
+            context_limits=_mapping(context_envelope.get("limits")),
+            context_truncation=_mapping(context_envelope.get("truncation")),
+            safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        ),
         repo_root=repo_root,
-        kind="patch_plan",
-        status="available",
-        reason="proposal_available",
-        provider_config=provider_config,
-        task=task,
-        context_pack_id=context_pack_id or generated_pack_id,
-        target=target,
-        warnings=list(proposal["warnings"]),
-        proposal=proposal,
-        context_freshness=_mapping(context_envelope.get("freshness")),
-        context_limits=_mapping(context_envelope.get("limits")),
-        context_truncation=_mapping(context_envelope.get("truncation")),
-        safety=_TEST_PROVIDER_SAFETY_FLAGS,
+        save=save,
     )
 
 
@@ -1115,7 +1197,7 @@ def _proposal_evidence_refs(context_pack: Mapping[str, Any]) -> list[str]:
 
 def _deterministic_item_evidence(item: Any) -> dict[str, Any]:
     mapped = _mapping(item)
-    return {
+    evidence = {
         "handle": mapped.get("handle", ""),
         "path": mapped.get("path", ""),
         "kind": mapped.get("kind", ""),
@@ -1123,6 +1205,16 @@ def _deterministic_item_evidence(item: Any) -> dict[str, Any]:
         "confidence": mapped.get("confidence", ""),
         "evidence_refs": _safe_evidence_refs(_sequence(mapped.get("evidence"))),
     }
+    if evidence["kind"] == "candidate_verification_command":
+        evidence.update(
+            {
+                "found": True,
+                "run": False,
+                "not_run": True,
+                "auto_run_recommended": False,
+            }
+        )
+    return evidence
 
 
 def _patch_plan_command(value: Any) -> dict[str, Any]:
