@@ -1,6 +1,6 @@
-# RepoLens MCP v0.7 Known Limitations
+# RepoLens MCP v0.8 Known Limitations
 
-These limitations are acceptable for v0.7 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation, Semantic Evaluation, artifact audit, or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight, stale semantic inspection, corrupt artifacts, stale graph facts, or unusable workflows.
+These limitations are acceptable for v0.8 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation, Semantic Evaluation, artifact audit, or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight, stale semantic inspection, corrupt artifacts, stale graph facts, AI Proposal boundary violations, or unusable workflows.
 
 ## Resolution Limits
 
@@ -33,6 +33,17 @@ These limitations are acceptable for v0.7 when they remain explicit, safe, and n
 - Suggested Reading Order is a bounded heuristic over graph facts and may be shallow for docs/config-only repositories.
 - Structural Summaries are derived from graph facts and structural metadata, not LLM-generated prose summaries.
 
+## AI Proposal Limits
+
+- AI is disabled by default. v0.8 supports only the local deterministic `test` provider, so release evidence validates proposal contracts and bounded orientation rather than external-model quality.
+- AI Proposals consume bounded, redacted RepoLens metadata by default. They do not read or mirror whole source files and cannot replace scoped source inspection.
+- Context Pack Summary Proposals interpret an existing pack; they do not become Structural Summaries, add evidence, rerank items, or change Context Pack IDs.
+- Architecture Explanation Proposals are bounded to indexed nodes, relationships, candidates, and warnings. They do not prove runtime behavior or create ownership, dependency, route, or architecture facts.
+- Patch Plan Proposals may omit relevant files, tests, docs/config risks, or Candidate Verification Commands when graph evidence or Task Matching is sparse. Proposed targets are not guaranteed edit files.
+- Patch Plan Proposals cannot produce apply-ready diffs, write project files, apply patches, execute commands, mutate branches, or post remote comments. Active Workflow remains deferred beyond v0.8.
+- AI Proposals remain outside deterministic graph facts, Canonical Graph Hash, Context Pack IDs and ranking, resolver behavior, Package Ownership, and graph traversal.
+- Proposals are ephemeral unless explicitly saved. Saved AI Proposal artifacts remain private local metadata, and Artifact Safety Audit is a bounded contract check rather than a complete secret scanner.
+
 ## Context Pack Limits
 
 - Assistant Preflight is a bounded orientation workflow before broad file reads, not a source mirror, semantic planner, or command runner.
@@ -64,12 +75,12 @@ These limitations are acceptable for v0.7 when they remain explicit, safe, and n
 - No write-capable MCP tools.
 - No browser UI or graph visualization.
 - No HTTP API or HTTP MCP server.
-- No AI/LLM-required graph generation, LLM summaries, embeddings, hosted sync, or telemetry.
+- No AI/LLM-required graph generation, AI-owned graph facts, embeddings, hosted sync, or telemetry.
 - No runtime package registry lookups during normal indexing or MCP serving.
 - No full framework emulation or runtime package-manager, bundler, compiler, framework, or test execution during indexing, Context Pack generation, preflight, or artifact audit.
 - No persisted Context Pack sessions or server-side assistant memory.
-- No PyPI, Docker registry, or hosted publishing automation in v0.7.
-- No PyPI, Docker registry, or hosted publishing automation in v0.6 remains true for the v0.7 readiness branch.
+- No PyPI, Docker registry, or hosted publishing automation in v0.8.
+- No PyPI, Docker registry, or hosted publishing automation in v0.6 remains a historical release boundary.
 
 ## Dogfooding And Evaluation Outcomes Reflected Here
 
@@ -84,3 +95,5 @@ No PyPI, Docker registry, or hosted publishing automation in v0.5 was accepted a
 The v0.6 dogfood evaluation pack in `docs/dogfood/2026-07-06-v0.6-dogfood-evaluation-pack.md` adds release-blocking checks for JS/TS call chains, re-export behavior, workspace imports, route hints, stale graph behavior, and no-source-disclosure negatives. Parser timing and file-count evidence are bounded local fixture evidence only; use them to document limitations, not to justify parse caches, worker pools, indexing parallelism, telemetry, package-manager execution, compiler execution, or framework execution.
 
 The v0.7 semantic evaluation suite in `tests/fixtures/semantic_evaluation` adds release-blocking checks for deterministic Python CFG, lexical binding, unsupported/uncertain constructs, no-source-disclosure negatives, stable identity exclusion, and semantic debug/evaluation export audit behavior. Use those results to document limitations, not to broaden into data-flow, taint, type inference, dynamic runtime emulation, package-manager execution, compiler execution, framework execution, AI summaries, embeddings, telemetry, or hosted services.
+
+The v0.8 dogfood report in `docs/dogfood/2026-07-10-v0.8-ai-proposal-layer.md` validates disabled-default behavior, stable Context Pack identity and Canonical Graph Hash, deterministic input digests, all three proposal envelopes, saved-artifact audit, and read-only Patch Plan boundaries. It also records that the local test provider does not prove external-model quality and that docs-focused Patch Plans can omit plausible documentation targets or Candidate Verification Commands.

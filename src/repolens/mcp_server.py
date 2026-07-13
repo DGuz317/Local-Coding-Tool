@@ -8,6 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from repolens.ai_proposal import create_ai_proposal
 from repolens.context_pack import (
     expand_context,
     explain_relevance,
@@ -47,6 +48,7 @@ MCP_TOOL_NAMES = (
     "suggest_reading_order",
     "get_task_context",
     "assistant_preflight",
+    "create_ai_proposal",
     "expand_context",
     "explain_relevance",
     "list_entrypoints",
@@ -237,6 +239,27 @@ class RepoLensMcpTools:
             focus_hints=focus_hints or [],
             budget=budget,
             include_experimental_semantic_hints=include_experimental_semantic_hints,
+        )
+
+    def create_ai_proposal(
+        self,
+        kind: str,
+        task: str | None = None,
+        context_pack_id: str | None = None,
+        target: str | None = None,
+        enable_ai: bool = False,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        return create_ai_proposal(
+            self.repo_path,
+            kind,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            enable_ai=enable_ai,
+            provider=provider,
+            model=model,
         )
 
     def expand_context(
@@ -431,6 +454,27 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
             max_candidate_verification_commands,
             max_total_chars,
             include_experimental_semantic_hints,
+        )
+
+    @server.tool()
+    def create_ai_proposal(
+        kind: str,
+        task: str | None = None,
+        context_pack_id: str | None = None,
+        target: str | None = None,
+        enable_ai: bool = False,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the v0.8 AI Proposal safety path without provider execution."""
+        return tools.create_ai_proposal(
+            kind,
+            task=task,
+            context_pack_id=context_pack_id,
+            target=target,
+            enable_ai=enable_ai,
+            provider=provider,
+            model=model,
         )
 
     @server.tool()

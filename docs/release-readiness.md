@@ -1,6 +1,8 @@
-# RepoLens MCP v0.7 Release Readiness
+# RepoLens MCP v0.8 Release Readiness
 
 This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
+
+v0.8 release readiness is about the optional AI Proposal Layer: disabled-by-default, metadata-only interpretations that remain outside the trusted deterministic graph while proving stable input identity, explicit provider provenance, bounded persistence, artifact safety, and read-only behavior.
 
 v0.7 release readiness is about the Python Semantic Analysis Prototype: experimental, source-free Python CFG and lexical binding facts that remain separate from the stable graph contract while proving deterministic semantic inspection, evaluation, artifact safety, and release-gate evidence.
 
@@ -25,6 +27,7 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 - Final v0.5 maintainer release judgment is recorded before v0.5 is cut.
 - Final v0.6 maintainer release judgment is recorded before v0.6 is cut.
 - Final v0.7 maintainer release judgment is recorded before v0.7 is cut.
+- Final v0.8 maintainer release judgment is recorded before v0.8 is cut, and does not overstate local test-provider dogfood as external-model quality.
 
 ## Local Verification Gate
 
@@ -70,6 +73,19 @@ The v0.6 assistant-facing contract keeps Assistant Preflight as the first step b
 - Framework Route Hints are deterministic hints from local file/config/parser evidence, not framework emulation, compiler output, bundler output, or runtime route proof.
 - Resolver outcomes preserve uncertainty for unsupported aliases, ambiguous exports, incomplete workspace evidence, and complex package entrypoints through unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings.
 - Assistant-facing output must continue to omit source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, and absolute host paths.
+
+## v0.8 Assistant-Facing Documentation
+
+The v0.8 assistant-facing contract keeps AI optional and outside deterministic graph facts:
+
+- AI is disabled by default; every enabled request explicitly selects a provider and model, with no hidden provider call or fallback.
+- Default AI input is deterministic, redacted, size-bounded RepoLens metadata rather than whole source files, raw comments, raw Agent Guidance, credentials, or raw provider errors.
+- Context Pack Summary, Architecture Explanation, and Patch Plan outputs are labeled AI Proposals with provider/model provenance, evidence refs, confidence, warnings, limitations, input packer version, redaction policy version, and input digest.
+- AI Proposal generation does not change Canonical Graph Hash, Context Pack IDs or ranking, Task Matching, resolver behavior, Package Ownership, or graph traversal.
+- Proposals are ephemeral by default. Explicit save writes only a bounded proposal artifact and immediately runs Artifact Safety Audit; later audits include saved proposals only through explicit `--include-ai-proposals`.
+- Patch Plan Proposals do not produce apply-ready diffs, write project files, apply patches, run commands, mutate branches, or post remote comments. Active Workflow remains deferred beyond v0.8.
+
+v0.8 release readiness requires deterministic evidence that equivalent packed input has a stable digest, all three proposal kinds satisfy schema `0.8.ai_proposal.v1`, disabled behavior leaves default output unchanged, saved proposals pass Artifact Safety Audit, and dogfood records usefulness and overclaiming limits.
 
 ## v0.7 Assistant-Facing Documentation
 
@@ -217,6 +233,19 @@ uv run repolens evaluate-context --json
 ```
 
 The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, JS/TS call chains, alias ambiguity, re-export behavior, workspace package imports, route hints, and no-source-disclosure negatives.
+
+Latest local evidence for issue #209 on 2026-07-10:
+
+- Blocker status: #208 is closed before final readiness judgment.
+- Default safety evidence: a disabled Context Pack Summary request returned `status: disabled`, `provider_called: false`, `network_accessed: false`, and `file_written: false`. Context Pack ID and Canonical Graph Hash remained unchanged.
+- Stable identity evidence: repeated equivalent Context Pack Summary input retained Context Pack ID `cp_8b8df4e9598223f9`, Canonical Graph Hash `4be838cac6d685fab22808e25063f9a4e0e38552e4a194a1026a67bbc62228ad`, and input digest `sha256:40574b0092e6c00de3eeb58e6ee953d429d8e1e0c11c8b0c624e3771b7875049`.
+- Schema evidence: Context Pack Summary, Architecture Explanation, and Patch Plan outputs were available under schema `0.8.ai_proposal.v1` with explicit local test-provider/model provenance, evidence refs, input boundary, source-disclosure status, confidence, warnings, and limitations.
+- Artifact evidence: explicit save returned `saved: true` and `safety_audit_passed: true`; `uv run repolens audit-artifacts /tmp/repolens-v08-dogfood --include-ai-proposals --json` returned `ok: true` with zero violations.
+- Dogfood evidence: `docs/dogfood/2026-07-10-v0.8-ai-proposal-layer.md` records that Context Pack Summary helped confirm first reads, Architecture Explanation cited 12 useful node/neighbor evidence refs, and Patch Plan found a plausible implementation file plus three related tests.
+- Dogfood limitation: the docs-focused Patch Plan omitted the supplied documentation target, docs/config risk notes, and Candidate Verification Commands. This remains bounded proposal incompleteness, not a graph claim; no output implied command execution, project file writes, graph mutation, patch application, branch mutation, or remote posting.
+- Commands unavailable: external-provider dogfood could not run because v0.8 supports only the local deterministic `test` provider. Replacement evidence is deterministic local-provider dogfood, repeated-input digest evidence, focused schema/safety tests, stable graph and Context Pack identity checks, and explicit saved-artifact audit.
+- Full verification gate: passed in this branch. `uv run pytest` passed 254/254 tests. `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src/repolens`, `uv run repolens evaluate-context --json`, `uv run repolens audit-artifacts /tmp/repolens-v08-dogfood --include-ai-proposals --json`, and `uv build --out-dir /tmp/repolens-dist --clear` passed.
+- Maintainer release judgment: approved for the narrow v0.8 AI Proposal contract after the full gate passed. This approval does not claim external-model quality and does not approve Active Workflow behavior.
 
 Latest local evidence for issue #190 on 2026-07-09:
 
