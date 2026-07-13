@@ -75,20 +75,20 @@ def test_preflight_human_output_includes_actionable_orientation_sections(tmp_pat
     assert "return input.user" not in result.output
 
 
-def test_preflight_missing_graph_returns_bounded_actionable_error(tmp_path):
+def test_preflight_missing_graph_is_initialized_automatically(tmp_path):
     _write_preflight_fixture_repo(tmp_path)
 
     json_result = runner.invoke(app, ["preflight", str(tmp_path), "Fix login validation", "--json"])
     human_result = runner.invoke(app, ["preflight", str(tmp_path), "Fix login validation"])
 
-    assert json_result.exit_code == 1
+    assert json_result.exit_code == 0
     envelope = json.loads(json_result.output)
-    assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "missing_graph_artifacts"
-    assert envelope["error"]["recommended_action"].startswith("repolens index ")
-    assert human_result.exit_code == 1
-    assert "Assistant Preflight failed:" in human_result.output
-    assert "Recommended action: repolens index" in human_result.output
+    assert envelope["ok"] is True
+    assert envelope["freshness"]["fresh"] is True
+    assert (tmp_path / ".repolens" / "graph.sqlite").is_file()
+    assert human_result.exit_code == 0
+    assert "Assistant Preflight:" in human_result.output
+    assert "Freshness: available" in human_result.output
 
 
 def test_preflight_stale_graph_returns_bounded_warning(tmp_path):

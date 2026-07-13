@@ -32,10 +32,33 @@ from repolens.semantic_artifact import (
 
 SCAN_ARTIFACT_PATH = f"{ARTIFACT_DIR_NAME}/scan.json"
 ARTIFACT_GITIGNORE_CONTENT = "*\n!.gitignore\n"
+REPOSITORY_ROOT_MARKERS = ("pyproject.toml", "package.json")
 
 
 class RepoLensIndexError(RuntimeError):
     """Raised when indexing cannot bootstrap artifacts safely."""
+
+
+def discover_repository_root(start_path: Path | str) -> Path:
+    """Discover a repository root from a root or one of its subdirectories."""
+    try:
+        start = Path(start_path).resolve(strict=True)
+    except OSError as exc:
+        raise RepoLensIndexError("analysis_root_not_found") from exc
+    if not start.is_dir():
+        start = start.parent
+
+    candidates = (start, *start.parents)
+    for candidate in candidates:
+        if (candidate / ".git").exists():
+            return candidate
+    for candidate in candidates:
+        if (candidate / ARTIFACT_DIR_NAME).is_dir():
+            return candidate
+    for candidate in candidates:
+        if any((candidate / marker).is_file() for marker in REPOSITORY_ROOT_MARKERS):
+            return candidate
+    raise RepoLensIndexError("unsupported_repository_root")
 
 
 @dataclass(frozen=True)

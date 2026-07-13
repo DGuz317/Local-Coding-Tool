@@ -284,18 +284,68 @@ def test_mcp_assistant_preflight_returns_standard_envelope_with_focus_and_budget
     assert "return input.user" not in str(result)
 
 
-def test_mcp_assistant_preflight_missing_graph_returns_standard_error(tmp_path):
+def test_mcp_assistant_preflight_initializes_missing_graph_from_nested_directory(tmp_path):
     _write_preflight_fixture_repo(tmp_path)
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "src" / "auth"
+    source_before = (nested / "login.ts").read_text(encoding="utf-8")
+    tools = RepoLensMcpTools(nested)
+
+    first = tools.assistant_preflight(
+        "Fix login validation",
+        focus_hints=["src/auth/login.ts"],
+        max_first_read_files=1,
+    )
+    second = tools.assistant_preflight(
+        "Fix login validation",
+        focus_hints=["src/auth/login.ts"],
+        max_first_read_files=1,
+    )
+
+    assert first["ok"] is True
+    assert first["data"]["assistant_preflight_version"] == "0.5.preflight.v1"
+    assert first["freshness"]["fresh"] is True
+    assert first["data"]["context_pack_id"] == second["data"]["context_pack_id"]
+    assert first["data"] == second["data"]
+    assert [item["path"] for item in first["data"]["first_read_files"]] == ["src/auth/login.ts"]
+    assert (tmp_path / ".repolens" / "graph.sqlite").is_file()
+    assert (nested / "login.ts").read_text(encoding="utf-8") == source_before
+    assert str(tmp_path) not in str(first)
+    assert "return input.user" not in str(first)
+
+
+def test_mcp_assistant_preflight_returns_problem_for_unsupported_root(tmp_path):
+    tools = RepoLensMcpTools(tmp_path)
+
+    result = tools.assistant_preflight("Inspect this unsupported root")
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "unsupported_repository_root"
+    assert result["error"]["problem"] == {
+        "reason": "unsupported_repository_root",
+        "recoverable": True,
+    }
+    assert result["freshness"] == {"fresh": False, "status": "unavailable"}
+    assert result["warnings"] == [
+        "No repository facts were guessed after preflight preparation failed."
+    ]
+
+
+def test_mcp_assistant_preflight_returns_problem_when_indexing_fails(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".repolens").symlink_to(tmp_path / "missing-artifact-target")
     tools = RepoLensMcpTools(tmp_path)
 
     result = tools.assistant_preflight("Fix login validation")
 
     assert result["ok"] is False
-    assert result["error"]["code"] == "missing_graph_artifacts"
-    assert result["error"]["recommended_action"].startswith("repolens index ")
+    assert result["error"]["code"] == "preflight_index_failed"
+    assert result["error"]["problem"] == {
+        "reason": "artifact_dir_is_symlink",
+        "recoverable": True,
+    }
     assert result["data"] == {}
-    assert result["freshness"]["fresh"] is False
-    assert result["truncation"] == {"fields": [], "truncated": False}
 
 
 def test_mcp_assistant_preflight_stale_graph_returns_bounded_warning(tmp_path):
@@ -544,6 +594,43 @@ def test_mcp_stdio_smoke_lists_exact_tools_and_calls_create_ai_proposal(tmp_path
                 )
 
     asyncio.run(run_smoke())
+
+
+def test_mcp_stdio_assistant_preflight_builds_missing_graph_from_nested_directory(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    (tmp_path / ".git").mkdir()
+    nested = tmp_path / "src" / "auth"
+
+    async def run_smoke() -> None:
+        server_params = StdioServerParameters(
+            command="uv",
+            args=["run", "repolens", "mcp", str(nested)],
+            env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "assistant_preflight",
+                    arguments={
+                        "task": "Fix login validation",
+                        "focus_hints": ["src/auth/login.ts"],
+                        "max_first_read_files": 1,
+                    },
+                )
+
+        assert result.structuredContent is not None
+        envelope = result.structuredContent
+        assert envelope["ok"] is True
+        assert envelope["freshness"]["fresh"] is True
+        assert [item["path"] for item in envelope["data"]["first_read_files"]] == [
+            "src/auth/login.ts"
+        ]
+        assert str(tmp_path) not in str(envelope)
+        assert "return input.user" not in str(envelope)
+
+    asyncio.run(run_smoke())
+    assert (tmp_path / ".repolens" / "graph.sqlite").is_file()
 
 
 def test_mcp_stdio_smoke_lists_exact_tools_and_calls_status(tmp_path):

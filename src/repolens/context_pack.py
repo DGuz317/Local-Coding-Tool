@@ -16,6 +16,12 @@ from repolens.context_pack_contract import (
     HUMAN_LOWER_PRIORITY_LABEL,
     guard_context_pack_output,
 )
+from repolens.graph_store import SqliteGraphStore
+from repolens.indexer import (
+    RepoLensIndexError,
+    discover_repository_root,
+    update_repository,
+)
 from repolens.mcp_envelope import (
     mcp_error,
     mcp_from_query_envelope,
@@ -272,9 +278,31 @@ def get_assistant_preflight(
     budget: Mapping[str, int] | None = None,
     include_experimental_semantic_hints: bool = False,
 ) -> dict[str, Any]:
-    """Return the v0.5 Assistant Preflight contract shared by CLI and MCP."""
+    """Discover and initialize the repo, then return the shared preflight contract."""
+    active_budget = _context_budget(budget)
+    try:
+        repo_root = discover_repository_root(repo_path)
+        status = SqliteGraphStore(repo_root).inspect()
+        if status.reason == "missing_graph_artifacts":
+            update_repository(repo_root)
+    except RepoLensIndexError as exc:
+        reason = str(exc) or "preflight_index_failed"
+        code = (
+            reason
+            if reason in {"analysis_root_not_found", "unsupported_repository_root"}
+            else "preflight_index_failed"
+        )
+        return mcp_error(
+            code=code,
+            message="Assistant Preflight could not prepare repository orientation.",
+            details={"problem": {"reason": reason, "recoverable": True}},
+            limits=active_budget,
+            warnings=["No repository facts were guessed after preflight preparation failed."],
+            freshness={"fresh": False, "status": "unavailable"},
+        )
+
     context_envelope = get_task_context(
-        repo_path,
+        repo_root,
         task,
         focus_hints=focus_hints,
         budget=budget,
@@ -284,7 +312,6 @@ def get_assistant_preflight(
         return context_envelope
 
     context_pack = _mapping(context_envelope.get("data"))
-    active_budget = _context_budget(budget)
     normalized_focus_hints = [redact_text(str(hint)) for hint in focus_hints]
     data = {
         "assistant_preflight_version": ASSISTANT_PREFLIGHT_VERSION,

@@ -6,6 +6,8 @@ This is the v0.3 assistant-facing contract for Context Packs. Implementation sli
 
 Assistant Preflight is the v0.5 bounded orientation workflow assistants should call before broad repository reads. It is exposed through the CLI `repolens preflight` command and the read-only MCP `assistant_preflight` tool. Both surfaces use the same service and return the standard MCP envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`.
 
+The shared service discovers the repository root from nested working directories using local repository evidence. If graph artifacts are missing, it builds and validates them with safe defaults before producing the Context Pack. This lifecycle step may write only RepoLens-local artifacts under `.repolens`; it does not modify analyzed repository files or execute package managers, compilers, bundlers, frameworks, tests, or registry lookups. Unsupported roots and recoverable initialization failures return structured problem details without guessed repository facts.
+
 Assistant Preflight `data` includes:
 
 - `assistant_preflight_version`
@@ -68,7 +70,7 @@ Expansion handles must include `handle`, `item_kind`, `context_pack_id`, `reason
 
 ## MCP Envelope
 
-Context Pack MCP tools must return the standard envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`. Structured errors use `ok: false` and the existing RepoLens error shape. Missing or unavailable graph artifacts use the existing graph-unavailable errors.
+Context Pack MCP tools must return the standard envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`. Structured errors use `ok: false` and the existing RepoLens error shape. Assistant Preflight initializes missing graph artifacts automatically; unsupported roots or recoverable initialization failures return bounded problem details. Other unavailable graph states continue to use the existing graph-unavailable errors.
 
 ## Budgets
 
