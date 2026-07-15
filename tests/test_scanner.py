@@ -15,6 +15,9 @@ def test_scanner_applies_safe_policy_with_repo_relative_paths(tmp_path):
     _write_text(root / "ignored-dir" / "file.py", "print('ignored')\n")
     _write_text(root / "settings.local", "ignored\n")
     _write_text(root / "node_modules" / "pkg" / "index.js", "module.exports = {}\n")
+    _write_text(root / "vendor" / "pkg" / "client.py", "vendored\n")
+    _write_text(root / ".git" / "config", "vcs metadata\n")
+    _write_text(root / ".venv" / "lib" / "installed.py", "environment\n")
     _write_text(root / "dist" / "app.js", "generated\n")
     _write_text(root / ".mypy_cache" / "cache.json", "{}\n")
     _write_text(root / "generated" / "client.py", "generated\n")
@@ -23,6 +26,8 @@ def test_scanner_applies_safe_policy_with_repo_relative_paths(tmp_path):
     _write_text(root / ".env", "TOKEN=secret\n")
     _write_text(root / "secrets" / "config.yml", "password: secret\n")
     _write_text(root / "static" / "app.min.js", "minified\n")
+    _write_text(root / "src" / "api.generated.ts", "generated\n")
+    _write_text(root / "legacy" / "Session.java", "class Session {}\n")
     _write_bytes(root / "assets" / "logo.png", b"\x89PNG\r\n\x1a\n")
     _write_bytes(root / "binary.dat", b"abc\0def")
     _write_text(root / "large.txt", "x" * 65)
@@ -42,8 +47,10 @@ def test_scanner_applies_safe_policy_with_repo_relative_paths(tmp_path):
 
     skip_reasons = {skipped.path: skipped.reason for skipped in result.skipped}
     assert skip_reasons[".env"] == "secret_path"
+    assert skip_reasons[".git"] == "excluded_directory"
     assert skip_reasons[".mypy_cache"] == "excluded_directory"
     assert skip_reasons[".repolens"] == "repolens_artifact_dir"
+    assert skip_reasons[".venv"] == "excluded_directory"
     assert skip_reasons["assets/logo.png"] == "binary_media_archive"
     assert skip_reasons["binary.dat"] == "binary_content"
     assert skip_reasons["dist"] == "excluded_directory"
@@ -54,10 +61,13 @@ def test_scanner_applies_safe_policy_with_repo_relative_paths(tmp_path):
     assert skip_reasons["ignored.txt"] == "gitignore"
     assert skip_reasons["internal-link.py"] == "symlink"
     assert skip_reasons["large.txt"] == "oversized_file"
+    assert skip_reasons["legacy/Session.java"] == "unsupported_source"
     assert skip_reasons["node_modules"] == "excluded_directory"
     assert skip_reasons["secrets"] == "secret_path"
     assert skip_reasons["settings.local"] == "gitignore"
+    assert skip_reasons["src/api.generated.ts"] == "generated_file"
     assert skip_reasons["static/app.min.js"] == "generated_file"
+    assert skip_reasons["vendor"] == "excluded_directory"
 
     all_recorded_paths = file_paths | set(skip_reasons)
     assert all(not path.startswith(str(root)) for path in all_recorded_paths)

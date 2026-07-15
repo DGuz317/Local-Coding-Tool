@@ -440,6 +440,27 @@ def _expectation_checks(
             "likely_tests_include_any",
             _includes_any(_paths(pack.get("likely_tests")), expected["likely_tests_include_any"]),
         )
+    if "deprioritized_context_include_any" in expected:
+        _add_check(
+            checks,
+            "deprioritized_context_include_any",
+            _includes_any(
+                _paths(pack.get("lower_priority_context")),
+                expected["deprioritized_context_include_any"],
+            ),
+        )
+    if "likely_irrelevant_file_count_max" in expected:
+        returned_paths = [
+            *_paths(pack.get("first_read_files")),
+            *_paths(pack.get("likely_tests")),
+        ]
+        relevant_paths = _expected_relevant_paths(expected)
+        _add_check(
+            checks,
+            "likely_irrelevant_file_count_max",
+            sum(path not in relevant_paths for path in returned_paths)
+            <= int(expected["likely_irrelevant_file_count_max"]),
+        )
     if "supporting_configs_include_any" in expected:
         _add_check(
             checks,
@@ -894,6 +915,7 @@ def _expected_relevant_paths(expected: Mapping[str, Any]) -> set[str]:
         "likely_tests_include_any",
         "supporting_configs_include_any",
         "supporting_docs_include_any",
+        "deprioritized_context_include_any",
         "ambiguity_candidates_include_any",
     ):
         result.update(str(path) for path in _sequence(expected.get(key)))

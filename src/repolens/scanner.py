@@ -114,7 +114,52 @@ BINARY_MEDIA_ARCHIVE_SUFFIXES = frozenset(
 )
 
 GENERATED_FILE_SUFFIXES = frozenset({".map"})
-GENERATED_FILE_NAME_SUFFIXES = (".bundle.js", ".min.css", ".min.js")
+GENERATED_FILE_NAME_SUFFIXES = (
+    ".bundle.js",
+    ".generated.js",
+    ".generated.jsx",
+    ".generated.ts",
+    ".generated.tsx",
+    ".min.css",
+    ".min.js",
+    "_generated.py",
+    "_pb2.py",
+    "_pb2_grpc.py",
+)
+UNSUPPORTED_SOURCE_SUFFIXES = frozenset(
+    {
+        ".c",
+        ".cc",
+        ".clj",
+        ".cljs",
+        ".coffee",
+        ".cpp",
+        ".cs",
+        ".dart",
+        ".ex",
+        ".exs",
+        ".fs",
+        ".fsx",
+        ".go",
+        ".groovy",
+        ".h",
+        ".hpp",
+        ".java",
+        ".kt",
+        ".kts",
+        ".lua",
+        ".m",
+        ".mm",
+        ".php",
+        ".pl",
+        ".rb",
+        ".rs",
+        ".scala",
+        ".scm",
+        ".swift",
+        ".vb",
+    }
+)
 
 
 class ScanError(ValueError):
@@ -270,6 +315,10 @@ def scan_repository(
 
             if _is_generated_artifact_file(rel_path):
                 record_skip(path, "generated_file")
+                continue
+
+            if Path(entry.name).suffix.lower() in UNSUPPORTED_SOURCE_SUFFIXES:
+                record_skip(path, "unsupported_source")
                 continue
 
             try:
