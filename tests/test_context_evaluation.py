@@ -18,7 +18,21 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
 
     assert envelope["ok"] is True
     data = envelope["data"]
-    assert data["manifest_version"] == "0.4.eval.v1"
+    assert data["manifest_version"] == "0.9.eval.v1"
+    assert data["metric_contract"] == {
+        "baseline": (
+            "scanner-approved paths ranked by descending task-token matches, then POSIX path; "
+            "limited to seven files"
+        ),
+        "expansion_count": "bounded expansion handles available in the initial Context Pack",
+        "first_read_hit_rate": "expected relevant files present in First-Read Files",
+        "irrelevant_file_count": (
+            "returned paths outside declared relevant files and Related Tests"
+        ),
+        "pack_size": "number of paths in the evaluated orientation list",
+        "related_test_inclusion": "expected Related Tests present in likely tests",
+        "version": "0.9.metrics.v1",
+    }
     assert data["summary"]["total_cases"] == 28
     assert data["summary"]["passed_cases"] == 28
     assert data["summary"]["failed_cases"] == 0
@@ -142,10 +156,38 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
         "version": "0.5.preflight.v1",
     }
     assert js_dogfood_case["artifact_audit_evidence"]["passed"] is True
+    assert js_dogfood_case["evaluation_expectations"] == {
+        "related_tests": [],
+        "relevant_files": [
+            "packages/app/src/index.ts",
+            "packages/lib/src/index.ts",
+            "packages/lib/src/value.ts",
+        ],
+    }
+    assert js_dogfood_case["metrics"]["context_pack"]["first_read_hit_rate"] == 1.0
+    assert js_dogfood_case["metrics"]["context_pack"]["irrelevant_file_count"] == 0
+    assert {check["name"] for check in js_dogfood_case["checks"]} >= {
+        "metric:first_read_hit_rate_min",
+        "metric:irrelevant_file_count_max",
+        "metric:pack_size_max",
+    }
 
     python_dogfood_case = case_by_id["v0_5_dogfood_python_package_preflight"]
     assert python_dogfood_case["passed"] is True
+    assert python_dogfood_case["evaluation_expectations"] == {
+        "related_tests": ["tests/service_spec.py"],
+        "relevant_files": ["src/dogpkg/service.py", "src/dogpkg/util.py"],
+    }
     assert python_dogfood_case["metrics"]["assistant_preflight"]["ok"] is True
+    assert python_dogfood_case["metrics"]["context_pack"]["first_read_hit_rate"] == 1.0
+    assert python_dogfood_case["metrics"]["context_pack"]["related_test_inclusion"] == 1.0
+    assert python_dogfood_case["metrics"]["context_pack"]["pack_size"] == 3
+    assert {check["name"] for check in python_dogfood_case["checks"]} >= {
+        "metric:first_read_hit_rate_min",
+        "metric:irrelevant_file_count_max",
+        "metric:pack_size_max",
+        "metric:related_test_inclusion_min",
+    }
 
     config_dogfood_case = case_by_id["v0_5_dogfood_config_heavy_artifact_audit"]
     assert config_dogfood_case["passed"] is True
@@ -175,6 +217,31 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
         check["name"] == "javascript_exports_include:packages/lib/src/index.ts"
         for check in v0_6_reexport_case["checks"]
     )
+
+
+def test_context_evaluation_relevance_and_savings_metrics_are_deterministic() -> None:
+    manifest_path = Path("tests/fixtures/context_pack/evaluation_manifest.json")
+
+    first = run_context_evaluation(manifest_path=manifest_path)["data"]
+    second = run_context_evaluation(manifest_path=manifest_path)["data"]
+
+    def stable_evidence(data):
+        return {
+            "local_savings_summary": data["local_savings_summary"],
+            "metric_contract": data["metric_contract"],
+            "cases": [
+                {
+                    "evaluation_expectations": case["evaluation_expectations"],
+                    "id": case["id"],
+                    "local_savings": case["local_savings"],
+                    "metrics": case["metrics"],
+                    "passed": case["passed"],
+                }
+                for case in data["cases"]
+            ],
+        }
+
+    assert stable_evidence(first) == stable_evidence(second)
 
 
 def test_evaluate_context_cli_emits_json_for_ci() -> None:
