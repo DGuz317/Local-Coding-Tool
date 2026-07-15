@@ -91,7 +91,7 @@ def test_preflight_missing_graph_is_initialized_automatically(tmp_path):
     assert "Freshness: available" in human_result.output
 
 
-def test_preflight_stale_graph_returns_bounded_warning(tmp_path):
+def test_preflight_refreshes_stale_graph_automatically(tmp_path):
     _write_preflight_fixture_repo(tmp_path)
     index_repository(tmp_path)
     _write_text(tmp_path / "src" / "auth" / "login.ts", "export const changed = true;\n")
@@ -101,9 +101,11 @@ def test_preflight_stale_graph_returns_bounded_warning(tmp_path):
     assert result.exit_code == 0
     envelope = json.loads(result.output)
     assert envelope["ok"] is True
-    assert envelope["freshness"]["fresh"] is False
-    assert envelope["data"]["freshness"]["status"] == "stale"
-    assert "Graph artifacts may be stale" in " ".join(envelope["warnings"])
+    assert envelope["freshness"]["fresh"] is True
+    assert envelope["data"]["freshness"]["status"] == "available"
+    assert envelope["data"]["graph_lifecycle"]["detected_state"] == "changed"
+    assert envelope["data"]["graph_lifecycle"]["update"]["mode"] == "selective"
+    assert "Graph artifacts may be stale" not in " ".join(envelope["warnings"])
 
 
 def _write_preflight_fixture_repo(root) -> None:

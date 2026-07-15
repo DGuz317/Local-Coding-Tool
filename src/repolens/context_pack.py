@@ -16,9 +16,11 @@ from repolens.context_pack_contract import (
     HUMAN_LOWER_PRIORITY_LABEL,
     guard_context_pack_output,
 )
+from repolens.graph import GraphArtifactsStatus
 from repolens.graph_store import SqliteGraphStore
 from repolens.indexer import (
     RepoLensIndexError,
+    UpdateResult,
     discover_repository_root,
     update_repository,
 )
@@ -280,11 +282,12 @@ def get_assistant_preflight(
 ) -> dict[str, Any]:
     """Discover and initialize the repo, then return the shared preflight contract."""
     active_budget = _context_budget(budget)
+    update_result: UpdateResult | None = None
     try:
         repo_root = discover_repository_root(repo_path)
         status = SqliteGraphStore(repo_root).inspect()
-        if status.reason == "missing_graph_artifacts":
-            update_repository(repo_root)
+        if status.fresh is not True:
+            update_result = update_repository(repo_root)
     except RepoLensIndexError as exc:
         reason = str(exc) or "preflight_index_failed"
         code = (
@@ -312,6 +315,18 @@ def get_assistant_preflight(
         return context_envelope
 
     context_pack = _mapping(context_envelope.get("data"))
+    final_freshness = _mapping(context_envelope.get("freshness"))
+    final_status = SqliteGraphStore(repo_root).inspect()
+    final_status_freshness = final_status.freshness or {}
+    final_git = final_status_freshness.get("git")
+    if isinstance(final_git, Mapping):
+        final_freshness["git"] = dict(final_git)
+    lifecycle = _preflight_graph_lifecycle(
+        status,
+        update_result,
+        final_freshness=final_freshness,
+    )
+    warnings = _sequence(context_envelope.get("warnings"))
     normalized_focus_hints = [redact_text(str(hint)) for hint in focus_hints]
     data = {
         "assistant_preflight_version": ASSISTANT_PREFLIGHT_VERSION,
@@ -330,7 +345,11 @@ def get_assistant_preflight(
             "max_items": active_budget["max_items_per_support_group"],
             "resolution": "resolved_or_warned_by_context_pack",
         },
-        "freshness": _mapping(context_envelope.get("freshness")),
+        "freshness": final_freshness,
+        "graph_lifecycle": lifecycle,
+        "graph_quality_warnings": sorted(
+            warning for warning in warnings if str(warning).startswith("graph_quality:")
+        ),
         "likely_tests": _sequence(context_pack.get("likely_tests")),
         "limits": _mapping(context_envelope.get("limits")),
         "task_context": {
@@ -339,7 +358,7 @@ def get_assistant_preflight(
             "scope": "graph_bounded_orientation",
         },
         "truncation": _mapping(context_envelope.get("truncation")),
-        "warnings": _sequence(context_envelope.get("warnings")),
+        "warnings": warnings,
     }
     data = guard_context_pack_output(data)
     return guard_context_pack_output(
@@ -353,6 +372,88 @@ def get_assistant_preflight(
             warnings=data["warnings"],
         )
     )
+
+
+def _preflight_graph_lifecycle(
+    status: GraphArtifactsStatus,
+    update_result: UpdateResult | None,
+    *,
+    final_freshness: Mapping[str, Any],
+) -> dict[str, Any]:
+    initial = _preflight_initial_freshness(status, final_freshness=final_freshness)
+    if update_result is None:
+        update: dict[str, Any] = {
+            "attempted": False,
+            "mode": "none",
+            "outcome": "not_needed",
+            "reason": status.reason,
+        }
+    else:
+        update = {
+            "attempted": True,
+            "mode": update_result.mode,
+            "outcome": (
+                "initialized"
+                if update_result.initialized
+                else "updated"
+                if update_result.mode == "selective"
+                else "rebuilt"
+            ),
+            "reason": status.reason,
+        }
+        if update_result.plan is not None:
+            plan = update_result.plan
+            update["selective_update"] = {
+                "changed_count": len(plan.changed_paths),
+                "deleted_count": len(plan.deleted_paths),
+                "parse_error_count": len(plan.parse_error_paths),
+                "reparse_count": len(plan.reparse_paths),
+                "reused_count": len(plan.reused_paths),
+                "safe": plan.safe,
+                "stale_cleanup_count": len(plan.stale_cleanup_paths),
+            }
+    return {
+        "detected_state": _preflight_detected_state(status),
+        "initial": initial,
+        "update": update,
+    }
+
+
+def _preflight_initial_freshness(
+    status: GraphArtifactsStatus,
+    *,
+    final_freshness: Mapping[str, Any],
+) -> dict[str, Any]:
+    if status.fresh is True:
+        return dict(final_freshness)
+    freshness = status.freshness or {}
+    initial: dict[str, Any] = {
+        "fresh": bool(status.fresh),
+        "reason": status.reason,
+        "status": status.status,
+    }
+    for key in ("change_counts", "git"):
+        value = freshness.get(key)
+        if isinstance(value, Mapping):
+            initial[key] = dict(value)
+    return initial
+
+
+def _preflight_detected_state(status: GraphArtifactsStatus) -> str:
+    if status.reason == "missing_graph_artifacts":
+        return "missing"
+    if status.status == "rebuild_required":
+        return "invalid_artifacts"
+    if status.reason == "git_metadata_changed":
+        return "branch_mismatch"
+    change_types = {change.change_type for change in status.file_changes}
+    if "deleted" in change_types:
+        return "deleted_files"
+    if "parse_error" in change_types:
+        return "unparseable_files"
+    if status.fresh is True:
+        return "fresh"
+    return "changed"
 
 
 def _build_context_pack(

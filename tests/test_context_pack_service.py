@@ -358,8 +358,10 @@ def test_assistant_preflight_golden_outcomes_cover_stale_broad_ambiguity_and_no_
     no_match = get_assistant_preflight(broad_repo, "Repair quantum banana telemetry")
     ambiguity = get_assistant_preflight(ambiguity_repo, "ambiguous")
 
-    assert stale["freshness"]["fresh"] is False
-    assert "Graph artifacts may be stale" in " ".join(stale["warnings"])
+    assert stale["freshness"]["fresh"] is True
+    assert stale["data"]["graph_lifecycle"]["detected_state"] == "changed"
+    assert stale["data"]["graph_lifecycle"]["update"]["mode"] == "selective"
+    assert "Graph artifacts may be stale" not in " ".join(stale["warnings"])
     assert broad["ok"] is True
     assert "Task is broad" in " ".join(broad["warnings"])
     assert (
