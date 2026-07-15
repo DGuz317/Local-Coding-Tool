@@ -19,8 +19,8 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert envelope["ok"] is True
     data = envelope["data"]
     assert data["manifest_version"] == "0.4.eval.v1"
-    assert data["summary"]["total_cases"] == 27
-    assert data["summary"]["passed_cases"] == 27
+    assert data["summary"]["total_cases"] == 28
+    assert data["summary"]["passed_cases"] == 28
     assert data["summary"]["failed_cases"] == 0
     assert data["release_gate"]["passed"] is True
     assert data["release_gate"]["required_cases"] == [
@@ -28,7 +28,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     ]
     assert data["corpora"] == {
         "expanded": {"failed_cases": 0, "passed_cases": 1, "total_cases": 1},
-        "release_blocking": {"failed_cases": 0, "passed_cases": 26, "total_cases": 26},
+        "release_blocking": {"failed_cases": 0, "passed_cases": 27, "total_cases": 27},
     }
     assert data["preflight_summary"] == {
         "evaluated_cases": [
@@ -43,7 +43,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
         "purpose": "assistant_preflight_before_broad_repository_reads",
         "total_cases": 5,
     }
-    assert data["index_evidence_summary"]["case_count"] == 27
+    assert data["index_evidence_summary"]["case_count"] == 28
     assert data["index_evidence_summary"]["eligible_file_count"] >= 1
     assert data["index_evidence_summary"]["max_index_elapsed_ms"] >= 0
     assert data["index_evidence_summary"]["measurement"] == ("bounded_local_fixture_index_timing")
@@ -68,7 +68,7 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     }
     assert data["local_savings_summary"]["baseline"] == "lexical_path_search"
     assert data["local_savings_summary"]["estimate_kind"] == ("local_fixture_metadata_estimate")
-    assert data["local_savings_summary"]["case_count"] == 27
+    assert data["local_savings_summary"]["case_count"] == 28
     assert data["local_savings_summary"]["not_run_command_count"] >= 1
     assert data["local_savings_summary"]["stale_graph_risk_case_count"] == 1
     assert "not telemetry" in data["local_savings_summary"]["explanation"]
@@ -98,6 +98,16 @@ def test_context_evaluation_runs_manifest_cases_with_metrics() -> None:
     assert safety_case["safety_negative_outcomes"]["raw_task_text_absent"] is True
     assert safety_case["safety_negative_outcomes"]["pack_id_redacted_fragments_absent"] is True
     assert "API_TOKEN=abc123" not in json.dumps(envelope)
+
+    hygiene_case = case_by_id["v0_9_context_hygiene"]
+    assert hygiene_case["passed"] is True
+    assert hygiene_case["index_evidence"]["eligible_file_count"] == 3
+    assert hygiene_case["index_evidence"]["skipped_path_count"] == 3
+    assert hygiene_case["metrics"]["context_pack"]["irrelevant_file_count"] == 0
+    assert {check["name"] for check in hygiene_case["checks"]} >= {
+        "deprioritized_context_include_any",
+        "likely_irrelevant_file_count_max",
+    }
 
     expanded_case = case_by_id["expanded_cli_invoice_export"]
     assert expanded_case["corpus"] == "expanded"

@@ -200,7 +200,7 @@ ID_AND_HANDLE_RULES = {
     ),
 }
 
-HUMAN_LOWER_PRIORITY_LABEL = "Lower-priority context to inspect later"
+HUMAN_LOWER_PRIORITY_LABEL = "Deprioritized Context"
 
 FORBIDDEN_CONTEXT_PACK_FIELD_NAMES = frozenset(
     {

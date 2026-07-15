@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from repolens.cli import app
 from repolens.context_pack import (
+    _dedupe_support_items,
     expand_context,
     explain_relevance,
     get_assistant_preflight,
@@ -171,7 +172,7 @@ def test_context_pack_cli_and_mcp_use_same_service(tmp_path):
     assert "Context Pack" in human_result.output
     assert "First-Read Files" in human_result.output
     assert "src/auth/login.ts" in human_result.output
-    assert "Lower-priority context to inspect later" in human_result.output
+    assert "Deprioritized Context" in human_result.output
 
 
 def test_context_pack_and_preflight_opt_in_to_indexed_semantic_hints(tmp_path):
@@ -475,6 +476,79 @@ def test_context_pack_broad_task_is_bounded_and_warned(tmp_path):
         <= DEFAULT_CONTEXT_PACK_BUDGET["max_first_read_files"]
     )
     assert "Task is broad" in " ".join(envelope["warnings"])
+
+
+def test_context_hygiene_preserves_first_reads_and_tests_and_deprioritizes_weak_text(tmp_path):
+    _write_text(
+        tmp_path / "src" / "session.py",
+        "class SessionTimeout:\n    pass\n",
+    )
+    _write_text(
+        tmp_path / "tests" / "test_session.py",
+        "from src.session import SessionTimeout\n",
+    )
+    _write_text(tmp_path / "notes" / "session-timeout.txt", "historical session timeout notes\n")
+    _write_text(tmp_path / "src" / "session.generated.ts", "export const SessionTimeout = 1;\n")
+    _write_text(tmp_path / "legacy" / "SessionTimeout.java", "class SessionTimeout {}\n")
+
+    index_result = index_repository(tmp_path)
+    envelope = get_task_context(tmp_path, "Fix SessionTimeout session behavior")
+
+    assert envelope["ok"] is True
+    pack = envelope["data"]
+    assert [item["path"] for item in pack["first_read_files"]] == ["src/session.py"]
+    assert [item["path"] for item in pack["likely_tests"]] == ["tests/test_session.py"]
+    assert [item["path"] for item in pack["lower_priority_context"]] == [
+        "notes/session-timeout.txt"
+    ]
+    assert pack["lower_priority_context"][0]["priority_label"] == "Deprioritized Context"
+    assert pack["lower_priority_context"][0]["reason"].startswith("Deprioritized Context:")
+    returned_paths = [
+        item["path"]
+        for group in (
+            "first_read_files",
+            "likely_tests",
+            "supporting_docs",
+            "supporting_configs",
+            "agent_guidance",
+            "lower_priority_context",
+        )
+        for item in pack[group]
+    ]
+    assert len(returned_paths) == len(set(returned_paths))
+    assert set((item.path, item.reason) for item in index_result.scan.skipped) >= {
+        ("legacy/SessionTimeout.java", "unsupported_source"),
+        ("src/session.generated.ts", "generated_file"),
+    }
+
+
+def test_duplicate_orientation_items_merge_distinct_evidence_and_reasons():
+    consolidated = _dedupe_support_items(
+        [
+            {
+                "path": "docs/setup.md",
+                "reason": "Task token match.",
+                "confidence": "low",
+                "evidence": [{"source": "task_match"}],
+            },
+            {
+                "path": "docs/setup.md",
+                "reason": "Related documentation edge.",
+                "confidence": "high",
+                "evidence": [{"source": "graph_edge"}],
+            },
+        ]
+    )
+
+    assert consolidated == [
+        {
+            "path": "docs/setup.md",
+            "reason": "Task token match.",
+            "confidence": "high",
+            "evidence": [{"source": "graph_edge"}, {"source": "task_match"}],
+            "consolidated_reasons": ["Related documentation edge.", "Task token match."],
+        }
+    ]
 
 
 def test_context_pack_docs_and_config_orientation_stays_structured_without_excerpts(tmp_path):

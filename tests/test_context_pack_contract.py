@@ -97,8 +97,8 @@ def test_ranking_and_handle_contracts_are_deterministic_and_safe():
     assert "assistant_session_state" in ID_AND_HANDLE_RULES["forbidden_material"]
 
 
-def test_human_contract_uses_lower_priority_wording_not_ignore_language():
-    assert HUMAN_LOWER_PRIORITY_LABEL == "Lower-priority context to inspect later"
+def test_human_contract_uses_deprioritized_wording_not_ignore_language():
+    assert HUMAN_LOWER_PRIORITY_LABEL == "Deprioritized Context"
     assert "ignore" not in HUMAN_LOWER_PRIORITY_LABEL.lower()
     assert "irrelevant" not in HUMAN_LOWER_PRIORITY_LABEL.lower()
     assert "safe to skip" not in HUMAN_LOWER_PRIORITY_LABEL.lower()
@@ -194,6 +194,7 @@ def test_context_pack_fixture_manifest_names_required_case_families():
         "package_workspace",
         "ambiguity",
         "command_classification",
+        "context_hygiene",
         "v0_6_js_ts_metadata",
     }
     assert expanded_categories == {"cli_export"}

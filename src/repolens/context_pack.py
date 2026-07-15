@@ -54,7 +54,19 @@ _SOURCE_KINDS = {
     "JavaScriptModule",
 }
 _BROAD_TASK_TOKENS = {"app", "application", "codebase", "project", "repo", "repository"}
-_TEST_TASK_TOKENS = {"spec", "specs", "test", "tests"}
+_PRIORITY_SOURCE_SUFFIXES = {
+    ".cjs",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".mts",
+    ".py",
+    ".pyi",
+    ".pyw",
+    ".ts",
+    ".tsx",
+}
 _AGENT_GUIDANCE_NAMES = {"agents.md", "claude.md"}
 _CONFIG_NAMES = {
     "package.json",
@@ -481,8 +493,10 @@ def _build_context_pack(
         },
     )
 
-    reading_items = [_mapping(item) for item in _sequence(data.get("reading_order"))]
-    likely_tests_raw = [item for item in reading_items if _is_test_path(str(item.get("path", "")))]
+    reading_items = _consolidate_ranked_items(_sequence(data.get("reading_order")))
+    likely_tests_raw = _consolidate_ranked_items(
+        [item for item in reading_items if _is_test_path(str(item.get("path", "")))]
+    )
     supporting_docs_raw = [
         item for item in reading_items if _is_doc_path(str(item.get("path", "")))
     ]
@@ -491,15 +505,31 @@ def _build_context_pack(
     ]
     support_paths = {
         str(item.get("path", ""))
-        for item in [*supporting_docs_raw, *supporting_configs_raw]
+        for item in [*likely_tests_raw, *supporting_docs_raw, *supporting_configs_raw]
         if item.get("path")
     }
-    if not _is_test_focused_task(task):
-        support_paths.update(
-            str(item.get("path", "")) for item in likely_tests_raw if item.get("path")
-        )
     first_read_raw = [
         item for item in reading_items if str(item.get("path", "")) not in support_paths
+    ]
+    priority_first_read = [
+        item for item in first_read_raw if _is_priority_source_path(str(item.get("path", "")))
+    ]
+    weak_first_read = [
+        item for item in first_read_raw if not _is_priority_source_path(str(item.get("path", "")))
+    ]
+    first_read_selected = priority_first_read[: budget["max_first_read_files"]]
+    first_read_overflow = [
+        {
+            **item,
+            "ranking_reason": (
+                "Deprioritized Context: weaker task evidence to inspect later if needed."
+            ),
+            "reason": "Deprioritized Context: weaker task evidence to inspect later if needed.",
+        }
+        for item in [
+            *priority_first_read[budget["max_first_read_files"] :],
+            *weak_first_read,
+        ]
     ]
     related_tests_by_source = _related_tests_by_source(likely_tests_raw)
 
@@ -512,7 +542,7 @@ def _build_context_pack(
             file_metadata=file_metadata,
             freshness=freshness,
         )
-        for index, item in enumerate(first_read_raw[: budget["max_first_read_files"]])
+        for index, item in enumerate(first_read_selected)
     ]
     likely_tests = [
         _support_item(
@@ -557,18 +587,43 @@ def _build_context_pack(
         _risk_signal_item(item, context_pack_id=context_pack_id, freshness=freshness)
         for item in _sequence(support_context.get("risk_signals"))[: budget["max_risk_signals"]]
     ]
+    selected_paths = {
+        str(item.get("path", ""))
+        for item in [
+            *first_read_files,
+            *likely_tests,
+            *supporting_docs,
+            *supporting_configs,
+            *agent_guidance,
+        ]
+        if item.get("path")
+    }
+    deprioritized_raw = _dedupe_support_items(
+        [*first_read_overflow, *_sequence(support_context.get("lower_priority_context"))]
+    )
     lower_priority_context = [
         _support_item(
-            item,
+            {
+                **item,
+                "ranking_reason": (
+                    str(item.get("reason", ""))
+                    if str(item.get("reason", "")).startswith("Deprioritized Context:")
+                    else "Deprioritized Context: evidence-backed context to inspect later if needed."
+                ),
+                "reason": (
+                    str(item.get("reason", ""))
+                    if str(item.get("reason", "")).startswith("Deprioritized Context:")
+                    else "Deprioritized Context: evidence-backed context to inspect later if needed."
+                ),
+            },
             context_pack_id=context_pack_id,
             kind="lower_priority_context",
             freshness=freshness,
             file_metadata=file_metadata,
         )
-        for item in _sequence(support_context.get("lower_priority_context"))[
-            : budget["max_items_per_support_group"]
-        ]
-    ]
+        for item in deprioritized_raw
+        if str(item.get("path", "")) not in selected_paths
+    ][: budget["max_items_per_support_group"]]
     candidate_commands = [
         _command_item(command, context_pack_id=context_pack_id, freshness=freshness)
         for command in _dedupe_commands(
@@ -748,7 +803,10 @@ def _support_context(
                 support["lower_priority_context"].append(
                     {
                         **mapped,
-                        "reason": "Evidence-backed related context to inspect later if needed.",
+                        "reason": (
+                            "Deprioritized Context: evidence-backed related context "
+                            "to inspect later if needed."
+                        ),
                     }
                 )
     support["supporting_docs"] = _dedupe_support_items(support["supporting_docs"])
@@ -1113,7 +1171,7 @@ def _base_item(
 ) -> dict[str, Any]:
     path = str(item.get("path", ""))
     identity = {"kind": kind, "path": path, "reason": item.get("reason")}
-    return {
+    result = {
         "confidence": str(item.get("confidence", "low")),
         "evidence": _safe_evidence(item.get("evidence", [])),
         "freshness": dict(freshness),
@@ -1124,6 +1182,9 @@ def _base_item(
             item.get("ranking_reason") or item.get("reason") or "Graph-derived task match."
         ),
     }
+    if kind == "lower_priority_context":
+        result["priority_label"] = "Deprioritized Context"
+    return result
 
 
 def _symbols_for_item(node: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1298,15 +1359,72 @@ def _related_tests_by_source(tests: Sequence[Mapping[str, Any]]) -> dict[str, li
     return {path: sorted(set(paths)) for path, paths in related.items()}
 
 
+def _consolidate_ranked_items(items: Sequence[Any]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        mapped = _mapping(item)
+        path = str(mapped.get("path", ""))
+        if not path:
+            continue
+        existing = deduped.get(path)
+        if existing is None:
+            deduped[path] = mapped
+            order.append(path)
+        else:
+            deduped[path] = _merge_support_item_evidence(existing, mapped)
+    return [deduped[path] for path in order]
+
+
 def _dedupe_support_items(items: Sequence[Any]) -> list[dict[str, Any]]:
     deduped: dict[str, dict[str, Any]] = {}
     for item in items:
         mapped = _mapping(item)
         path = str(mapped.get("path", ""))
-        if not path or path in deduped:
+        if not path:
             continue
-        deduped[path] = mapped
+        existing = deduped.get(path)
+        if existing is None:
+            deduped[path] = mapped
+            continue
+        deduped[path] = _merge_support_item_evidence(existing, mapped)
     return [deduped[path] for path in sorted(deduped)]
+
+
+def _merge_support_item_evidence(
+    existing: Mapping[str, Any], duplicate: Mapping[str, Any]
+) -> dict[str, Any]:
+    merged = dict(existing)
+    evidence_by_value = {
+        json.dumps(evidence, sort_keys=True, default=str): evidence
+        for evidence in [
+            *_sequence(existing.get("evidence")),
+            *_sequence(duplicate.get("evidence")),
+        ]
+    }
+    merged["evidence"] = [evidence_by_value[key] for key in sorted(evidence_by_value)]
+
+    reasons = sorted(
+        {
+            str(reason)
+            for reason in (
+                existing.get("reason"),
+                existing.get("ranking_reason"),
+                duplicate.get("reason"),
+                duplicate.get("ranking_reason"),
+            )
+            if reason
+        }
+    )
+    if len(reasons) > 1:
+        merged["consolidated_reasons"] = reasons
+
+    confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+    if confidence_rank.get(str(duplicate.get("confidence", "low")), 1) > confidence_rank.get(
+        str(existing.get("confidence", "low")), 1
+    ):
+        merged["confidence"] = duplicate.get("confidence")
+    return merged
 
 
 def _dedupe_commands(items: Sequence[Any]) -> list[dict[str, Any]]:
@@ -1484,12 +1602,6 @@ def _is_broad_task(task: str) -> bool:
         bool(meaningful)
         and len(meaningful) <= 2
         and any(token in _BROAD_TASK_TOKENS for token in meaningful)
-    )
-
-
-def _is_test_focused_task(task: str) -> bool:
-    return bool(
-        set(re.findall(r"[A-Za-z0-9_./-]+", _display_task(task).lower())) & _TEST_TASK_TOKENS
     )
 
 
@@ -1703,6 +1815,10 @@ def _followup_item_summary(item: Mapping[str, Any]) -> dict[str, Any]:
 
 def _is_test_path(path: str) -> bool:
     return bool(_TEST_PATH_RE.search(path))
+
+
+def _is_priority_source_path(path: str) -> bool:
+    return Path(path).suffix.lower() in _PRIORITY_SOURCE_SUFFIXES
 
 
 def _is_doc_path(path: str) -> bool:

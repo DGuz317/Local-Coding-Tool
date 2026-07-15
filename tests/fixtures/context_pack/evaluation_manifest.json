@@ -473,6 +473,22 @@
       }
     },
     {
+      "id": "v0_9_context_hygiene",
+      "corpus": "release_blocking",
+      "category": "context_hygiene",
+      "task": "Fix SessionTimeout session behavior",
+      "fixture_repo": "tests/fixtures/context_pack/context-hygiene",
+      "focus_hints": [],
+      "expected_outcomes": {
+        "first_read_files_include_any": ["src/session.py"],
+        "likely_tests_include_any": ["tests/session_spec.py"],
+        "deprioritized_context_include_any": ["notes/session-timeout.txt"],
+        "likely_irrelevant_file_count_max": 0,
+        "no_source_snippets": true,
+        "repo_relative_paths_only": true
+      }
+    },
+    {
       "id": "expanded_cli_invoice_export",
       "corpus": "expanded",
       "category": "cli_export",
