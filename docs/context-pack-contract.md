@@ -6,7 +6,7 @@ This is the v0.3 assistant-facing contract for Context Packs. Implementation sli
 
 Assistant Preflight is the v0.5 bounded orientation workflow assistants should call before broad repository reads. It is exposed through the CLI `repolens preflight` command and the read-only MCP `assistant_preflight` tool. Both surfaces use the same service and return the standard MCP envelope fields: `ok`, `data`, `confidence`, `evidence`, `freshness`, `limits`, `truncation`, and `warnings`.
 
-The shared service discovers the repository root from nested working directories using local repository evidence. If graph artifacts are missing, it builds and validates them with safe defaults before producing the Context Pack. This lifecycle step may write only RepoLens-local artifacts under `.repolens`; it does not modify analyzed repository files or execute package managers, compilers, bundlers, frameworks, tests, or registry lookups. Unsupported roots and recoverable initialization failures return structured problem details without guessed repository facts.
+The shared service discovers the repository root from nested working directories using local repository evidence. It inspects freshness before orientation, initializes missing artifacts, selectively updates safe changed states, and uses a validated full rebuild when selective reuse is unsafe. Deleted and unparseable files are included in stale-fact cleanup. This lifecycle step may write only RepoLens-local artifacts under `.repolens`; it does not modify analyzed repository files or execute package managers, compilers, bundlers, frameworks, tests, or registry lookups. Unsupported roots and recoverable lifecycle failures return structured problem details without guessed repository facts.
 
 Assistant Preflight `data` includes:
 
@@ -17,6 +17,8 @@ Assistant Preflight `data` includes:
 - `focus_hints`
 - `budget_controls`
 - `freshness`
+- `graph_lifecycle`
+- `graph_quality_warnings`
 - `first_read_files`
 - `likely_tests`
 - `candidate_verification_commands`
@@ -29,7 +31,7 @@ Assistant Preflight `data` includes:
 
 `task_context` contains only redacted display metadata, a deterministic task fingerprint, and the bounded orientation scope. `focus_hints` contains redacted hint metadata and relies on Context Pack warnings for unresolved hints. `budget_controls` uses deterministic item caps and character caps: first-read file count, per-support-group item count, candidate command count, and total character count. It does not define model-specific token budgets.
 
-Preflight freshness comes from graph metadata and carries the canonical graph hash, freshness boolean, status, source, and evidence count. Stale graphs return bounded successful responses when readable, with stale warnings and lowered trust instead of silently pretending the graph is current. Missing graph artifacts keep the existing graph-unavailable error envelope.
+Preflight freshness comes from the validated replacement graph and carries the canonical graph hash, freshness boolean, status, source, evidence count, and branch-aware Git metadata when available. `graph_lifecycle` reports the detected pre-update state (`fresh`, `missing`, `changed`, `deleted_files`, `unparseable_files`, `branch_mismatch`, or `invalid_artifacts`), bounded initial freshness, and update mode/outcome with file counts rather than unbounded path lists. `graph_quality_warnings` deterministically separates recoverable graph-quality codes from lifecycle failures. Missing artifacts are initialized automatically; lifecycle failures keep the existing valid graph artifact and return a recoverable error envelope.
 
 Candidate verification commands remain discovered metadata only. They must stay marked `found: true`, `run: false`, `not_run: true`, and `auto_run_recommended: false`, with risk classified separately from purpose.
 

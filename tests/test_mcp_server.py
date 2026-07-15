@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 from textwrap import dedent
 
 from mcp import ClientSession, StdioServerParameters
@@ -275,6 +276,16 @@ def test_mcp_assistant_preflight_returns_standard_envelope_with_focus_and_budget
     assert data["budget_controls"]["max_candidate_verification_commands"] == 1
     assert data["budget_controls"]["max_total_chars"] == 8_000
     assert data["freshness"]["fresh"] is True
+    assert data["graph_lifecycle"] == {
+        "detected_state": "fresh",
+        "initial": data["freshness"],
+        "update": {
+            "attempted": False,
+            "mode": "none",
+            "outcome": "not_needed",
+            "reason": "graph_current",
+        },
+    }
     assert [item["path"] for item in data["first_read_files"]] == ["src/auth/login.ts"]
     assert [item["path"] for item in data["likely_tests"]] == ["tests/login.test.ts"]
     assert len(data["candidate_verification_commands"]) == 1
@@ -305,8 +316,29 @@ def test_mcp_assistant_preflight_initializes_missing_graph_from_nested_directory
     assert first["ok"] is True
     assert first["data"]["assistant_preflight_version"] == "0.5.preflight.v1"
     assert first["freshness"]["fresh"] is True
+    assert first["data"]["graph_lifecycle"]["detected_state"] == "missing"
+    assert first["data"]["graph_lifecycle"]["update"] == {
+        "attempted": True,
+        "mode": "initialized",
+        "outcome": "initialized",
+        "reason": "missing_graph_artifacts",
+        "selective_update": {
+            "changed_count": 0,
+            "deleted_count": 0,
+            "parse_error_count": 0,
+            "reparse_count": 3,
+            "reused_count": 0,
+            "safe": False,
+            "stale_cleanup_count": 0,
+        },
+    }
+    assert second["data"]["graph_lifecycle"]["detected_state"] == "fresh"
     assert first["data"]["context_pack_id"] == second["data"]["context_pack_id"]
-    assert first["data"] == second["data"]
+    first_stable_data = dict(first["data"])
+    second_stable_data = dict(second["data"])
+    first_stable_data.pop("graph_lifecycle")
+    second_stable_data.pop("graph_lifecycle")
+    assert first_stable_data == second_stable_data
     assert [item["path"] for item in first["data"]["first_read_files"]] == ["src/auth/login.ts"]
     assert (tmp_path / ".repolens" / "graph.sqlite").is_file()
     assert (nested / "login.ts").read_text(encoding="utf-8") == source_before
@@ -348,7 +380,7 @@ def test_mcp_assistant_preflight_returns_problem_when_indexing_fails(tmp_path):
     assert result["data"] == {}
 
 
-def test_mcp_assistant_preflight_stale_graph_returns_bounded_warning(tmp_path):
+def test_mcp_assistant_preflight_selectively_refreshes_changed_graph(tmp_path):
     _write_preflight_fixture_repo(tmp_path)
     index_repository(tmp_path)
     _write_text(tmp_path / "src" / "auth" / "login.ts", "export const changed = true;\n")
@@ -357,9 +389,123 @@ def test_mcp_assistant_preflight_stale_graph_returns_bounded_warning(tmp_path):
     result = tools.assistant_preflight("Fix login validation")
 
     assert result["ok"] is True
-    assert result["freshness"]["fresh"] is False
-    assert result["data"]["freshness"]["status"] == "stale"
-    assert "Graph artifacts may be stale" in " ".join(result["warnings"])
+    assert result["freshness"]["fresh"] is True
+    assert result["data"]["freshness"]["status"] == "available"
+    lifecycle = result["data"]["graph_lifecycle"]
+    assert lifecycle["detected_state"] == "changed"
+    assert lifecycle["initial"]["status"] == "stale"
+    assert lifecycle["update"] == {
+        "attempted": True,
+        "mode": "selective",
+        "outcome": "updated",
+        "reason": "file_changes_detected",
+        "selective_update": {
+            "changed_count": 1,
+            "deleted_count": 0,
+            "parse_error_count": 0,
+            "reparse_count": 1,
+            "reused_count": 2,
+            "safe": True,
+            "stale_cleanup_count": 0,
+        },
+    }
+    assert "Graph artifacts may be stale" not in " ".join(result["warnings"])
+
+
+def test_mcp_assistant_preflight_removes_deleted_and_unparseable_stale_facts(tmp_path):
+    _write_text(tmp_path / "deleted.py", "def deleted_symbol():\n    return 1\n")
+    _write_text(tmp_path / "broken.py", "def old_symbol():\n    return 1\n")
+    index_repository(tmp_path)
+    (tmp_path / "deleted.py").unlink()
+    _write_text(tmp_path / "broken.py", "def broken(:\n    pass\n")
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight("Inspect symbols")
+
+    assert result["ok"] is True
+    assert result["freshness"]["fresh"] is True
+    lifecycle = result["data"]["graph_lifecycle"]
+    assert lifecycle["detected_state"] == "deleted_files"
+    assert lifecycle["update"]["mode"] == "selective"
+    assert lifecycle["update"]["selective_update"] == {
+        "changed_count": 2,
+        "deleted_count": 1,
+        "parse_error_count": 1,
+        "reparse_count": 1,
+        "reused_count": 0,
+        "safe": True,
+        "stale_cleanup_count": 2,
+    }
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        deleted_count = connection.execute(
+            "SELECT COUNT(*) FROM files WHERE path = 'deleted.py'"
+        ).fetchone()[0]
+        stale_symbol_count = connection.execute(
+            "SELECT COUNT(*) FROM python_symbols WHERE path IN ('deleted.py', 'broken.py')"
+        ).fetchone()[0]
+        parse_error_count = connection.execute(
+            "SELECT COUNT(*) FROM python_parse_errors WHERE path = 'broken.py'"
+        ).fetchone()[0]
+    assert deleted_count == 0
+    assert stale_symbol_count == 0
+    assert parse_error_count == 1
+
+
+def test_mcp_assistant_preflight_refreshes_branch_mismatch(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git_dir / "refs" / "heads" / "main").write_text("a" * 40 + "\n", encoding="utf-8")
+    index_repository(tmp_path)
+    (git_dir / "HEAD").write_text("ref: refs/heads/feature\n", encoding="utf-8")
+    (git_dir / "refs" / "heads" / "feature").write_text("b" * 40 + "\n", encoding="utf-8")
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight("Fix login validation")
+
+    assert result["ok"] is True
+    lifecycle = result["data"]["graph_lifecycle"]
+    assert lifecycle["detected_state"] == "branch_mismatch"
+    assert lifecycle["initial"]["git"] == {
+        "current": {"branch": "feature", "commit": "b" * 40, "detected": True},
+        "indexed": {"branch": "main", "commit": "a" * 40, "detected": True},
+    }
+    assert lifecycle["update"]["mode"] == "selective"
+    assert result["freshness"]["git"]["indexed"]["branch"] == "feature"
+    assert result["freshness"]["git"]["current"]["branch"] == "feature"
+
+
+def test_mcp_assistant_preflight_rebuilds_invalid_artifacts(tmp_path):
+    _write_preflight_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        connection.execute("UPDATE metadata SET value = '0' WHERE key = 'schema_version'")
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight("Fix login validation")
+
+    assert result["ok"] is True
+    assert result["freshness"]["fresh"] is True
+    lifecycle = result["data"]["graph_lifecycle"]
+    assert lifecycle["detected_state"] == "invalid_artifacts"
+    assert lifecycle["initial"]["reason"] == "unsupported_schema_version"
+    assert lifecycle["update"]["mode"] == "full_rebuild"
+    assert lifecycle["update"]["outcome"] == "rebuilt"
+    assert lifecycle["update"]["selective_update"]["safe"] is False
+
+
+def test_mcp_assistant_preflight_reports_graph_quality_warnings_deterministically(tmp_path):
+    _write_text(
+        tmp_path / "src" / "app.ts",
+        "import { missing } from './missing';\nexport const value = missing;\n",
+    )
+    index_repository(tmp_path)
+
+    first = RepoLensMcpTools(tmp_path).assistant_preflight("Inspect app import")
+    second = RepoLensMcpTools(tmp_path).assistant_preflight("Inspect app import")
+
+    assert first["data"]["graph_quality_warnings"] == [
+        "graph_quality:javascript_unresolved_import_relationships:count=1"
+    ]
+    assert second["data"]["graph_quality_warnings"] == first["data"]["graph_quality_warnings"]
 
 
 def test_mcp_envelope_redacts_secret_like_metadata_at_output_boundary(tmp_path):
