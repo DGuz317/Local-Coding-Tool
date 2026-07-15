@@ -346,6 +346,249 @@ def test_mcp_assistant_preflight_initializes_missing_graph_from_nested_directory
     assert "return input.user" not in str(first)
 
 
+def test_mcp_assistant_preflight_detects_supported_python_package_without_configuration(tmp_path):
+    (tmp_path / ".git").mkdir()
+    _write_text(
+        tmp_path / "pyproject.toml",
+        dedent(
+            """
+            [build-system]
+            requires = ["hatchling"]
+            build-backend = "hatchling.build"
+
+            [project]
+            name = "acme-service"
+            version = "1.0.0"
+            """
+        ).lstrip(),
+    )
+    _write_text(tmp_path / "src" / "acme_service" / "__init__.py", "")
+    _write_text(
+        tmp_path / "src" / "acme_service" / "billing.py",
+        "def calculate_invoice():\n    return 1\n",
+    )
+    _write_text(
+        tmp_path / "tests" / "test_billing.py",
+        "from acme_service.billing import calculate_invoice\n",
+    )
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight("Change invoice calculation")
+
+    assert result["ok"] is True
+    assert result["data"]["graph_lifecycle"]["detected_state"] == "missing"
+    assert [item["path"] for item in result["data"]["first_read_files"]] == [
+        "src/acme_service/billing.py"
+    ]
+    assert [item["path"] for item in result["data"]["likely_tests"]] == ["tests/test_billing.py"]
+    assert result["data"]["graph_quality_warnings"] == []
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        package_roots = list(
+            connection.execute(
+                """
+                SELECT ecosystem, name, path, source_path
+                FROM config_package_roots
+                ORDER BY ecosystem, name, path
+                """
+            )
+        )
+    assert package_roots == [("python", "acme-service", "src/acme_service", "pyproject.toml")]
+
+
+def test_mcp_assistant_preflight_warns_about_ambiguous_python_package_identity(tmp_path):
+    (tmp_path / ".git").mkdir()
+    for service in ("alpha", "beta"):
+        _write_text(
+            tmp_path / "services" / service / "pyproject.toml",
+            '[project]\nname = "shared-service"\nversion = "1.0.0"\n',
+        )
+        _write_text(tmp_path / "services" / service / "shared_service" / "__init__.py", "")
+        _write_text(
+            tmp_path / "services" / service / "shared_service" / "billing.py",
+            f"def {service}_invoice():\n    return 1\n",
+        )
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight(
+        "Change alpha invoice",
+        focus_hints=["services/alpha/shared_service/billing.py"],
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["graph_quality_warnings"] == [
+        "graph_quality:ambiguous_package_identity:count=1"
+    ]
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        package_roots = list(
+            connection.execute(
+                """
+                SELECT name, path, source_path
+                FROM config_package_roots
+                WHERE ecosystem = 'python'
+                ORDER BY path
+                """
+            )
+        )
+    assert package_roots == [
+        (
+            "shared-service",
+            "services/alpha/shared_service",
+            "services/alpha/pyproject.toml",
+        ),
+        (
+            "shared-service",
+            "services/beta/shared_service",
+            "services/beta/pyproject.toml",
+        ),
+    ]
+
+
+def test_mcp_assistant_preflight_detects_supported_javascript_workspace(tmp_path):
+    (tmp_path / ".git").mkdir()
+    marker = tmp_path / "package-manager-was-run"
+    _write_text(
+        tmp_path / "package.json",
+        dedent(
+            """
+            {
+              "name": "workspace-root",
+              "private": true,
+              "workspaces": ["packages/*"],
+              "scripts": {"preinstall": "touch package-manager-was-run"}
+            }
+            """
+        ).lstrip(),
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "package.json",
+        '{"name":"@acme/app","dependencies":{"@acme/lib":"workspace:*"}}\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "lib" / "package.json",
+        '{"name":"@acme/lib","exports":"./src/index.ts"}\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        "import { invoice } from '@acme/lib';\nexport const total = invoice;\n",
+    )
+    _write_text(
+        tmp_path / "packages" / "lib" / "src" / "index.ts",
+        "export const invoice = 1;\n",
+    )
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight(
+        "Change app invoice import",
+        focus_hints=["packages/app/src/main.ts"],
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["graph_lifecycle"]["detected_state"] == "missing"
+    assert result["data"]["graph_quality_warnings"] == []
+    assert marker.exists() is False
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        package_roots = list(
+            connection.execute(
+                """
+                SELECT name, path
+                FROM config_package_roots
+                WHERE ecosystem = 'javascript'
+                ORDER BY path
+                """
+            )
+        )
+        workspaces = list(
+            connection.execute(
+                """
+                SELECT path, source_path, evidence_kind
+                FROM config_workspaces
+                ORDER BY path, source_path
+                """
+            )
+        )
+        import_resolution = connection.execute(
+            """
+            SELECT classification, resolved_path, resolution_status
+            FROM javascript_imports
+            WHERE path = 'packages/app/src/main.ts'
+            """
+        ).fetchone()
+    assert package_roots == [
+        ("workspace-root", "."),
+        ("@acme/app", "packages/app"),
+        ("@acme/lib", "packages/lib"),
+    ]
+    assert workspaces == [("packages/*", "package.json", "package.workspaces")]
+    assert import_resolution == (
+        "local_resolved",
+        "packages/lib/src/index.ts",
+        "resolved_workspace_package",
+    )
+
+
+def test_mcp_assistant_preflight_keeps_ambiguous_javascript_workspace_as_warnings(
+    tmp_path,
+):
+    (tmp_path / ".git").mkdir()
+    _write_text(
+        tmp_path / "package.json",
+        '{"name":"workspace-root","private":true,"workspaces":["packages/*"]}\n',
+    )
+    _write_text(
+        tmp_path / "packages" / "app" / "package.json",
+        '{"name":"@acme/app","dependencies":{"@acme/lib":"workspace:*"}}\n',
+    )
+    for package in ("lib-a", "lib-b"):
+        _write_text(
+            tmp_path / "packages" / package / "package.json",
+            '{"name":"@acme/lib","exports":"./src/index.ts"}\n',
+        )
+        _write_text(
+            tmp_path / "packages" / package / "src" / "index.ts",
+            "export const invoice = 1;\n",
+        )
+    _write_text(
+        tmp_path / "packages" / "app" / "src" / "main.ts",
+        "import { invoice } from '@acme/lib';\nexport const total = invoice;\n",
+    )
+
+    result = RepoLensMcpTools(tmp_path).assistant_preflight(
+        "Change app invoice import",
+        focus_hints=["packages/app/src/main.ts"],
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["graph_quality_warnings"] == [
+        "graph_quality:ambiguous_package_identity:count=1",
+        "graph_quality:ambiguous_workspace_package_import:count=1",
+    ]
+    with sqlite3.connect(tmp_path / ".repolens" / "graph.sqlite") as connection:
+        import_resolution = connection.execute(
+            """
+            SELECT classification, resolved_path, resolution_status
+            FROM javascript_imports
+            WHERE path = 'packages/app/src/main.ts'
+            """
+        ).fetchone()
+        definitive_edges = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM edges
+            WHERE source_id = 'javascript_module:packages/app/src/main.ts'
+              AND target_id LIKE 'javascript_module:packages/lib-%'
+              AND kind = 'IMPORTS'
+            """
+        ).fetchone()[0]
+        candidates = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM relationship_candidates
+            WHERE source_id = 'javascript_module:packages/app/src/main.ts'
+              AND kind = 'IMPORTS'
+            """
+        ).fetchone()[0]
+    assert import_resolution == ("third_party", None, "external")
+    assert definitive_edges == 0
+    assert candidates == 2
+
+
 def test_mcp_assistant_preflight_returns_problem_for_unsupported_root(tmp_path):
     tools = RepoLensMcpTools(tmp_path)
 
