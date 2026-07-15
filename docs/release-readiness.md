@@ -20,8 +20,8 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 
 - Project and distribution name: `repolens` / RepoLens MCP.
 - License wording and whether a license file should be added before release.
-- PyPI publishing remains deferred for v0.7 unless a maintainer opens an explicit release issue.
-- Docker registry publishing remains deferred for v0.7 unless a maintainer opens an explicit release issue.
+- PyPI publishing remains deferred for v0.9 unless a maintainer opens an explicit release issue.
+- Docker registry publishing remains deferred for v0.9 unless a maintainer opens an explicit release issue.
 - Assistant client config examples for OpenCode, Claude Desktop, and Cursor-style MCP are accurate for the current CLI command shape.
 - Final README positioning and whether the README should target users, contributors, or both.
 - Known limitations in `docs/known-limitations.md` reflect dogfooding and semantic evaluation outcomes and are acceptable for release.

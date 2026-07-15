@@ -13,11 +13,11 @@ RepoLens is local-first. Normal indexing and MCP usage do not require AI models,
 
 ## Current Release
 
-Current version: **v0.7.0**.
+Current version: **v0.9.0**.
 
-v0.7.0 adds the Python Semantic Analysis Prototype: experimental, source-free function-level control-flow and lexical binding metadata stored separately from the stable graph. Release notes live in `docs/releases/v0.7.0.md`.
+v0.9.0 makes Assistant Preflight the primary zero-configuration agent workflow. After one local installation and MCP client registration, the first preflight call discovers the repository and initializes missing graph state; later calls refresh stale state before returning a bounded Context Pack. Release notes live in `docs/releases/v0.9.0.md`.
 
-v0.7 Python semantic facts are experimental, source-free metadata stored separately from the stable graph. They are candidate metadata for inspection and evaluation only; they do not change the stable graph contract, Canonical Graph Hash, default Context Pack IDs, stable graph validation, default Assistant Preflight output, or default MCP output.
+The release keeps RepoLens local-first, deterministic, metadata-only, and read-only through MCP. It does not add telemetry, hidden network access, repository command execution, or write-capable MCP tools.
 
 ## What Problem Does This Solve?
 
@@ -158,6 +158,7 @@ uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --jso
 uv run repolens semantic-inspect path/to/file.py --repo-path /path/to/repo --from-source --json
 uv run repolens evaluate-semantics --json
 uv run repolens mcp /path/to/repo
+```
 
 Command meanings:
 
@@ -528,15 +529,13 @@ Before release, run the full verification gate, review generated artifact behavi
 
 ## Roadmap And Non-Goals
 
-RepoLens v0.6 focuses on improving JS/TS parser and resolver evidence for that deterministic preflight workflow while preserving source-safety and uncertainty.
-
-RepoLens v0.7 focuses on the Python Semantic Analysis Prototype: source-free function-level CFG and lexical binding facts in an experimental layer that remains separate from the stable graph contract.
+RepoLens v0.9 focuses on a zero-configuration, agent-native workflow: install once, register the read-only MCP command, and call Assistant Preflight before broad repository reads. Missing graphs are initialized and stale graphs refreshed automatically on that path.
 
 Current focus:
 
-- local CLI indexing, update, status, report, search, context, semantic inspection, semantic evaluation, and read-only MCP serving;
+- local CLI diagnostics and read-only MCP serving centered on Assistant Preflight;
 - deterministic `.repolens/` graph artifacts and separate experimental semantic artifacts;
-- task-scoped Context Packs with bounded output;
+- task-scoped, progressively disclosed Context Packs with bounded output;
 - explicit package/workspace evidence, Relationship Candidates, and Graph Quality Warnings;
 - JavaScript and TypeScript workspace import and scoped alias resolution when local evidence is sufficient;
 - Python CFG and lexical binding inspection through source-free experimental metadata;
