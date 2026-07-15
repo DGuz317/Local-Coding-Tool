@@ -1,6 +1,6 @@
 {
-  "manifest_version": "0.4.eval.v1",
-  "description": "Release-blocking Context Pack fixture manifest for v0.4 package/workspace and safety gates.",
+  "manifest_version": "0.9.eval.v1",
+  "description": "Release-blocking Context Pack relevance, local savings, and safety evaluation manifest.",
   "default_budget": {
     "max_first_read_files": 5,
     "max_items_per_support_group": 5,
@@ -319,6 +319,19 @@
       "task": "Use preflight before changing the @dog/lib workspace import",
       "fixture_repo": "tests/fixtures/dogfood/js-ts-workspace",
       "focus_hints": ["packages/app/src/index.ts"],
+      "evaluation_expectations": {
+        "relevant_files": [
+          "packages/app/src/index.ts",
+          "packages/lib/src/index.ts",
+          "packages/lib/src/value.ts"
+        ],
+        "related_tests": []
+      },
+      "metric_expectations": {
+        "first_read_hit_rate_min": 1.0,
+        "irrelevant_file_count_max": 0,
+        "pack_size_max": 3
+      },
       "evaluate_preflight": true,
       "evaluate_artifact_audit": true,
       "expected_outcomes": {
@@ -341,6 +354,16 @@
       "task": "Fix dogpkg build_message normalization and update tests",
       "fixture_repo": "tests/fixtures/dogfood/python-local-imports",
       "focus_hints": ["src/dogpkg/service.py"],
+      "evaluation_expectations": {
+        "relevant_files": ["src/dogpkg/service.py", "src/dogpkg/util.py"],
+        "related_tests": ["tests/service_spec.py"]
+      },
+      "metric_expectations": {
+        "first_read_hit_rate_min": 1.0,
+        "irrelevant_file_count_max": 1,
+        "pack_size_max": 3,
+        "related_test_inclusion_min": 1.0
+      },
       "evaluate_preflight": true,
       "expected_outcomes": {
         "assistant_preflight_ok": true,

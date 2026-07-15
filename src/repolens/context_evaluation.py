@@ -21,6 +21,7 @@ from repolens.query import GraphQueryService
 from repolens.scanner import scan_repository
 
 _CONFIDENCE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+_CONTEXT_EVALUATION_METRICS_VERSION = "0.9.metrics.v1"
 _LOCAL_SAVINGS_EXPLANATION = (
     "Estimates compare bounded RepoLens output with deterministic lexical filename/path "
     "search for committed fixtures. They are local evaluation signals, not telemetry, "
@@ -70,6 +71,20 @@ def run_context_evaluation(
         "index_evidence_summary": index_evidence_summary,
         "local_savings_summary": local_savings_summary,
         "manifest_version": str(manifest.get("manifest_version", "")),
+        "metric_contract": {
+            "baseline": (
+                "scanner-approved paths ranked by descending task-token matches, then POSIX path; "
+                "limited to seven files"
+            ),
+            "expansion_count": "bounded expansion handles available in the initial Context Pack",
+            "first_read_hit_rate": "expected relevant files present in First-Read Files",
+            "irrelevant_file_count": (
+                "returned paths outside declared relevant files and Related Tests"
+            ),
+            "pack_size": "number of paths in the evaluated orientation list",
+            "related_test_inclusion": "expected Related Tests present in likely tests",
+            "version": _CONTEXT_EVALUATION_METRICS_VERSION,
+        },
         "preflight_summary": preflight_summary,
         "release_gate": {
             "gate_type": "expectation_based",
@@ -148,6 +163,9 @@ def _local_savings_summary(cases: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         ),
         "first_read_hit_rate_delta_vs_lexical": _average(
             float(item.get("first_read_hit_rate_delta_vs_lexical", 0.0)) for item in savings
+        ),
+        "related_test_inclusion_delta_vs_lexical": _average(
+            float(item.get("related_test_inclusion_delta_vs_lexical", 0.0)) for item in savings
         ),
         "likely_irrelevant_files_avoided_vs_lexical": sum(
             int(item.get("likely_irrelevant_files_avoided_vs_lexical", 0)) for item in savings
@@ -323,7 +341,9 @@ def _case_result(
     pack = _mapping(pack_envelope.get("data"))
     first_read_paths = _paths(pack.get("first_read_files"))
     likely_test_paths = _paths(pack.get("likely_tests"))
-    relevant_paths = _expected_relevant_paths(expected)
+    evaluation_expectations = _evaluation_expectations(case, expected=expected)
+    relevant_files = set(evaluation_expectations["relevant_files"])
+    related_tests = set(evaluation_expectations["related_tests"])
     candidate_commands = _all_candidate_commands(pack)
     safety_outcomes = _safety_outcomes(
         case,
@@ -344,8 +364,8 @@ def _case_result(
     context_metrics = _metrics_for_paths(
         first_read_paths,
         likely_test_paths=likely_test_paths,
-        relevant_paths=relevant_paths,
-        expected=expected,
+        relevant_files=relevant_files,
+        related_tests=related_tests,
         expansion_count=len(_sequence(pack.get("expansion_handles"))),
         safety_negative_outcomes=safety_outcomes,
         approximate_token_estimate=_context_pack_approx_tokens(pack),
@@ -353,8 +373,8 @@ def _case_result(
     lexical_metrics = _metrics_for_paths(
         lexical_paths,
         likely_test_paths=[path for path in lexical_paths if _is_test_path(path)],
-        relevant_paths=relevant_paths,
-        expected=expected,
+        relevant_files=relevant_files,
+        related_tests=related_tests,
         expansion_count=0,
         safety_negative_outcomes={},
     )
@@ -362,10 +382,15 @@ def _case_result(
     reading_metrics = _metrics_for_paths(
         reading_paths,
         likely_test_paths=[path for path in reading_paths if _is_test_path(path)],
-        relevant_paths=relevant_paths,
-        expected=expected,
+        relevant_files=relevant_files,
+        related_tests=related_tests,
         expansion_count=0,
         safety_negative_outcomes={},
+    )
+    _add_metric_expectation_checks(
+        checks,
+        metric_expectations=_mapping(case.get("metric_expectations")),
+        metrics=context_metrics,
     )
     return {
         "category": str(case.get("category", "")),
@@ -373,6 +398,7 @@ def _case_result(
         "corpus": str(case.get("corpus") or "release_blocking"),
         "artifact_audit_evidence": _artifact_audit_evidence(artifact_audit_envelope),
         "id": str(case.get("id", "")),
+        "evaluation_expectations": evaluation_expectations,
         "index_evidence": dict(index_evidence),
         "local_savings": _local_savings_metrics(
             context_metrics=context_metrics,
@@ -739,38 +765,32 @@ def _metrics_for_paths(
     paths: Sequence[str],
     *,
     likely_test_paths: Sequence[str],
-    relevant_paths: set[str],
-    expected: Mapping[str, Any],
+    relevant_files: set[str],
+    related_tests: set[str],
     expansion_count: int,
     safety_negative_outcomes: Mapping[str, bool],
     approximate_token_estimate: int | None = None,
 ) -> dict[str, Any]:
-    expected_first_read = {
-        str(path) for path in _sequence(expected.get("first_read_files_include_any"))
-    }
-    first_read_hit_rate = 0.0
-    if expected_first_read:
-        first_read_hit_rate = 1.0 if expected_first_read.intersection(paths) else 0.0
-    expected_tests = {str(path) for path in _sequence(expected.get("likely_tests_include_any"))}
-    test_inclusion = 0.0
-    if expected_tests:
-        test_inclusion = 1.0 if expected_tests.intersection(likely_test_paths) else 0.0
+    first_read_hit_rate = _inclusion_rate(paths, relevant_files)
+    related_test_inclusion = _inclusion_rate(likely_test_paths, related_tests)
+    declared_relevant_paths = relevant_files | related_tests
     irrelevant_file_count = 0
-    if relevant_paths:
-        irrelevant_file_count = sum(1 for path in paths if path not in relevant_paths)
+    if declared_relevant_paths:
+        irrelevant_file_count = sum(1 for path in paths if path not in declared_relevant_paths)
     return {
         "approximate_token_estimate": approximate_token_estimate
         if approximate_token_estimate is not None
         else _approx_tokens_for_paths(paths),
         "expansion_count": expansion_count,
-        "first_relevant_rank": _first_relevant_rank(paths, relevant_paths),
+        "first_relevant_rank": _first_relevant_rank(paths, declared_relevant_paths),
         "first_read_hit_rate": first_read_hit_rate,
         "irrelevant_file_count": irrelevant_file_count,
         "pack_size": len(paths),
+        "related_test_inclusion": related_test_inclusion,
         "safety_negative_outcomes": sum(
             1 for passed in safety_negative_outcomes.values() if passed is True
         ),
-        "test_inclusion": test_inclusion,
+        "test_inclusion": related_test_inclusion,
     }
 
 
@@ -784,19 +804,23 @@ def _local_savings_metrics(
     context_pack: dict[str, Any] = {
         "approximate_token_estimate": int(context_metrics.get("approximate_token_estimate", 0)),
         "first_relevant_rank": context_metrics.get("first_relevant_rank"),
+        "expansion_count": int(context_metrics.get("expansion_count", 0)),
         "first_read_hit_rate": float(context_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(context_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": not_run_command_count,
         "pack_size": int(context_metrics.get("pack_size", 0)),
+        "related_test_inclusion": float(context_metrics.get("related_test_inclusion", 0.0)),
         "stale_graph_risk": stale_graph_risk,
     }
     lexical: dict[str, Any] = {
         "approximate_token_estimate": int(lexical_metrics.get("approximate_token_estimate", 0)),
         "first_relevant_rank": lexical_metrics.get("first_relevant_rank"),
+        "expansion_count": int(lexical_metrics.get("expansion_count", 0)),
         "first_read_hit_rate": float(lexical_metrics.get("first_read_hit_rate", 0.0)),
         "likely_irrelevant_file_count": int(lexical_metrics.get("irrelevant_file_count", 0)),
         "not_run_command_count": 0,
         "pack_size": int(lexical_metrics.get("pack_size", 0)),
+        "related_test_inclusion": float(lexical_metrics.get("related_test_inclusion", 0.0)),
         "stale_graph_risk": False,
     }
     context_rank = _optional_int(context_metrics.get("first_relevant_rank"))
@@ -816,9 +840,48 @@ def _local_savings_metrics(
             context_pack["first_read_hit_rate"] - lexical["first_read_hit_rate"], 3
         ),
         "lexical_baseline": lexical,
+        "related_test_inclusion_delta_vs_lexical": round(
+            context_pack["related_test_inclusion"] - lexical["related_test_inclusion"], 3
+        ),
         "likely_irrelevant_files_avoided_vs_lexical": lexical["likely_irrelevant_file_count"]
         - context_pack["likely_irrelevant_file_count"],
     }
+
+
+def _add_metric_expectation_checks(
+    checks: list[dict[str, Any]],
+    *,
+    metric_expectations: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> None:
+    if "first_read_hit_rate_min" in metric_expectations:
+        _add_check(
+            checks,
+            "metric:first_read_hit_rate_min",
+            float(metrics.get("first_read_hit_rate", 0.0))
+            >= float(metric_expectations["first_read_hit_rate_min"]),
+        )
+    if "related_test_inclusion_min" in metric_expectations:
+        _add_check(
+            checks,
+            "metric:related_test_inclusion_min",
+            float(metrics.get("related_test_inclusion", 0.0))
+            >= float(metric_expectations["related_test_inclusion_min"]),
+        )
+    for metric_name in ("irrelevant_file_count", "pack_size", "expansion_count"):
+        expectation_name = f"{metric_name}_max"
+        if expectation_name in metric_expectations:
+            _add_check(
+                checks,
+                f"metric:{expectation_name}",
+                int(metrics.get(metric_name, 0)) <= int(metric_expectations[expectation_name]),
+            )
+
+
+def _inclusion_rate(paths: Sequence[str], expected_paths: set[str]) -> float:
+    if not expected_paths:
+        return 0.0
+    return round(len(set(paths) & expected_paths) / len(expected_paths), 3)
 
 
 def _first_relevant_rank(paths: Sequence[str], relevant_paths: set[str]) -> int | None:
@@ -906,6 +969,26 @@ def _expected_ok(
         return True
     target_envelope = expansion_envelope or pack_envelope
     return target_envelope.get("ok") is expected["ok"]
+
+
+def _evaluation_expectations(
+    case: Mapping[str, Any], *, expected: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    declared = _mapping(case.get("evaluation_expectations"))
+    if declared:
+        relevant_files = {str(path) for path in _sequence(declared.get("relevant_files"))}
+        related_tests = {str(path) for path in _sequence(declared.get("related_tests"))}
+    else:
+        relevant_files = {
+            str(path)
+            for key in ("first_read_files_include_any", "ambiguity_candidates_include_any")
+            for path in _sequence(expected.get(key))
+        }
+        related_tests = {str(path) for path in _sequence(expected.get("likely_tests_include_any"))}
+    return {
+        "related_tests": sorted(related_tests),
+        "relevant_files": sorted(relevant_files),
+    }
 
 
 def _expected_relevant_paths(expected: Mapping[str, Any]) -> set[str]:
