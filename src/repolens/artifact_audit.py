@@ -111,12 +111,17 @@ def audit_artifacts(
     checks = {
         "absolute_host_paths": True,
         "artifact_boundary": True,
+        "bounded_output": True,
         "call_chain_facts_source_free": True,
         "candidate_commands_not_run": True,
+        "deterministic_ordering": True,
         "mcp_contract": True,
+        "no_whole_source_disclosure": True,
         "oversized_artifacts": True,
         "raw_agent_guidance_mirroring": True,
         "raw_secret_like_values": True,
+        "redaction": True,
+        "repo_relative_paths": True,
         "source_snippet_leakage": True,
         "saved_ai_proposals": include_ai_proposals,
     }
@@ -644,7 +649,17 @@ def _dedupe_violations(
             continue
         seen.add(key)
         deduped.append(violation)
-    return tuple(deduped)
+    return tuple(
+        sorted(
+            deduped,
+            key=lambda violation: (
+                violation.location,
+                violation.check,
+                violation.message,
+                violation.severity,
+            ),
+        )
+    )
 
 
 def _repo_relative(root: Path, path: Path) -> str:

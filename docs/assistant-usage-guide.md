@@ -1,6 +1,6 @@
-# RepoLens MCP v0.7 Assistant Usage Guide
+# RepoLens MCP v0.9 Assistant Usage Guide
 
-RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.6, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata. For JavaScript and TypeScript tasks, preflight may also use parser-backed imports, exports, top-level symbols, resolver outcomes, source-free Call Chain Facts, and Framework Route Hints.
+RepoLens gives coding assistants deterministic, read-only repository orientation before they open source files. In v0.9, start each task with Assistant Preflight: a bounded, task-scoped contract with graph freshness, first-read files, likely tests, candidate verification commands, warnings, focus hints, confidence, limits, and truncation metadata. For JavaScript and TypeScript tasks, preflight may also use parser-backed imports, exports, top-level symbols, resolver outcomes, source-free Call Chain Facts, and Framework Route Hints.
 
 In v0.7, Python semantic facts are an experimental inspection and evaluation layer, not part of the default Assistant Preflight or stable graph contract. They are source-free candidate metadata for function-level control flow and lexical binding, stored separately from `graph.sqlite`, and excluded from Canonical Graph Hash, default Context Pack IDs, stable graph validation, and default MCP output.
 
@@ -28,7 +28,7 @@ AI Proposals are optional, disabled by default, and separate from deterministic 
 
 Default AI input is bounded, redacted RepoLens metadata rather than whole source files. Proposals are ephemeral unless the caller explicitly requests `--save`; saved artifacts are checked by Artifact Safety Audit. Proposal generation never changes Canonical Graph Hash, Context Pack IDs or ranking, resolver behavior, or Package Ownership.
 
-Treat Context Pack Summary, Architecture Explanation, and Patch Plan Proposals as limited interpretations of available evidence. In particular, Patch Plan Proposals cannot write files, apply patches, or execute their Candidate Verification Commands. Active Workflow behavior is deferred to v0.9 and is not available through the v0.8 read-only MCP surface.
+Treat Context Pack Summary, Architecture Explanation, and Patch Plan Proposals as limited interpretations of available evidence. In particular, Patch Plan Proposals cannot write files, apply patches, or execute their Candidate Verification Commands. Active Workflow behavior remains deferred and is not available through the read-only MCP surface.
 
 See `docs/ai-proposals.md` for provider and credential environment-variable setup, CLI examples, persistence auditing, per-kind limitations, and deferred capabilities.
 

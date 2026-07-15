@@ -14,7 +14,9 @@ RepoLens is local-first and safe by default for normal indexing and MCP serving.
 - MCP tools are read-only and return bounded responses with freshness, warning, limit, pagination, and truncation metadata where applicable.
 - Candidate commands may be detected and stored, but RepoLens does not execute them.
 - Deploy or publish-like commands must not be recommended for automatic execution.
-- Runtime package registry lookups are out of scope for normal indexing and MCP serving.
+- Runtime package registry lookups and telemetry are out of scope for normal indexing and MCP serving.
+- The first-use Assistant Preflight lifecycle may initialize or refresh local `.repolens/` artifacts, but it does not execute repository package managers, compilers, bundlers, frameworks, tests, deploy commands, or publish commands.
+- Artifact Safety Audit checks redaction, bounded output, repo-relative paths, deterministic ordering, No Whole-Source Disclosure, and Candidate Verification Commands remaining not run.
 - v0.6 JS/TS parser, resolver, Call Chain Fact, and Framework Route Hint artifacts remain compact metadata. They must not contain source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, or absolute host paths.
 
 ## No Whole-Source Disclosure
@@ -38,4 +40,4 @@ RepoLens skips secret-looking paths and redacts obvious secret-like values, but 
 
 ## Human Review Before Release
 
-A human maintainer must review release-facing docs and known limitations before publication. Publishing automation for PyPI, Docker registries, or hosted services remains out of scope for v0.6.
+A human maintainer must review release-facing docs and known limitations before publication. Publishing automation for PyPI, Docker registries, or hosted services remains out of scope for v0.9.

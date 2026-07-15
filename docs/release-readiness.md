@@ -1,6 +1,8 @@
-# RepoLens MCP v0.8 Release Readiness
+# RepoLens MCP v0.9 Release Readiness
 
 This checklist is for manual dogfooding and release prep. It does not publish to PyPI or a Docker registry. Use `docs/release-checklist.md` as the final release gate checklist and `docs/changelog-template.md` for release notes.
+
+v0.9 release readiness is about one low-friction agent workflow: install the package, register the read-only stdio MCP command, and call Assistant Preflight before broad repository reads. The first call initializes missing graph state and later calls refresh stale state without project configuration, a separate indexing step, network access, or repository command execution. Focus hints, budget controls, experimental semantic hints, and AI Proposals remain optional and explicit.
 
 v0.8 release readiness is about the optional AI Proposal Layer: disabled-by-default, metadata-only interpretations that remain outside the trusted deterministic graph while proving stable input identity, explicit provider provenance, bounded persistence, artifact safety, and read-only behavior.
 
@@ -28,6 +30,7 @@ Before treating release-facing docs as final, a human maintainer must confirm:
 - Final v0.6 maintainer release judgment is recorded before v0.6 is cut.
 - Final v0.7 maintainer release judgment is recorded before v0.7 is cut.
 - Final v0.8 maintainer release judgment is recorded before v0.8 is cut, and does not overstate local test-provider dogfood as external-model quality.
+- Final v0.9 maintainer release judgment reviews `docs/dogfood/2026-07-15-v0.9-release-readiness.md`, including empty First-Read File outcomes, local timing variance, and the absence of a token-saving claim.
 
 ## Local Verification Gate
 
@@ -73,6 +76,15 @@ The v0.6 assistant-facing contract keeps Assistant Preflight as the first step b
 - Framework Route Hints are deterministic hints from local file/config/parser evidence, not framework emulation, compiler output, bundler output, or runtime route proof.
 - Resolver outcomes preserve uncertainty for unsupported aliases, ambiguous exports, incomplete workspace evidence, and complex package entrypoints through unresolved statuses, candidates, Relationship Candidates, and Graph Quality Warnings.
 - Assistant-facing output must continue to omit source snippets, code bodies, function signatures, full import lines, raw comments, raw Agent Guidance text, raw config values, and absolute host paths.
+
+## v0.9 Assistant-Facing Documentation
+
+- Supported first use is a locally installed `repolens` command registered as `repolens mcp /absolute/path/to/repo`, followed by MCP `assistant_preflight` before broad reads.
+- No RepoLens project configuration or prior `index` command is required. Explicit `index`, `update`, `status`, and `audit-artifacts` remain diagnostics and release tools.
+- Focus hints and budget controls are optional deterministic narrowing inputs. Experimental semantic hints and AI Proposals remain explicit opt-ins and do not alter default graph truth.
+- Assistant Preflight may return no First-Read Files when Task Matching evidence is sparse. This is bounded uncertainty, not evidence that no relevant files exist; callers may retry with a repo-relative focus hint.
+- Normal indexing and MCP use remain local-first, without telemetry, hidden network access, package-manager/compiler/framework execution, or write-capable MCP tools.
+- Artifact Safety Audit explicitly covers redaction, bounded output, repo-relative paths, deterministic ordering, No Whole-Source Disclosure, and Candidate Verification Commands remaining not run.
 
 ## v0.8 Assistant-Facing Documentation
 
@@ -233,6 +245,19 @@ uv run repolens evaluate-context --json
 ```
 
 The JSON command exits non-zero when the expectation-based release gate fails. The report covers direct symbol tasks, test-focused tasks, docs/config tasks, broad tasks, ambiguity, no matches, focus hints, stale graphs, secret redaction, stale pack IDs, JS/TS call chains, alias ambiguity, re-export behavior, workspace package imports, route hints, and no-source-disclosure negatives.
+
+Latest local evidence for issue #229 on 2026-07-15:
+
+- Blocker status: #222, #225, #226, #227, and #228 are closed before final readiness judgment.
+- Full gate: `uv run pytest` passed 249/249 tests; Ruff lint, Ruff format check, mypy, Context Pack Evaluation (28/28 cases and all 27 release-blocking cases), Semantic Evaluation (4/4 cases), and package build passed.
+- Safety: representative Artifact Safety Audits passed with zero violations. The audit output now names redaction, bounded output, repo-relative path, deterministic ordering, No Whole-Source Disclosure, and not-run command checks explicitly, with regression coverage for stable ordered output.
+- Package/MCP smoke: a clean virtual environment installed the built wheel; installed CLI help and packaged first-use MCP smoke passed. The first call initialized missing graph state and the second refreshed a changed graph without prior indexing, project settings, network access, or repository command execution.
+- Dogfood: `docs/dogfood/2026-07-15-v0.9-release-readiness.md` covers RepoLens itself, a Python single package, a JS/TS workspace, and mixed docs/config. Generated artifacts and repository snapshots were not committed.
+- First-read quality: the JS/TS workspace returned four First-Read Files. Three task wordings returned none; this is documented as sparse Task Matching evidence and a reason to use focus hints, not as proof of absent relevant files.
+- Performance: local initial indexing ranged from 35.9 ms for the mixed fixture to 16.679 seconds for RepoLens. Selective Update ranged from 40.6 ms to 33.791 seconds. The 1,000-file relative benchmark measured 1.206 seconds for Selective Update and 0.803 seconds for full rebuild, so no cache, worker-pool, or parallel indexing complexity was justified or added.
+- Bounded context: dogfood preflight envelopes ranged from 4,633 to 16,060 serialized characters. Context evaluation reported 34 files and 17 likely irrelevant files avoided versus its lexical path baseline, but its approximate-token field was negative; v0.9 therefore makes no exact or universal token-saving claim.
+- Boundaries: no telemetry, hosted service, package publishing, container publishing, write-capable MCP tool, hidden network call, or repository command execution was added.
+- Maintainer release judgment: implementation evidence passes; publication remains a human checkpoint after accepting the documented first-read and performance limitations.
 
 Latest local evidence for issue #209 on 2026-07-10:
 
