@@ -149,6 +149,44 @@ def test_get_task_context_returns_deterministic_context_pack_contract(tmp_path):
     )
 
 
+def test_context_pack_character_budget_omits_weakest_items_and_returned_handles(tmp_path):
+    _write_context_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+
+    envelope = get_task_context(
+        tmp_path,
+        "Fix API_TOKEN=abc123 login validation",
+        budget={
+            "max_candidate_verification_commands": 1,
+            "max_first_read_files": 1,
+            "max_items_per_support_group": 1,
+            "max_total_chars": 2_000,
+        },
+    )
+
+    pack = envelope["data"]
+    assert pack["budget"]["used_chars"] <= 2_000
+    assert pack["budget"]["approx_tokens"] <= 500
+    assert pack["truncation"]["truncated"] is True
+    assert pack["truncation"]["omitted_items"]
+    returned_handles = {
+        item["handle"]
+        for group in (
+            "first_read_files",
+            "likely_tests",
+            "supporting_docs",
+            "supporting_configs",
+            "agent_guidance",
+            "candidate_verification_commands",
+            "risk_signals",
+            "lower_priority_context",
+            "ambiguity",
+        )
+        for item in pack[group]
+    }
+    assert {item["handle"] for item in pack["expansion_handles"]} == returned_handles
+
+
 def test_context_pack_cli_and_mcp_use_same_service(tmp_path):
     _write_context_fixture_repo(tmp_path)
     index_repository(tmp_path)
@@ -320,6 +358,7 @@ def test_assistant_preflight_cli_and_mcp_share_bounded_contract(tmp_path):
     }
     assert data["focus_hints"]["items"] == ["src/auth/login.ts"]
     assert data["budget_controls"] == {
+        "approx_tokens": data["budget_controls"]["used_chars"] // 4 + 1,
         "deterministic": True,
         "max_candidate_verification_commands": 1,
         "max_first_read_files": 1,
@@ -330,6 +369,26 @@ def test_assistant_preflight_cli_and_mcp_share_bounded_contract(tmp_path):
     }
     assert [item["path"] for item in data["first_read_files"]] == ["src/auth/login.ts"]
     assert [item["path"] for item in data["likely_tests"]] == ["tests/login.test.ts"]
+    assert [item["path"] for item in data["supporting_docs"]] == ["README.md"]
+    assert [item["path"] for item in data["supporting_configs"]] == ["package.json"]
+    assert [item["category"] for item in data["risk_signals"]] == ["TODO"]
+    assert data["agent_guidance"][0]["path"] == "AGENTS.md"
+    assert data["lower_priority_context"] == []
+    assert [handle["handle"] for handle in data["expansion_handles"]] == [
+        item["handle"]
+        for group in (
+            "first_read_files",
+            "likely_tests",
+            "supporting_docs",
+            "supporting_configs",
+            "agent_guidance",
+            "candidate_verification_commands",
+            "risk_signals",
+            "lower_priority_context",
+            "ambiguity",
+        )
+        for item in data[group]
+    ]
     assert data["candidate_verification_commands"][0]["run"] is False
     assert data["candidate_verification_commands"][0]["found"] is True
     assert "abc123" not in json.dumps(service_envelope)
@@ -1106,6 +1165,45 @@ def test_context_pack_mcp_expansion_and_relevance_use_same_service(tmp_path):
     assert tools.explain_relevance(
         task, pack["context_pack_id"], item["handle"]
     ) == explain_relevance(tmp_path, task, pack["context_pack_id"], item["handle"])
+
+    focused_task = "Fix API_TOKEN=abc123 login validation"
+    focused_budget = {
+        "max_candidate_verification_commands": 1,
+        "max_first_read_files": 1,
+        "max_items_per_support_group": 1,
+        "max_total_chars": 8_000,
+    }
+    focused_pack = tools.assistant_preflight(
+        focused_task,
+        focus_hints=["src/auth/login.ts"],
+        **focused_budget,
+    )["data"]
+    focused_item = focused_pack["first_read_files"][0]
+    focused_expansion = tools.expand_context(
+        focused_task,
+        focused_pack["context_pack_id"],
+        focused_item["handle"],
+        focus_hints=["src/auth/login.ts"],
+        **focused_budget,
+    )
+    assert focused_expansion["ok"] is True
+    assert focused_expansion == tools.expand_context(
+        focused_task,
+        focused_pack["context_pack_id"],
+        focused_item["handle"],
+        focus_hints=["src/auth/login.ts"],
+        **focused_budget,
+    )
+    assert (
+        tools.explain_relevance(
+            focused_task,
+            focused_pack["context_pack_id"],
+            focused_item["handle"],
+            focus_hints=["src/auth/login.ts"],
+            **focused_budget,
+        )["ok"]
+        is True
+    )
 
 
 def _write_v0_6_js_ts_context_fixture(root) -> None:
