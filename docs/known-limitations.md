@@ -1,6 +1,6 @@
-# RepoLens MCP v0.8 Known Limitations
+# RepoLens MCP v0.9 Known Limitations
 
-These limitations are acceptable for v0.8 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation, Semantic Evaluation, artifact audit, or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight, stale semantic inspection, corrupt artifacts, stale graph facts, AI Proposal boundary violations, or unusable workflows.
+These limitations are acceptable for v0.9 when they remain explicit, safe, and non-corrupting. Promote a limitation to release-blocking bug work if Context Pack Evaluation, Semantic Evaluation, artifact audit, or dogfooding shows unsafe assistant guidance, source disclosure risk, stale or misleading preflight, stale semantic inspection, corrupt artifacts, stale graph facts, AI Proposal boundary violations, or unusable workflows.
 
 ## Resolution Limits
 
@@ -57,6 +57,8 @@ These limitations are acceptable for v0.8 when they remain explicit, safe, and n
 - No-match tasks return low-confidence orientation instead of broad fallback context.
 - Ambiguous tasks return candidates rather than silently choosing one target.
 - Evaluation is local and fixture-based. It is not telemetry, hosted evaluation, or a universal quality score.
+- Sparse Task Matching evidence can produce an empty First-Read File list even when relevant files exist. Retry with a repo-relative focus hint and inspect warnings rather than treating an empty list as an absence proof.
+- Context Pack Evaluation may show file-level exploration savings while its approximate-token estimate does not improve. RepoLens does not infer universal time or token savings from one metric or local run.
 
 ## Command And Config Limits
 
@@ -79,7 +81,7 @@ These limitations are acceptable for v0.8 when they remain explicit, safe, and n
 - No runtime package registry lookups during normal indexing or MCP serving.
 - No full framework emulation or runtime package-manager, bundler, compiler, framework, or test execution during indexing, Context Pack generation, preflight, or artifact audit.
 - No persisted Context Pack sessions or server-side assistant memory.
-- No PyPI, Docker registry, or hosted publishing automation in v0.8.
+- No PyPI, Docker registry, or hosted publishing automation in v0.9.
 - No PyPI, Docker registry, or hosted publishing automation in v0.6 remains a historical release boundary.
 
 ## Dogfooding And Evaluation Outcomes Reflected Here
@@ -97,3 +99,5 @@ The v0.6 dogfood evaluation pack in `docs/dogfood/2026-07-06-v0.6-dogfood-evalua
 The v0.7 semantic evaluation suite in `tests/fixtures/semantic_evaluation` adds release-blocking checks for deterministic Python CFG, lexical binding, unsupported/uncertain constructs, no-source-disclosure negatives, stable identity exclusion, and semantic debug/evaluation export audit behavior. Use those results to document limitations, not to broaden into data-flow, taint, type inference, dynamic runtime emulation, package-manager execution, compiler execution, framework execution, AI summaries, embeddings, telemetry, or hosted services.
 
 The v0.8 dogfood report in `docs/dogfood/2026-07-10-v0.8-ai-proposal-layer.md` validates disabled-default behavior, stable Context Pack identity and Canonical Graph Hash, deterministic input digests, all three proposal envelopes, saved-artifact audit, and read-only Patch Plan boundaries. It also records that the local test provider does not prove external-model quality and that docs-focused Patch Plans can omit plausible documentation targets or Candidate Verification Commands.
+
+The v0.9 dogfood report in `docs/dogfood/2026-07-15-v0.9-release-readiness.md` records clean install-to-Assistant-Preflight success, bounded output, representative Python and JS/TS shapes, empty First-Read File outcomes for sparse task wording, and local performance variance. Selective Update was not consistently faster than full rebuild in that evidence, so parse caches, worker pools, and parallel indexing remain behind the Performance Escalation Gate. The report makes no exact or universal time or token-saving claim.

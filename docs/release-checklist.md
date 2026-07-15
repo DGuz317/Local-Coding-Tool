@@ -1,4 +1,4 @@
-# RepoLens MCP v0.8 Release Checklist
+# RepoLens MCP v0.9 Release Checklist
 
 This checklist gates release readiness. It does not publish to PyPI, Docker registries, or hosted services.
 
@@ -11,9 +11,9 @@ A human maintainer must confirm before final release publication:
 - `docs/security-and-artifact-privacy.md` accurately describes scanner, redaction, artifact, and MCP safety behavior.
 - `docs/troubleshooting.md` covers the known operational failure modes.
 - `docs/known-limitations.md` reflects dogfooding outcomes and does not hide release-blocking failures.
-- `docs/releases/v0.8.0.md` describes the release without unsupported publishing or external-provider quality claims.
-- `docs/ai-proposals.md` matches disabled-default behavior, supported proposal kinds, persistence, Artifact Safety Audit, and deferred Active Workflow boundaries.
-- `docs/dogfood/2026-07-10-v0.8-ai-proposal-layer.md` records proposal usefulness, overclaim review, and unavailable external-provider dogfood.
+- v0.9 guidance describes install-to-Assistant-Preflight as the primary workflow without hiding explicit diagnostics.
+- `docs/ai-proposals.md` matches disabled-default behavior, supported proposal kinds, persistence, Artifact Safety Audit, and read-only boundaries.
+- `docs/dogfood/2026-07-15-v0.9-release-readiness.md` records representative repository coverage, first-read quality, setup friction, resolver limitations, Context Pack size, and local timing evidence.
 - Release notes use the changelog template and avoid unsupported publishing claims.
 - PyPI publishing automation remains out of scope.
 - Docker registry publishing automation remains out of scope.
@@ -36,11 +36,12 @@ uv build --out-dir /tmp/repolens-dist --clear
 ## Build And Install Smoke
 
 ```bash
-uv build
-uv tool install --force dist/*.whl
-repolens --help
-repolens status .
-uv tool uninstall repolens
+uv build --out-dir /tmp/repolens-dist --clear
+python -m venv /tmp/repolens-smoke
+/tmp/repolens-smoke/bin/python -m pip install /tmp/repolens-dist/*.whl
+/tmp/repolens-smoke/bin/repolens --help
+/tmp/repolens-smoke/bin/python tests/packaged_mcp_smoke.py \
+  --repolens /tmp/repolens-smoke/bin/repolens
 ```
 
 ## CLI Smoke
@@ -96,7 +97,13 @@ Using an MCP client, confirm:
 - `search_text` returns capped previews and not whole files.
 - Missing or stale artifacts produce actionable envelope errors or warnings.
 
-## Dogfooding Evidence
+## Performance And Dogfooding Evidence
+
+Run relative Selective Update evidence without treating one machine's timings as an SLA:
+
+```bash
+uv run repolens benchmark-update --file-count 1000 --changed-file-count 1 --json
+```
 
 Confirm dogfooding reports cover:
 
@@ -106,9 +113,11 @@ Confirm dogfooding reports cover:
 - At least one mixed docs/config repository or distilled fixture.
 - Regression fixtures for actionable findings where practical.
 
+Record initial indexing, Selective Update, first-read quality, Context Pack size, setup friction, graph limitations, and resolver misses. Keep measurements local and evidence-labeled; do not claim universal time or token savings.
+
 ## Scope Guard
 
-Do not add or require these for v0.8 release readiness:
+Do not add or require these for v0.9 release readiness:
 
 - PyPI publishing automation.
 - Docker registry publishing automation.

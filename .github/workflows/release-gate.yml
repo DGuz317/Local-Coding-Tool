@@ -12,18 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version-file: .python-version
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --all-extras --dev --locked
 
       - name: Full tests
         run: uv run pytest
@@ -47,11 +49,27 @@ jobs:
         run: uv run repolens audit-artifacts . --json
 
       - name: Build distribution
-        run: uv build --out-dir /tmp/repolens-dist --clear
+        run: uv build --out-dir "${RUNNER_TEMP}/repolens-dist" --clear
+
+      - name: Create clean install environment
+        run: python -m venv "${RUNNER_TEMP}/repolens-smoke"
+
+      - name: Install built wheel
+        run: >-
+          "${RUNNER_TEMP}/repolens-smoke/bin/python" -m pip install
+          "${RUNNER_TEMP}"/repolens-dist/*.whl
+
+      - name: Smoke installed CLI
+        run: "${RUNNER_TEMP}/repolens-smoke/bin/repolens" --help
+
+      - name: Smoke packaged first-use MCP workflow
+        run: >-
+          "${RUNNER_TEMP}/repolens-smoke/bin/python" tests/packaged_mcp_smoke.py
+          --repolens "${RUNNER_TEMP}/repolens-smoke/bin/repolens"
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
         with:
           name: repolens-dist
-          path: /tmp/repolens-dist/*
+          path: ${{ runner.temp }}/repolens-dist/*
           if-no-files-found: error

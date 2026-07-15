@@ -28,6 +28,36 @@ def test_audit_artifacts_json_passes_for_indexed_fixture(tmp_path):
     assert ".repolens/graph.json" in data["audited_artifacts"]
     assert data["checks"]["call_chain_facts_source_free"] is True
     assert data["checks"]["candidate_commands_not_run"] is True
+    assert {
+        "bounded_output",
+        "deterministic_ordering",
+        "no_whole_source_disclosure",
+        "redaction",
+        "repo_relative_paths",
+    }.issubset(data["checks"])
+    assert data["audited_artifacts"] == sorted(data["audited_artifacts"])
+    assert all(path.startswith(".repolens/") for path in data["audited_artifacts"])
+
+
+def test_audit_artifacts_returns_deterministically_ordered_results(tmp_path):
+    _write_audit_fixture_repo(tmp_path)
+    index_repository(tmp_path)
+    _write_negative_artifact(tmp_path)
+
+    first = audit_artifacts(tmp_path, max_artifact_bytes=8)
+    second = audit_artifacts(tmp_path, max_artifact_bytes=8)
+
+    assert first == second
+    violations = first["data"]["violations"]
+    assert violations == sorted(
+        violations,
+        key=lambda violation: (
+            violation["location"],
+            violation["check"],
+            violation["message"],
+            violation["severity"],
+        ),
+    )
 
 
 def test_audit_artifacts_human_output_summarizes_failures(tmp_path):
