@@ -270,21 +270,55 @@ class RepoLensMcpTools:
         depth: int = 1,
         max_items_per_kind: int = 3,
         max_total_items: int = 10,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
     ) -> dict[str, Any]:
+        budget = _preflight_budget_overrides(
+            max_first_read_files=max_first_read_files,
+            max_items_per_support_group=max_items_per_support_group,
+            max_candidate_verification_commands=max_candidate_verification_commands,
+            max_total_chars=max_total_chars,
+        )
         return expand_context(
             self.repo_path,
             task,
             context_pack_id,
             item_handle,
+            focus_hints=focus_hints or [],
+            budget=budget,
             depth=depth,
             max_items_per_kind=max_items_per_kind,
             max_total_items=max_total_items,
         )
 
     def explain_relevance(
-        self, task: str, context_pack_id: str, item_handle: str
+        self,
+        task: str,
+        context_pack_id: str,
+        item_handle: str,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
     ) -> dict[str, Any]:
-        return explain_relevance(self.repo_path, task, context_pack_id, item_handle)
+        budget = _preflight_budget_overrides(
+            max_first_read_files=max_first_read_files,
+            max_items_per_support_group=max_items_per_support_group,
+            max_candidate_verification_commands=max_candidate_verification_commands,
+            max_total_chars=max_total_chars,
+        )
+        return explain_relevance(
+            self.repo_path,
+            task,
+            context_pack_id,
+            item_handle,
+            focus_hints=focus_hints or [],
+            budget=budget,
+        )
 
     def list_entrypoints(
         self,
@@ -485,21 +519,49 @@ def create_mcp_server(repo_path: Path | str) -> FastMCP:
         depth: int = 1,
         max_items_per_kind: int = 3,
         max_total_items: int = 10,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
     ) -> dict[str, Any]:
         """Expand one returned Context Pack item with bounded graph context."""
         return tools.expand_context(
             task,
             context_pack_id,
             item_handle,
-            depth,
-            max_items_per_kind,
-            max_total_items,
+            depth=depth,
+            max_items_per_kind=max_items_per_kind,
+            max_total_items=max_total_items,
+            focus_hints=focus_hints,
+            max_first_read_files=max_first_read_files,
+            max_items_per_support_group=max_items_per_support_group,
+            max_candidate_verification_commands=max_candidate_verification_commands,
+            max_total_chars=max_total_chars,
         )
 
     @server.tool()
-    def explain_relevance(task: str, context_pack_id: str, item_handle: str) -> dict[str, Any]:
+    def explain_relevance(
+        task: str,
+        context_pack_id: str,
+        item_handle: str,
+        focus_hints: list[str] | None = None,
+        max_first_read_files: int | None = None,
+        max_items_per_support_group: int | None = None,
+        max_candidate_verification_commands: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> dict[str, Any]:
         """Explain why one returned item appeared in a Context Pack."""
-        return tools.explain_relevance(task, context_pack_id, item_handle)
+        return tools.explain_relevance(
+            task,
+            context_pack_id,
+            item_handle,
+            focus_hints,
+            max_first_read_files,
+            max_items_per_support_group,
+            max_candidate_verification_commands,
+            max_total_chars,
+        )
 
     @server.tool()
     def list_entrypoints(

@@ -351,6 +351,7 @@ def get_assistant_preflight(
         "context_pack_id": context_pack.get("context_pack_id", ""),
         "context_pack_version": context_pack.get("context_pack_version", CONTEXT_PACK_VERSION),
         "evidence": _safe_evidence(context_envelope.get("evidence", [])),
+        "expansion_handles": _sequence(context_pack.get("expansion_handles")),
         "first_read_files": _sequence(context_pack.get("first_read_files")),
         "focus_hints": {
             "items": normalized_focus_hints,
@@ -363,7 +364,12 @@ def get_assistant_preflight(
             warning for warning in warnings if str(warning).startswith("graph_quality:")
         ),
         "likely_tests": _sequence(context_pack.get("likely_tests")),
+        "lower_priority_context": _sequence(context_pack.get("lower_priority_context")),
         "limits": _mapping(context_envelope.get("limits")),
+        "risk_signals": _sequence(context_pack.get("risk_signals")),
+        "supporting_configs": _sequence(context_pack.get("supporting_configs")),
+        "supporting_docs": _sequence(context_pack.get("supporting_docs")),
+        "agent_guidance": _sequence(context_pack.get("agent_guidance")),
         "task_context": {
             "display_task": context_pack.get("task", ""),
             "fingerprint": context_pack.get("task_fingerprint", ""),
@@ -1297,6 +1303,7 @@ def _preflight_budget_controls(
 ) -> dict[str, Any]:
     pack_budget = _mapping(context_pack.get("budget"))
     return {
+        "approx_tokens": int(pack_budget.get("approx_tokens", 0)),
         "deterministic": True,
         "max_candidate_verification_commands": budget["max_candidate_verification_commands"],
         "max_first_read_files": budget["max_first_read_files"],
@@ -1317,18 +1324,63 @@ def _next_actions(first_read_files: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 def _apply_character_budget(pack: dict[str, Any], max_total_chars: int) -> dict[str, Any]:
-    if len(json.dumps(pack, sort_keys=True)) <= max_total_chars:
-        return pack
     pack = dict(pack)
-    for group_name in ("supporting_docs", "supporting_configs", "lower_priority_context"):
-        pack[group_name] = _strip_structural_summaries(_sequence(pack.get(group_name)))
-    if len(json.dumps(pack, sort_keys=True)) <= max_total_chars:
-        pack["truncation"] = truncation_metadata(fields=["structural_summaries"])
+    active_budget = {
+        key: int(value)
+        for key, value in _mapping(pack.get("budget")).items()
+        if key in DEFAULT_CONTEXT_PACK_BUDGET
+    }
+    active_budget["max_total_chars"] = max_total_chars
+    pack["budget"] = _budget_metadata_from_pack(pack, active_budget)
+    if int(pack["budget"]["used_chars"]) <= max_total_chars:
         return pack
-    pack["lower_priority_context"] = []
-    pack["supporting_docs"] = []
-    pack["supporting_configs"] = []
-    pack["truncation"] = truncation_metadata(fields=["character_budget"])
+
+    truncated_fields: list[str] = []
+    omitted_items: dict[str, int] = {}
+    for group_name in ("supporting_docs", "supporting_configs", "lower_priority_context"):
+        items = _sequence(pack.get(group_name))
+        stripped = _strip_structural_summaries(items)
+        if stripped != items:
+            truncated_fields.append("structural_summaries")
+            pack[group_name] = stripped
+    pack["budget"] = _budget_metadata_from_pack(pack, active_budget)
+
+    removal_order = (
+        "lower_priority_context",
+        "agent_guidance",
+        "supporting_docs",
+        "supporting_configs",
+        "risk_signals",
+        "ambiguity",
+        "candidate_verification_commands",
+        "likely_tests",
+        "first_read_files",
+    )
+    while int(pack["budget"]["used_chars"]) > max_total_chars:
+        removed = False
+        for group_name in removal_order:
+            items = _sequence(pack.get(group_name))
+            if not items:
+                continue
+            pack[group_name] = items[:-1]
+            omitted_items[group_name] = omitted_items.get(group_name, 0) + 1
+            truncated_fields.extend(["character_budget", group_name])
+            pack["budget"] = _budget_metadata_from_pack(pack, active_budget)
+            removed = True
+            break
+        if not removed:
+            break
+
+    returned_handles = set(_returned_pack_items(pack))
+    pack["expansion_handles"] = [
+        handle
+        for handle in _sequence(pack.get("expansion_handles"))
+        if str(_mapping(handle).get("handle", "")) in returned_handles
+    ]
+    pack["truncation"] = {
+        **truncation_metadata(fields=truncated_fields),
+        "omitted_items": dict(sorted(omitted_items.items())),
+    }
     return pack
 
 
