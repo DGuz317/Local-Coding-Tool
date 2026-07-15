@@ -31,25 +31,48 @@ RepoLens gives the assistant a safer and cheaper first step:
 
 RepoLens is meant to replace broad exploratory codebase scanning, not the final targeted source review needed before making a safe edit.
 
-## The Short Version
+## Install And Connect
 
-If you are working from this repository checkout, run:
+Build and install RepoLens as a local tool, then register the installed command with your MCP
+client. No project settings or separate indexing command are required:
 
 ```bash
-uv sync
-uv run repolens index .
-uv run repolens status .
-uv run repolens preflight . "Fix the auth timeout bug"
+uv build --out-dir /tmp/repolens-dist --clear
+uv tool install --force /tmp/repolens-dist/*.whl
 ```
 
-What those commands mean:
+Copy this installed-command shape into a supported MCP client, replacing the repository path:
 
-- `uv sync` installs the project environment.
-- `uv run repolens index .` scans the current repository and creates `.repolens/`.
-- `uv run repolens status .` checks whether the generated graph is available and fresh.
-- `uv run repolens preflight . "..."` asks for a bounded Assistant Preflight for one task.
+```json
+{
+  "mcpServers": {
+    "repolens": {
+      "command": "repolens",
+      "args": ["mcp", "/absolute/path/to/repo"]
+    }
+  }
+}
+```
 
-Replace `.` with another repository path if you want to inspect a different project.
+OpenCode uses the equivalent local command array:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "repolens": {
+      "type": "local",
+      "command": ["repolens", "mcp", "/absolute/path/to/repo"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Ask the assistant to call `assistant_preflight` with its task before broad file reads. On the
+first call RepoLens discovers the repository root and creates the missing graph; later calls
+refresh stale graph state. This local first-use path does not contact a network or run the
+repository's package managers, compilers, bundlers, or frameworks.
 
 ## Requirements
 
@@ -183,15 +206,9 @@ RepoLens is most useful when an MCP client starts it for an assistant.
 
 The basic flow is:
 
-1. Index the repository first.
-2. Configure your MCP client to run `repolens mcp /absolute/path/to/repo`.
-3. Tell the assistant to call `assistant_preflight` before broad file exploration. `assistant_preflight` already includes graph freshness and bounded task context.
-
-Index first:
-
-```bash
-uv run repolens index /absolute/path/to/repo
-```
+1. Configure your MCP client to run `repolens mcp /absolute/path/to/repo`.
+2. Tell the assistant to call `assistant_preflight` before broad file exploration.
+3. Let that first tool call discover the repository and initialize or refresh its graph.
 
 MCP command shape:
 

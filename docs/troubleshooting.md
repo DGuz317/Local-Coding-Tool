@@ -1,14 +1,25 @@
 # Troubleshooting RepoLens MCP v0.2
 
-## `graph_status` Reports Missing Artifacts
+## First `assistant_preflight` Call Fails
 
-Run:
+Retry the same call after checking that the repository path exists, is readable, and contains a
+supported Python or JavaScript/TypeScript repository shape. Preflight normally discovers the
+repository root and initializes missing artifacts automatically. Its bounded error envelope
+includes a problem code and recoverable reason without source or credential values.
+
+For explicit recovery diagnostics, run:
 
 ```bash
+repolens preflight /absolute/path/to/repo "Check setup" --json
+repolens status /absolute/path/to/repo --json
 repolens index /absolute/path/to/repo
 ```
 
-Then restart the MCP client or retry `graph_status` after the client's tool cache refreshes.
+## `graph_status` Reports Missing Artifacts
+
+`graph_status` is a read-only query and does not initialize a graph. Call `assistant_preflight` for
+the normal first-use workflow, or run `repolens index /absolute/path/to/repo` as an explicit
+troubleshooting step.
 
 ## `graph_status` Reports Stale Artifacts
 
@@ -29,7 +40,7 @@ This is expected. `repolens mcp <repo-path>` is a stdio server for an MCP client
 Check:
 
 - The configured repository path is absolute.
-- `repolens index /absolute/path/to/repo` has completed successfully.
+- `repolens --help` succeeds; prior indexing is not required for `assistant_preflight`.
 - The command works outside OpenCode with `repolens --help` or `uv run repolens --help`.
 - The `cwd` in the MCP config exists.
 - Docker examples use a numeric `--user` value such as `1000:1000`, not a shell expression that the MCP client will not expand.
