@@ -8,6 +8,7 @@ on:
       - feature/repolens-v0.3.1
       - feature/repolens-v0.4
       - feature/repolens-v0.5
+      - feature/repolens-v0.9
   pull_request:
     branches:
       - main
@@ -15,6 +16,7 @@ on:
       - feature/repolens-v0.3.1
       - feature/repolens-v0.4
       - feature/repolens-v0.5
+      - feature/repolens-v0.9
 
 jobs:
   release-gate:
@@ -81,14 +83,9 @@ jobs:
         run: /tmp/repolens-smoke/bin/python -m pip install "${RUNNER_TEMP}"/repolens-dist/*.whl
 
       - name: Smoke installed CLI
-        run: |
-          smoke_parent="${RUNNER_TEMP}/repolens-fixtures"
-          smoke_fixture="${smoke_parent}/happy-path"
-          mkdir -p "${smoke_parent}"
-          cp -R tests/fixtures/context_pack/happy-path "${smoke_fixture}"
+        run: /tmp/repolens-smoke/bin/repolens --help
 
-          /tmp/repolens-smoke/bin/repolens --help
-          /tmp/repolens-smoke/bin/repolens index "${smoke_fixture}"
-          /tmp/repolens-smoke/bin/repolens status "${smoke_fixture}" --json
-          /tmp/repolens-smoke/bin/repolens context "${smoke_fixture}" "Find auth-related files" --json
-          /tmp/repolens-smoke/bin/repolens preflight "${smoke_fixture}" "Find auth-related files" --json
+      - name: Smoke packaged first-use MCP workflow
+        run: >-
+          /tmp/repolens-smoke/bin/python tests/packaged_mcp_smoke.py
+          --repolens /tmp/repolens-smoke/bin/repolens

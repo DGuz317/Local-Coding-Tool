@@ -34,19 +34,22 @@ See `docs/ai-proposals.md` for provider and credential environment-variable setu
 
 ## Setup Flow
 
-1. Index the target repository:
+1. Install a built RepoLens wheel as a local tool:
 
 ```bash
-repolens index /absolute/path/to/repo
+uv build --out-dir /tmp/repolens-dist --clear
+uv tool install --force /tmp/repolens-dist/*.whl
 ```
 
-2. Configure your MCP client to start RepoLens over stdio:
+2. Configure your MCP client to start `repolens mcp /absolute/path/to/repo` over stdio. The
+installed-command examples below require no RepoLens checkout, project settings, or prior
+`repolens index` command.
+3. Ask the assistant to call `assistant_preflight` before broad file exploration. The first call
+discovers the repository root and initializes missing graph artifacts; later calls refresh stale
+artifacts and return bounded freshness and task context.
 
-```bash
-repolens mcp /absolute/path/to/repo
-```
-
-3. Ask the assistant to call `assistant_preflight` before broad file exploration. The preflight response includes graph freshness and bounded task context.
+Normal indexing and first use make no network calls and do not execute repository package
+managers, compilers, bundlers, or frameworks.
 
 ## Recommended Assistant Prompt
 
@@ -66,7 +69,7 @@ Before editing, call assistant_preflight for the task. Read the top First-Read F
 2. Check `freshness`, `warnings`, `limits`, `truncation`, `confidence`, and `budget_controls` before trusting ranked items.
 3. Read `first_read_files` first, then inspect `likely_tests`, `supporting_docs`, `supporting_configs`, `risk_signals`, and `candidate_verification_commands` as needed.
 4. Use `focus_hint` or `--focus-hint` when the task names a repo-relative path, module, package, or symbol and the initial result is too broad.
-5. If artifacts are missing or require rebuild, ask the user to run `repolens index` or `repolens update`; MCP tools remain read-only and do not update artifacts.
+5. Inspect `graph_lifecycle` to see whether preflight initialized, selectively updated, rebuilt, or reused the graph. Other MCP tools remain read-only graph queries.
 6. If a follow-up Context Pack is needed, request it for the same task instead of asking RepoLens for source snippets.
 
 ## Context Pack Workflow
@@ -204,16 +207,18 @@ Keep active editor config local unless you intentionally want to share it. After
 
 ## Setup Diagnostics
 
-Run these checks before connecting an assistant:
+Troubleshooting is separate from the primary connection path. If first use fails, run:
 
 ```bash
-uv run repolens --help
-uv run repolens index /absolute/path/to/repo
-uv run repolens status /absolute/path/to/repo
-uv run repolens preflight /absolute/path/to/repo "Check setup" --json
+repolens --help
+repolens preflight /absolute/path/to/repo "Check setup" --json
+repolens status /absolute/path/to/repo --json
 ```
 
-Expected result: status reports available artifacts, preflight reports freshness and bounded orientation metadata, and candidate verification commands remain marked as found but not run.
+Expected result: preflight reports its graph lifecycle, freshness, bounded orientation metadata,
+and candidate verification commands marked as found but not run. Errors use bounded problem
+codes and recommended actions without source or credential values. See `docs/troubleshooting.md`
+for explicit `index` and `update` recovery commands.
 
 ## Docker And PyPI Readiness Smokes
 
